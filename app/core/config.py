@@ -73,6 +73,9 @@ class Settings(BaseSettings):
     CACHE_ENABLED: bool = True
     CACHE_TTL_HOURS: int = 12
 
+    # Usage log
+    USAGE_LOG_RETENTION_DAYS: int = 30
+
     # HTTP client
     HTTP_TIMEOUT_SECONDS: int = 30
 

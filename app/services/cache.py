@@ -185,14 +185,11 @@ class CacheService:
         """
         try:
             current_time = datetime.utcnow()
-            expired_records = self.db.query(VideoCache).filter(
+            count = self.db.query(VideoCache).filter(
                 VideoCache.expires_at < current_time
-            ).all()
+            ).delete()
 
-            count = len(expired_records)
             if count > 0:
-                for record in expired_records:
-                    self.db.delete(record)
                 self.db.commit()
                 logger.info(f"清理了{count}条过期缓存记录")
 

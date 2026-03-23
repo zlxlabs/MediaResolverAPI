@@ -4,26 +4,16 @@ Media resolve API endpoint.
 Core API for resolving social media URLs into direct download links.
 """
 
+import time
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Security
-from fastapi.security import APIKeyHeader
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from loguru import logger
 from sqlalchemy.orm import Session
 
 from ..core.config import settings
-
-# API Key authentication
-_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
-
-
-async def verify_api_key(api_key: str = Security(_api_key_header)):
-    """Verify the API key from request header."""
-    if not settings.API_KEY:
-        return  # No API key configured, allow all requests
-    if not api_key or api_key != settings.API_KEY:
-        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+from .deps import verify_api_key
 from ..core.database import get_db
 from ..services.url_parser import url_parser
 from ..services.video_resolver import VideoResolver, VideoResolverError
@@ -111,6 +101,17 @@ async def resolve_url(
     original_url = request.url.strip()
     logger.info(f"Resolve request: {original_url}")
 
+    # Usage tracking context
+    start_time = time.monotonic()
+    log_data = {
+        "platform": None,
+        "video_id": None,
+        "provider": None,
+        "cache_hit": False,
+        "success": False,
+        "error_msg": None,
+    }
+
     try:
         # Step 1: Resolve short URL if needed
         if url_parser.is_short_url(original_url):
@@ -119,6 +120,7 @@ async def resolve_url(
             if resolved:
                 original_url = resolved
             else:
+                log_data["error_msg"] = "Failed to resolve short URL"
                 raise HTTPException(
                     status_code=400,
                     detail="Failed to resolve short URL",
@@ -126,7 +128,11 @@ async def resolve_url(
 
         # Step 2: Parse URL to identify platform and video ID
         platform, video_id = url_parser.parse_url(original_url)
+        log_data["platform"] = platform
+        log_data["video_id"] = video_id
+
         if not platform or not video_id:
+            log_data["error_msg"] = "Unsupported URL"
             raise HTTPException(
                 status_code=400,
                 detail=f"Unsupported URL or could not extract video ID: {original_url}",
@@ -142,6 +148,9 @@ async def resolve_url(
             )
             if cached_info:
                 logger.info(f"Cache hit: {platform}:{video_id}")
+                log_data["cache_hit"] = True
+                log_data["success"] = True
+                log_data["provider"] = cached_info.provider
                 return ResolveResponse(
                     success=True,
                     data=_build_response(
@@ -156,6 +165,7 @@ async def resolve_url(
             video_id=video_id,
             original_url=original_url,
         )
+        log_data["provider"] = provider_name
 
         # Step 5: Translate description (if requested and not Chinese)
         if request.translate and settings.TRANSLATION_ENABLED:
@@ -173,6 +183,7 @@ async def resolve_url(
         )
 
         # Step 7: Return response
+        log_data["success"] = True
         return ResolveResponse(
             success=True,
             data=_build_response(video_info, translated_desc),
@@ -182,10 +193,30 @@ async def resolve_url(
         raise
     except VideoResolverError as e:
         logger.error(f"Video resolution failed: {e}")
+        log_data["error_msg"] = str(e)[:500]
         return ResolveResponse(success=False, error=str(e))
     except Exception as e:
         logger.error(f"Unexpected error: {e}", exc_info=True)
+        log_data["error_msg"] = str(e)[:500]
         return ResolveResponse(success=False, error=f"Internal error: {str(e)}")
+    finally:
+        # Write usage log (never blocks response)
+        duration_ms = int((time.monotonic() - start_time) * 1000)
+        try:
+            from ..models.usage_log import UsageLog
+            usage_entry = UsageLog(
+                platform=log_data["platform"],
+                video_id=log_data["video_id"],
+                provider=log_data["provider"],
+                cache_hit=log_data["cache_hit"],
+                success=log_data["success"],
+                error_msg=log_data["error_msg"],
+                duration_ms=duration_ms,
+            )
+            db.add(usage_entry)
+            db.commit()
+        except Exception as log_err:
+            logger.warning(f"Failed to write usage log: {log_err}")
 
 
 def _build_response(video_info, translated_desc=None) -> VideoInfoResponse:

@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MediaResolver Dashboard</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --bg-card: #161b22;
+  --bg-input: #0d1117;
+  --border: #30363d;
+  --text: #e6edf3;
+  --text-muted: #8b949e;
+  --accent: #58a6ff;
+  --green: #3fb950;
+  --red: #f85149;
+  --orange: #d29922;
+  --radius: 8px;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); line-height: 1.5; }
+.container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+h1 { font-size: 1.5rem; margin-bottom: 20px; display: flex; align-items: center; gap: 10px; }
+h1 span { color: var(--accent); }
+h2 { font-size: 1.1rem; margin-bottom: 12px; color: var(--text-muted); font-weight: 500; }
+
+/* Auth */
+#auth-screen { display: flex; align-items: center; justify-content: center; min-height: 80vh; }
+#auth-box { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 32px; width: 380px; text-align: center; }
+#auth-box h2 { color: var(--text); margin-bottom: 16px; }
+#auth-box input { width: 100%; padding: 10px 12px; background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); font-size: 14px; margin-bottom: 12px; }
+#auth-box input:focus { outline: none; border-color: var(--accent); }
+#auth-error { color: var(--red); font-size: 13px; margin-bottom: 8px; display: none; }
+
+.btn { padding: 8px 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-card); color: var(--text); cursor: pointer; font-size: 14px; transition: border-color 0.2s; }
+.btn:hover { border-color: var(--accent); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-primary { background: #238636; border-color: #238636; }
+.btn-primary:hover { background: #2ea043; }
+.btn-danger { border-color: var(--red); color: var(--red); }
+.btn-danger:hover { background: rgba(248,81,73,0.1); }
+
+/* Dashboard */
+#dashboard { display: none; }
+.top-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+.top-bar .controls { display: flex; gap: 8px; align-items: center; }
+.period-select { padding: 6px 10px; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); font-size: 13px; }
+
+/* Stats cards */
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 24px; }
+.stat-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+.stat-card .label { font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
+.stat-card .value { font-size: 1.8rem; font-weight: 600; margin-top: 4px; }
+.stat-card .sub { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+
+/* Sections */
+.section { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; margin-bottom: 16px; }
+.section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+
+/* Provider health */
+.provider-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+.provider-card { border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; }
+.provider-card .name { font-weight: 600; margin-bottom: 4px; }
+.provider-card .meta { font-size: 12px; color: var(--text-muted); }
+.status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+.status-healthy { background: var(--green); }
+.status-degraded { background: var(--orange); }
+.status-down { background: var(--red); }
+.status-unknown { background: var(--text-muted); }
+
+/* Resolve tester */
+.resolve-form { display: flex; gap: 8px; margin-bottom: 12px; }
+.resolve-form input { flex: 1; padding: 8px 12px; background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); font-size: 14px; }
+.resolve-form input:focus { outline: none; border-color: var(--accent); }
+#resolve-result { font-size: 13px; max-height: 300px; overflow-y: auto; }
+#resolve-result pre { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; white-space: pre-wrap; word-break: break-all; font-size: 12px; }
+
+/* Table */
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; padding: 8px; color: var(--text-muted); border-bottom: 1px solid var(--border); font-weight: 500; }
+td { padding: 8px; border-bottom: 1px solid var(--border); }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 500; }
+.badge-success { background: rgba(63,185,80,0.15); color: var(--green); }
+.badge-error { background: rgba(248,81,73,0.15); color: var(--red); }
+.badge-cache { background: rgba(88,166,255,0.15); color: var(--accent); }
+
+/* Distribution bars */
+.dist-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 13px; }
+.dist-bar .name { width: 100px; text-align: right; color: var(--text-muted); }
+.dist-bar .bar-wrap { flex: 1; height: 20px; background: var(--bg); border-radius: 4px; overflow: hidden; }
+.dist-bar .bar { height: 100%; background: var(--accent); border-radius: 4px; transition: width 0.3s; min-width: 2px; }
+.dist-bar .count { width: 50px; font-size: 12px; color: var(--text-muted); }
+
+/* Cache management */
+.cache-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.cache-info { display: flex; gap: 16px; margin-bottom: 12px; font-size: 13px; color: var(--text-muted); }
+
+/* Responsive */
+@media (max-width: 768px) {
+  .stats-grid { grid-template-columns: repeat(2, 1fr); }
+  .resolve-form { flex-direction: column; }
+  table { font-size: 12px; }
+}
+</style>
+</head>
+<body>
+
+<!-- Auth Screen -->
+<div id="auth-screen">
+  <div id="auth-box">
+    <h2>MediaResolver Dashboard</h2>
+    <p style="color:var(--text-muted);margin-bottom:16px;font-size:14px">输入 API Key 以访问仪表盘</p>
+    <div id="auth-error">API Key 无效，请重试</div>
+    <input type="password" id="api-key-input" placeholder="API Key" autofocus>
+    <button class="btn btn-primary" style="width:100%" onclick="login()">登录</button>
+  </div>
+</div>
+
+<!-- Dashboard -->
+<div id="dashboard" class="container">
+  <div class="top-bar">
+    <h1><span>◆</span> MediaResolver Dashboard</h1>
+    <div class="controls">
+      <select class="period-select" id="period-select" onchange="loadStats()">
+        <option value="24h">最近 24 小时</option>
+        <option value="7d" selected>最近 7 天</option>
+        <option value="30d">最近 30 天</option>
+      </select>
+      <button class="btn" onclick="refreshAll()">刷新</button>
+      <button class="btn" onclick="logout()" style="font-size:12px">退出</button>
+    </div>
+  </div>
+
+  <!-- Stats Cards -->
+  <div class="stats-grid">
+    <div class="stat-card"><div class="label">总请求</div><div class="value" id="s-total">-</div></div>
+    <div class="stat-card"><div class="label">成功率</div><div class="value" id="s-success-rate">-</div><div class="sub" id="s-success-detail"></div></div>
+    <div class="stat-card"><div class="label">缓存命中率</div><div class="value" id="s-cache-rate">-</div><div class="sub" id="s-cache-detail"></div></div>
+    <div class="stat-card"><div class="label">平均耗时</div><div class="value" id="s-avg-dur">-</div></div>
+  </div>
+
+  <!-- Provider Health -->
+  <div class="section">
+    <h2>提供者状态</h2>
+    <div class="provider-grid" id="provider-health"></div>
+  </div>
+
+  <!-- Distributions -->
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+    <div class="section">
+      <h2>平台分布</h2>
+      <div id="platform-dist"></div>
+    </div>
+    <div class="section">
+      <h2>提供者分布</h2>
+      <div id="provider-dist"></div>
+    </div>
+  </div>
+
+  <!-- Resolve Tester -->
+  <div class="section">
+    <h2>解析测试</h2>
+    <div class="resolve-form">
+      <input type="text" id="resolve-url" placeholder="粘贴视频 URL（如 https://v.douyin.com/xxx）">
+      <button class="btn btn-primary" id="resolve-btn" onclick="testResolve()">解析</button>
+    </div>
+    <div id="resolve-result"></div>
+  </div>
+
+  <!-- Recent Requests -->
+  <div class="section">
+    <h2>最近请求</h2>
+    <table>
+      <thead><tr><th>时间</th><th>平台</th><th>视频ID</th><th>提供者</th><th>状态</th><th>耗时</th></tr></thead>
+      <tbody id="recent-tbody"></tbody>
+    </table>
+  </div>
+
+  <!-- Cache Management -->
+  <div class="section">
+    <div class="section-header">
+      <h2>缓存管理</h2>
+    </div>
+    <div class="cache-info" id="cache-info"></div>
+    <div class="cache-actions">
+      <button class="btn btn-danger" onclick="clearExpiredCache()">清理过期缓存</button>
+    </div>
+    <div id="cache-msg" style="margin-top:8px;font-size:13px"></div>
+  </div>
+</div>
+
+<script>
+const API_BASE = window.location.origin;
+let apiKey = localStorage.getItem('mr_api_key') || '';
+let refreshTimer = null;
+
+function headers() {
+  return { 'Content-Type': 'application/json', 'X-API-Key': apiKey };
+}
+
+async function apiFetch(path, opts = {}) {
+  const resp = await fetch(API_BASE + path, { headers: headers(), ...opts });
+  if (resp.status === 401) { logout(); throw new Error('Unauthorized'); }
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return resp.json();
+}
+
+// Auth
+async function login() {
+  const input = document.getElementById('api-key-input');
+  const key = input.value.trim();
+  if (!key) return;
+  apiKey = key;
+  try {
+    await apiFetch('/api/dashboard/stats/overview?period=24h');
+    localStorage.setItem('mr_api_key', key);
+    showDashboard();
+  } catch {
+    document.getElementById('auth-error').style.display = 'block';
+    apiKey = '';
+  }
+}
+document.getElementById('api-key-input').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
+
+function logout() {
+  apiKey = '';
+  localStorage.removeItem('mr_api_key');
+  document.getElementById('auth-screen').style.display = 'flex';
+  document.getElementById('dashboard').style.display = 'none';
+  if (refreshTimer) clearInterval(refreshTimer);
+}
+
+function showDashboard() {
+  document.getElementById('auth-screen').style.display = 'none';
+  document.getElementById('dashboard').style.display = 'block';
+  refreshAll();
+  refreshTimer = setInterval(refreshAll, 30000);
+}
+
+// Data loading
+async function loadStats() {
+  try {
+    const period = document.getElementById('period-select').value;
+    const data = await apiFetch(`/api/dashboard/stats/overview?period=${period}`);
+    document.getElementById('s-total').textContent = data.total_requests;
+    const sr = data.total_requests ? Math.round(data.successful_requests / data.total_requests * 100) : 0;
+    document.getElementById('s-success-rate').textContent = sr + '%';
+    document.getElementById('s-success-detail').textContent = `${data.successful_requests} 成功 / ${data.failed_requests} 失败`;
+    document.getElementById('s-cache-rate').textContent = data.cache_hit_rate + '%';
+    document.getElementById('s-cache-detail').textContent = `${data.cache_hit_count} 次命中`;
+    document.getElementById('s-avg-dur').textContent = data.avg_duration_ms ? Math.round(data.avg_duration_ms) + 'ms' : '-';
+    renderDist('platform-dist', data.platform_distribution);
+    renderDist('provider-dist', data.provider_distribution);
+  } catch (e) { console.error('Stats load failed:', e); }
+}
+
+function renderDist(id, dist) {
+  const el = document.getElementById(id);
+  const entries = Object.entries(dist).sort((a, b) => b[1] - a[1]);
+  if (!entries.length) { el.innerHTML = '<div style="color:var(--text-muted);font-size:13px">暂无数据</div>'; return; }
+  const max = Math.max(...entries.map(e => e[1]));
+  el.innerHTML = entries.map(([name, count]) => `
+    <div class="dist-bar">
+      <span class="name">${name}</span>
+      <div class="bar-wrap"><div class="bar" style="width:${Math.round(count/max*100)}%"></div></div>
+      <span class="count">${count}</span>
+    </div>`).join('');
+}
+
+async function loadProviderHealth() {
+  try {
+    const data = await apiFetch('/api/dashboard/stats/provider-health');
+    const el = document.getElementById('provider-health');
+    if (!data.length) { el.innerHTML = '<div style="color:var(--text-muted)">暂无数据</div>'; return; }
+    el.innerHTML = data.map(p => `
+      <div class="provider-card">
+        <div class="name"><span class="status-dot status-${p.status}"></span>${p.provider}</div>
+        <div class="meta">
+          ${p.total_calls} 次调用 · 成功率 ${p.success_rate}%
+          ${p.avg_duration_ms ? ' · 平均 ' + Math.round(p.avg_duration_ms) + 'ms' : ''}
+        </div>
+      </div>`).join('');
+  } catch (e) { console.error('Provider health load failed:', e); }
+}
+
+async function loadRecent() {
+  try {
+    const data = await apiFetch('/api/dashboard/stats/recent?limit=20');
+    const tbody = document.getElementById('recent-tbody');
+    if (!data.length) { tbody.innerHTML = '<tr><td colspan="6" style="color:var(--text-muted);text-align:center">暂无记录</td></tr>'; return; }
+    tbody.innerHTML = data.map(r => {
+      const time = r.created_at ? new Date(r.created_at).toLocaleString('zh-CN') : '-';
+      const vid = r.video_id ? (r.video_id.length > 16 ? r.video_id.slice(0,16) + '…' : r.video_id) : '-';
+      let badge;
+      if (r.cache_hit) badge = '<span class="badge badge-cache">缓存</span>';
+      else if (r.success) badge = '<span class="badge badge-success">成功</span>';
+      else badge = `<span class="badge badge-error" title="${r.error_msg || ''}">失败</span>`;
+      return `<tr><td>${time}</td><td>${r.platform || '-'}</td><td>${vid}</td><td>${r.provider || '-'}</td><td>${badge}</td><td>${r.duration_ms != null ? r.duration_ms + 'ms' : '-'}</td></tr>`;
+    }).join('');
+  } catch (e) { console.error('Recent load failed:', e); }
+}
+
+async function loadCacheStats() {
+  try {
+    const data = await apiFetch('/api/dashboard/cache/stats');
+    document.getElementById('cache-info').innerHTML =
+      `<span>缓存总数: <b>${data.total_cached}</b></span>` +
+      `<span>已过期: <b>${data.expired_count}</b></span>` +
+      Object.entries(data.platform_distribution).map(([k,v]) => `<span>${k}: ${v}</span>`).join('');
+  } catch (e) { console.error('Cache stats failed:', e); }
+}
+
+function refreshAll() { loadStats(); loadProviderHealth(); loadRecent(); loadCacheStats(); }
+
+// Resolve tester
+async function testResolve() {
+  const url = document.getElementById('resolve-url').value.trim();
+  if (!url) return;
+  const btn = document.getElementById('resolve-btn');
+  const result = document.getElementById('resolve-result');
+  btn.disabled = true; btn.textContent = '解析中…';
+  result.innerHTML = '';
+  try {
+    const data = await apiFetch('/api/resolve', {
+      method: 'POST',
+      body: JSON.stringify({ url, translate: true }),
+    });
+    result.innerHTML = `<pre>${JSON.stringify(data, null, 2)}</pre>`;
+    refreshAll();
+  } catch (e) {
+    result.innerHTML = `<pre style="color:var(--red)">请求失败: ${e.message}</pre>`;
+  } finally {
+    btn.disabled = false; btn.textContent = '解析';
+  }
+}
+
+// Cache management
+async function clearExpiredCache() {
+  try {
+    const data = await apiFetch('/api/dashboard/cache/clear-expired', { method: 'POST' });
+    document.getElementById('cache-msg').innerHTML =
+      `<span style="color:var(--green)">已清理 ${data.cleared} 条过期缓存</span>`;
+    loadCacheStats();
+    setTimeout(() => { document.getElementById('cache-msg').innerHTML = ''; }, 3000);
+  } catch (e) {
+    document.getElementById('cache-msg').innerHTML =
+      `<span style="color:var(--red)">清理失败: ${e.message}</span>`;
+  }
+}
+
+// Init
+if (apiKey) {
+  apiFetch('/api/dashboard/stats/overview?period=24h').then(() => showDashboard()).catch(() => {
+    apiKey = ''; localStorage.removeItem('mr_api_key');
+  });
+}
+</script>
+</body>
+</html>
