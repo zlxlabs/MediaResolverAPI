@@ -4,7 +4,7 @@
 """
 
 from typing import Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from sqlalchemy.orm import Session
 from loguru import logger
 
@@ -121,8 +121,8 @@ class CacheService:
                 existing_cache.video_data = cache_data
                 existing_cache.translated_desc = translated_desc
                 existing_cache.provider = video_info.provider or "tikhub"
-                existing_cache.cached_at = datetime.utcnow()
-                existing_cache.expires_at = datetime.utcnow() + \
+                existing_cache.cached_at = datetime.now(timezone.utc)
+                existing_cache.expires_at = datetime.now(timezone.utc) + \
                     timedelta(hours=settings.CACHE_TTL_HOURS)
                 logger.info(f"更新缓存: {platform}:{video_id}")
             else:
@@ -184,7 +184,7 @@ class CacheService:
             int: 清理的记录数量
         """
         try:
-            current_time = datetime.utcnow()
+            current_time = datetime.now(timezone.utc)
             count = self.db.query(VideoCache).filter(
                 VideoCache.expires_at < current_time
             ).delete()

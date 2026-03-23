@@ -6,7 +6,7 @@ Cobalt 响应数据适配器
 """
 
 from typing import Dict, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from loguru import logger
 import re
 from urllib.parse import urlparse
@@ -133,7 +133,7 @@ class CobaltAdapter:
                 comment_count=None,  # Cobalt 不提供
                 share_count=None,  # Cobalt 不提供
                 collect_count=None,  # Cobalt 不提供
-                create_time=datetime.now(),  # 使用当前时间
+                create_time=datetime.now(timezone.utc),  # 使用当前UTC时间
                 publish_time=None,  # Cobalt 不提供
                 provider="cobalt",  # 数据提供者
                 raw_data=raw_data  # 保存原始数据

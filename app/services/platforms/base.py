@@ -6,7 +6,7 @@
 from abc import ABC, abstractmethod
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 @dataclass
@@ -186,7 +186,7 @@ class BasePlatformService(ABC):
             if ts > 10**10:  # 毫秒时间戳
                 ts = ts / 1000
 
-            return datetime.fromtimestamp(ts)
+            return datetime.fromtimestamp(ts, tz=timezone.utc)
         except (ValueError, OSError):
             return None
 

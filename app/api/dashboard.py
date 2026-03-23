@@ -5,7 +5,7 @@ Provides statistics, cache management, and provider health data
 for the web dashboard.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -171,7 +171,7 @@ async def stats_recent(
                 success=r.success if r.success is not None else True,
                 error_msg=r.error_msg,
                 duration_ms=r.duration_ms,
-                created_at=r.created_at.isoformat() if r.created_at else "",
+                created_at=r.created_at.replace(tzinfo=timezone.utc).isoformat() if r.created_at else "",
             )
             for r in rows
         ]
@@ -185,7 +185,7 @@ async def provider_health(db: Session = Depends(get_db)):
     """Get provider health status based on recent usage data."""
     try:
         # Look at last 1 hour of non-cache-hit requests
-        cutoff = datetime.utcnow() - timedelta(hours=1)
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
 
         providers = ["tikhub", "cobalt"]
         results = []
@@ -240,7 +240,7 @@ async def provider_health(db: Session = Depends(get_db)):
 async def cache_stats(db: Session = Depends(get_db)):
     """Get cache statistics."""
     try:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         total = db.query(VideoCache).count()
         expired = db.query(VideoCache).filter(VideoCache.expires_at < now).count()
 
@@ -296,7 +296,7 @@ async def delete_cache_entry(
 
 def _period_to_cutoff(period: str) -> datetime:
     """Convert period string to datetime cutoff."""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     if period == "24h":
         return now - timedelta(hours=24)
     elif period == "7d":

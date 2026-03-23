@@ -2,7 +2,7 @@
 视频缓存数据库模型
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from sqlalchemy import Column, Integer, String, DateTime, JSON, Index, Text
 from sqlalchemy.sql import func
 
@@ -35,12 +35,13 @@ class VideoCache(Base):
         super().__init__(**kwargs)
         if not self.expires_at:
             # 设置过期时间为当前时间 + 缓存TTL小时数
-            self.expires_at = datetime.utcnow() + timedelta(hours=settings.CACHE_TTL_HOURS)
+            self.expires_at = datetime.now(timezone.utc) + timedelta(hours=settings.CACHE_TTL_HOURS)
 
     @property
     def is_expired(self) -> bool:
         """检查缓存是否已过期"""
-        return datetime.utcnow() > self.expires_at
+        expires = self.expires_at.replace(tzinfo=timezone.utc) if self.expires_at.tzinfo is None else self.expires_at
+        return datetime.now(timezone.utc) > expires
 
     def __repr__(self):
         return f"<VideoCache(platform={self.platform}, video_id={self.video_id}, expired={self.is_expired})>"
