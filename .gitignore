@@ -10,3 +10,14 @@ logs/
 *.db
 .pytest_cache/
 .mypy_cache/
+
+# Docker
+docker/export/
+docker/deploy_targets.json
+docker/push_to_acr.bat
+docker/push_to_acr.sh
+docker/push_to_ghcr.sh
+docker/push_to_ghcr.bat
+docker/push_to_dockerhub.sh
+docker/push_to_dockerhub.bat
+docker/pull_and_deploy.sh
