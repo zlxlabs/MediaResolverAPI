@@ -6,19 +6,31 @@ Core API for resolving social media URLs into direct download links.
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Security
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 from loguru import logger
 from sqlalchemy.orm import Session
 
 from ..core.config import settings
+
+# API Key authentication
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+async def verify_api_key(api_key: str = Security(_api_key_header)):
+    """Verify the API key from request header."""
+    if not settings.API_KEY:
+        return  # No API key configured, allow all requests
+    if not api_key or api_key != settings.API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
 from ..core.database import get_db
 from ..services.url_parser import url_parser
 from ..services.video_resolver import VideoResolver, VideoResolverError
 from ..services.cache import CacheService
 from ..services.translation.openai import TranslationService
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(verify_api_key)])
 
 # Shared service instances
 _video_resolver: Optional[VideoResolver] = None

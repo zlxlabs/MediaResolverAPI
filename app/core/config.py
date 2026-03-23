@@ -45,6 +45,9 @@ class Settings(BaseSettings):
             db_absolute_path.parent.mkdir(parents=True, exist_ok=True)
             self.DATABASE_URL = f"sqlite:///{db_absolute_path}"
 
+    # API Authentication
+    API_KEY: str = ""
+
     # TikHub API
     TIKHUB_API_BASE: str = "https://api.tikhub.io"
     TIKHUB_API_KEY: str = ""
