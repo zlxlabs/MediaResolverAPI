@@ -38,6 +38,7 @@ class CobaltAdapter:
         "instagram": r"instagram\.com/([^/]+)/",
         "youtube": r"@([^/]+)",
         "pinterest": r"pinterest\.com/([^/]+)/",
+        "facebook": r"facebook\.com/([^/]+)/",
     }
 
     def adapt(self, raw_data: Dict, platform: str, video_id: str, original_url: str) -> Optional[VideoInfo]:
@@ -56,7 +57,15 @@ class CobaltAdapter:
         try:
             status = raw_data.get("status")
 
-            # 处理 picker 类型（多个文件）
+            logger.debug(
+                f"Adapting Cobalt response",
+                status=status,
+                platform=platform,
+                video_id=video_id,
+                raw_keys=list(raw_data.keys())
+            )
+
+            # Handle picker type (multiple files)
             if status == "picker":
                 logger.warning(
                     f"Cobalt returned picker type, using first video",
@@ -68,14 +77,26 @@ class CobaltAdapter:
                     logger.error("Cobalt picker response has no items")
                     return None
 
-                # 找到第一个视频类型的项
+                # Find the first video type item
                 video_item = next((item for item in picker_items if item.get("type") == "video"), None)
                 if not video_item:
                     logger.error("No video found in Cobalt picker response")
                     return None
 
                 video_url = video_item.get("url")
+            # Handle stream/redirect/tunnel types (all have url field)
+            elif status in ["stream", "redirect", "tunnel"]:
+                video_url = raw_data.get("url")
+            # Handle local-processing type (Cobalt v10+)
+            elif status == "local-processing":
+                video_url = raw_data.get("url")
+                if not video_url:
+                    output = raw_data.get("output", {})
+                    if isinstance(output, dict):
+                        video_url = output.get("tunnel") or output.get("url")
+                logger.debug(f"local-processing video_url: {video_url}")
             else:
+                logger.warning(f"Unknown Cobalt status: {status}, attempting to get url anyway")
                 video_url = raw_data.get("url")
 
             if not video_url:
@@ -161,6 +182,7 @@ class CobaltAdapter:
             "youtube": "YouTube",
             "xiaohongshu": "Xiaohongshu",
             "pinterest": "Pinterest",
+            "facebook": "Facebook",
         }
         platform_name = platform_names.get(platform, platform.capitalize())
         return f"Video from {platform_name}"

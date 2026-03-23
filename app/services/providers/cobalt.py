@@ -10,7 +10,6 @@ from loguru import logger
 
 from .base import BaseProvider, ProviderError, VideoNotFoundError
 from ...core.config import settings
-from ...utils.http_client import HTTPClient
 
 
 class CobaltProvider(BaseProvider):
@@ -23,6 +22,7 @@ class CobaltProvider(BaseProvider):
     - youtube
     - xiaohongshu
     - pinterest
+    - facebook
 
     注意：Cobalt 返回的信息较少，主要用于获取视频下载链接
     """
@@ -34,6 +34,7 @@ class CobaltProvider(BaseProvider):
         "youtube",
         "xiaohongshu",
         "pinterest",
+        "facebook",
     ]
 
     def __init__(self):
@@ -103,37 +104,102 @@ class CobaltProvider(BaseProvider):
         )
 
         try:
-            async with HTTPClient() as client:
+            # Use standard httpx client to avoid conflicts with HTTPClient
+            import httpx
+
+            self.log_info(f"Sending request to Cobalt API: {self.api_base}")
+
+            async with httpx.AsyncClient(timeout=60.0) as client:
                 response = await client.post(
                     self.api_base,
                     json={"url": original_url},
                     headers={
                         "Accept": "application/json",
                         "Content-Type": "application/json"
-                    },
-                    timeout=60.0  # 60秒超时
+                    }
+                )
+
+                response_text_preview = response.text[:500] if response.text else "Empty"
+                self.log_info(
+                    f"Cobalt API response: status={response.status_code}, "
+                    f"content_type={response.headers.get('content-type', 'unknown')}, "
+                    f"length={len(response.text) if response.text else 0}"
                 )
 
                 if response.status_code != 200:
+                    self.log_error(
+                        f"Cobalt API returned non-200: status={response.status_code}, "
+                        f"body={response_text_preview}"
+                    )
                     raise ProviderError(
-                        f"Cobalt API returned error: {response.status_code} - {response.text}"
+                        f"Cobalt API error {response.status_code}: {response_text_preview[:200]}"
                     )
 
-                data = response.json()
+                # Parse JSON response
+                try:
+                    data = response.json()
+                except Exception as json_err:
+                    self.log_error(
+                        f"Failed to parse Cobalt JSON response: {json_err}",
+                        response_text=response.text[:500] if response.text else "Empty"
+                    )
+                    raise ProviderError(f"Invalid JSON response from Cobalt: {response.text[:200]}")
 
-                # 检查响应状态
+                # Log raw response for debugging
+                self.log_info(
+                    f"Cobalt raw response received",
+                    response_type=type(data).__name__,
+                    response_keys=list(data.keys()) if isinstance(data, dict) else None,
+                    response_preview=str(data)[:300]
+                )
+
+                # Validate response is a dictionary
+                if not isinstance(data, dict):
+                    raise ProviderError(
+                        f"Unexpected Cobalt response type: {type(data).__name__}, "
+                        f"expected dict. Response: {str(data)[:200]}"
+                    )
+
+                # Check response status
                 status = data.get("status")
 
                 if status == "error":
-                    error_code = data.get("error", {}).get("code", "unknown")
+                    # Handle error response - support both old and new format
+                    error_info = data.get("error", {})
+                    if isinstance(error_info, dict):
+                        error_code = error_info.get("code", "unknown")
+                    else:
+                        error_code = str(error_info)
                     raise VideoNotFoundError(f"Cobalt error: {error_code}")
 
-                if status not in ["redirect", "tunnel", "picker"]:
-                    raise ProviderError(f"Unexpected Cobalt response status: {status}")
+                # Support all Cobalt status types:
+                # - tunnel/redirect: direct download
+                # - stream: streaming (legacy)
+                # - local-processing: local processing (Cobalt v10+)
+                # - picker: multiple options
+                valid_statuses = ["redirect", "tunnel", "picker", "stream", "local-processing"]
+                if status not in valid_statuses:
+                    raise ProviderError(
+                        f"Unexpected Cobalt response status: '{status}'. "
+                        f"Valid statuses: {valid_statuses}. "
+                        f"Full response: {str(data)[:300]}"
+                    )
 
-                # 验证必要字段
-                if status in ["redirect", "tunnel"] and "url" not in data:
-                    raise ProviderError("Cobalt response missing 'url' field")
+                # Validate required fields based on status type
+                if status in ["redirect", "tunnel", "stream"]:
+                    if "url" not in data:
+                        raise ProviderError(
+                            f"Cobalt response missing 'url' field for status '{status}'. "
+                            f"Response: {str(data)[:300]}"
+                        )
+                elif status == "local-processing":
+                    output = data.get("output", {})
+                    if "url" not in data and "tunnel" not in output:
+                        self.log_warning(
+                            f"local-processing response structure",
+                            data_keys=list(data.keys()),
+                            output_keys=list(output.keys()) if isinstance(output, dict) else None
+                        )
 
                 self.log_info(
                     f"Successfully fetched video info from Cobalt",
@@ -152,9 +218,10 @@ class CobaltProvider(BaseProvider):
         except (VideoNotFoundError, ProviderError):
             raise
         except Exception as e:
+            import traceback
+            tb_str = traceback.format_exc()
             self.log_error(
-                f"Failed to fetch video info from Cobalt: {e}",
-                platform=platform,
-                video_id=video_id
+                f"Failed to fetch video info from Cobalt: {type(e).__name__}: {e}\n"
+                f"Traceback:\n{tb_str}"
             )
-            raise ProviderError(f"Cobalt API request failed: {str(e)}")
+            raise ProviderError(f"Cobalt API request failed: {type(e).__name__}: {str(e)}")

@@ -4,6 +4,9 @@ TikHub 视频信息提供者
 封装对 TikHub API 的调用，支持多个平台的视频信息获取
 """
 
+import json
+from datetime import datetime
+from pathlib import Path
 from typing import Dict, Optional
 from loguru import logger
 
@@ -152,6 +155,8 @@ class TikHubProvider(BaseProvider):
                         response_keys=list(data.keys()) if isinstance(data, dict) else None,
                         data_keys=list(data.get("data", {}).keys()) if isinstance(data, dict) and "data" in data else None
                     )
+                    # Save failed response to logs folder for debugging
+                    self._save_failed_response(data, platform, video_id)
                     raise VideoNotFoundError(f"Invalid video data returned from TikHub")
 
                 self.log_info(
@@ -219,3 +224,45 @@ class TikHubProvider(BaseProvider):
             return "medias" in inner_data or "full_name" in inner_data or "is_video" in response_data
 
         return True
+
+    def _save_failed_response(self, data: Dict, platform: str, video_id: str) -> None:
+        """
+        Save failed TikHub response to logs folder for debugging.
+
+        Args:
+            data: The response data from TikHub API
+            platform: Platform name
+            video_id: Video ID
+        """
+        try:
+            # Get logs directory path
+            logs_dir = Path(settings.LOG_FILE_PATH)
+            if not logs_dir.is_absolute():
+                # Find project root (contains pyproject.toml)
+                current_file = Path(__file__)
+                project_root = current_file
+                while project_root.parent != project_root:
+                    if (project_root / "pyproject.toml").exists():
+                        break
+                    project_root = project_root.parent
+                if not (project_root / "pyproject.toml").exists():
+                    project_root = Path.cwd()
+                logs_dir = project_root / logs_dir
+
+            # Create tikhub_failures subdirectory
+            failures_dir = logs_dir / "tikhub_failures"
+            failures_dir.mkdir(parents=True, exist_ok=True)
+
+            # Generate filename with timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{timestamp}_{platform}_{video_id}.json"
+            filepath = failures_dir / filename
+
+            # Save response data
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+
+            logger.info(f"Failed TikHub response saved to {filepath}")
+
+        except Exception as e:
+            logger.warning(f"Failed to save TikHub response to file: {e}")

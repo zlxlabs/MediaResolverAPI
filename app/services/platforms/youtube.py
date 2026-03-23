@@ -2,7 +2,8 @@
 YouTube平台解析服务
 """
 
-from typing import Optional, Dict, Any
+import re
+from typing import Optional, Dict, Any, List
 from loguru import logger
 
 from .base import BasePlatformService, VideoInfo
@@ -120,7 +121,7 @@ class YouTubeService(BasePlatformService):
     def _select_best_video(self, videos: list) -> Optional[Dict[str, Any]]:
         """
         选择最佳质量的视频流
-        优先选择有音频且质量在720p-1080p之间的视频
+        优先级: 1. 清晰度 (1080p > 4K > 2K > 720p > ...)  2. 有音频优先
 
         Args:
             videos: 视频流列表
@@ -129,27 +130,126 @@ class YouTubeService(BasePlatformService):
             Optional[Dict[str, Any]]: 最佳视频流
         """
         if not videos:
+            logger.warning("YouTube: No video streams available in response")
             return None
 
-        # 筛选有音频的视频
-        with_audio = [v for v in videos if self._safe_get(v, "hasAudio")]
-        if not with_audio:
-            # 如果没有带音频的，选择第一个可用的
-            return videos[0] if videos else None
+        # Log all available video streams
+        self._log_available_streams(videos)
 
-        # 按质量排序，优先选择720p-1080p
+        # Sort by: 1) quality priority (higher first), 2) has audio (True first)
+        sorted_videos = sorted(
+            videos,
+            key=lambda v: (self._get_quality_score(v), self._safe_get(v, "hasAudio", False)),
+            reverse=True
+        )
+
+        best_video = sorted_videos[0]
+        has_audio = self._safe_get(best_video, "hasAudio", False)
+
+        # Count streams with audio for logging
+        audio_count = sum(1 for v in videos if self._safe_get(v, "hasAudio", False))
+        logger.info(f"YouTube: {audio_count} streams with audio out of {len(videos)} total")
+
+        self._log_selected_stream(best_video, has_audio=has_audio)
+        return best_video
+
+    def _get_quality_score(self, video: Dict[str, Any]) -> int:
+        """
+        Calculate quality score for a video stream.
+        Priority: 1080p > 4K > 2K > 720p > other resolutions by height
+
+        Args:
+            video: Video stream info dict
+
+        Returns:
+            int: Quality score (higher is better)
+        """
+        # Custom priority: 1080p is preferred, then 4K, 2K, 720p, etc.
+        # Higher score = higher priority
         quality_priority = {
-            "1080p": 100,
-            "720p": 90,
-            "480p": 80,
-            "360p": 70,
-            "240p": 60,
+            "1080p": 10000,  # Top priority
+            "2160p": 9000,   # 4K
+            "1440p": 8000,   # 2K
+            "720p": 7000,    # HD
+            "4320p": 6000,   # 8K (usually too large)
+            "480p": 5000,    # SD
+            "360p": 4000,
+            "240p": 3000,
+            "144p": 2000,
         }
 
-        def get_quality_score(video):
-            quality = self._safe_get(video, "quality", "")
-            return quality_priority.get(quality, 0)
+        quality = self._safe_get(video, "quality", "")
 
-        # 选择质量分数最高的
-        best_video = max(with_audio, key=get_quality_score)
-        return best_video
+        # Check predefined priorities first
+        if quality in quality_priority:
+            return quality_priority[quality]
+
+        # Try to parse numeric resolution from quality string (e.g., "1080p60" -> 1080)
+        match = re.search(r"(\d+)p", quality)
+        if match:
+            resolution = int(match.group(1))
+            # Map parsed resolution to priority score
+            if resolution == 1080:
+                return 10000
+            elif resolution == 2160:
+                return 9000
+            elif resolution == 1440:
+                return 8000
+            elif resolution == 720:
+                return 7000
+            else:
+                # Other resolutions: use height value as base score
+                return resolution
+
+        # Fallback: try to use height as score
+        height = self._safe_get(video, "height", 0)
+        if height:
+            return height
+
+        # Unknown quality, return lowest priority
+        return 0
+
+    def _log_available_streams(self, videos: List[Dict[str, Any]]) -> None:
+        """
+        Log all available video streams with their quality and format info.
+
+        Args:
+            videos: List of video stream dicts
+        """
+        logger.info(f"YouTube: Available video streams ({len(videos)} total):")
+
+        for i, v in enumerate(videos):
+            quality = self._safe_get(v, "quality", "unknown")
+            width = self._safe_get(v, "width", 0)
+            height = self._safe_get(v, "height", 0)
+            has_audio = self._safe_get(v, "hasAudio", False)
+            mime_type = self._safe_get(v, "mimeType", "unknown")
+            bitrate = self._safe_get(v, "bitrate", 0)
+
+            # Format bitrate for readability
+            bitrate_str = f"{bitrate // 1000}kbps" if bitrate else "N/A"
+            audio_str = "audio:yes" if has_audio else "audio:no"
+
+            logger.info(
+                f"  [{i+1}] {quality} ({width}x{height}) {audio_str} {bitrate_str} [{mime_type}]"
+            )
+
+    def _log_selected_stream(self, video: Dict[str, Any], has_audio: bool) -> None:
+        """
+        Log the selected video stream details.
+
+        Args:
+            video: Selected video stream dict
+            has_audio: Whether the stream has audio
+        """
+        quality = self._safe_get(video, "quality", "unknown")
+        width = self._safe_get(video, "width", 0)
+        height = self._safe_get(video, "height", 0)
+        mime_type = self._safe_get(video, "mimeType", "unknown")
+        bitrate = self._safe_get(video, "bitrate", 0)
+        bitrate_str = f"{bitrate // 1000}kbps" if bitrate else "N/A"
+
+        logger.info(
+            f"YouTube: Selected stream -> {quality} ({width}x{height}) "
+            f"has_audio:{has_audio} {bitrate_str} [{mime_type}]"
+        )

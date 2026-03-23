@@ -24,6 +24,7 @@ class URLParser:
         'xhslink.com',       # 小红书短链
         'youtu.be',          # YouTube短链
         'pin.it',            # Pinterest短链
+        'fb.watch',          # Facebook短链
     }
 
     # 平台域名映射
@@ -54,6 +55,10 @@ class URLParser:
         # Pinterest
         'pinterest.com': 'pinterest',
         'pin.it': 'pinterest',
+
+        # Facebook
+        'facebook.com': 'facebook',
+        'fb.watch': 'facebook',
     }
 
     def parse_url(self, url: str) -> Tuple[Optional[str], Optional[str]]:
@@ -143,6 +148,7 @@ class URLParser:
             'xiaohongshu': self._extract_xiaohongshu_id,
             'instagram': self._extract_instagram_id,
             'pinterest': self._extract_pinterest_id,
+            'facebook': self._extract_facebook_id,
         }
 
         extractor = extractors.get(platform)
@@ -254,6 +260,53 @@ class URLParser:
             shortcode = parsed.path.lstrip('/')
             if shortcode:
                 return shortcode  # 返回短链接代码，后续需要展开
+
+        return None
+
+    def _extract_facebook_id(self, url: str) -> Optional[str]:
+        """
+        提取Facebook视频ID
+
+        支持的 URL 格式：
+        - https://www.facebook.com/reel/622490636870155
+        - https://www.facebook.com/watch?v=622490636870155
+        - https://www.facebook.com/username/videos/622490636870155
+        - https://fb.watch/xxx (短链)
+        - https://www.facebook.com/share/v/xxx/ (分享短链)
+        - https://www.facebook.com/share/r/xxx/ (Reel分享短链)
+        """
+        # Reel 格式
+        if '/reel/' in url:
+            match = re.search(r'/reel/(\d+)', url)
+            if match:
+                return match.group(1)
+
+        # Watch 格式 (?v=参数)
+        if 'watch' in url and 'v=' in url:
+            parsed = urlparse(url)
+            query_params = parse_qs(parsed.query)
+            video_id = query_params.get('v', [None])[0]
+            if video_id:
+                return video_id
+
+        # Videos 格式
+        if '/videos/' in url:
+            match = re.search(r'/videos/(\d+)', url)
+            if match:
+                return match.group(1)
+
+        # 分享短链格式: /share/v/xxx 或 /share/r/xxx
+        if '/share/' in url:
+            match = re.search(r'/share/[vr]/([a-zA-Z0-9_-]+)', url)
+            if match:
+                return match.group(1)
+
+        # fb.watch 短链接格式（需要展开）
+        if 'fb.watch' in url:
+            parsed = urlparse(url)
+            shortcode = parsed.path.lstrip('/')
+            if shortcode:
+                return shortcode
 
         return None
 

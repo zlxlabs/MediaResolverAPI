@@ -10,6 +10,7 @@ from .xiaohongshu import XiaohongshuService
 from .kuaishou import KuaishouService
 from .instagram import InstagramService
 from .pinterest import PinterestService
+from .facebook import FacebookService
 
 __all__ = [
     "VideoInfo",
@@ -21,4 +22,5 @@ __all__ = [
     "KuaishouService",
     "InstagramService",
     "PinterestService",
+    "FacebookService",
 ]

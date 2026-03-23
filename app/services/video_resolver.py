@@ -52,13 +52,24 @@ class VideoResolver:
         """
         构建每个平台的提供者优先级链
 
+        优先读取环境变量中的自定义配置，如果没有配置则使用默认值。
+        环境变量格式: PROVIDER_PRIORITY_<PLATFORM>="provider1,provider2"
+        例如: PROVIDER_PRIORITY_TIKTOK="cobalt" 表示 TikTok 只使用 Cobalt
+
         Returns:
             Dict[str, List[BaseProvider]]: 平台到提供者列表的映射
         """
+        # 提供者名称到实例的映射
+        provider_map = {
+            "tikhub": self.tikhub_provider,
+            "cobalt": self.cobalt_provider,
+        }
+
         # 默认配置
         default_chains = {
-            # Pinterest 只支持 Cobalt
+            # Pinterest 和 Facebook 只支持 Cobalt
             "pinterest": [self.cobalt_provider],
+            "facebook": [self.cobalt_provider],
 
             # 其他平台优先使用 TikHub，失败后降级到 Cobalt
             "tiktok": [self.tikhub_provider, self.cobalt_provider],
@@ -71,12 +82,35 @@ class VideoResolver:
             "kuaishou": [self.tikhub_provider],
         }
 
-        # 从配置文件读取自定义优先级（如果有）
-        custom_priority = getattr(settings, "PROVIDER_PRIORITY", {})
-        if custom_priority:
-            logger.info(f"Using custom provider priority: {custom_priority}")
-            # 这里可以实现从配置文件解析优先级的逻辑
-            # 暂时使用默认配置
+        # 从配置文件读取自定义优先级并覆盖默认配置
+        platform_config_map = {
+            "tiktok": settings.PROVIDER_PRIORITY_TIKTOK,
+            "instagram": settings.PROVIDER_PRIORITY_INSTAGRAM,
+            "xiaohongshu": settings.PROVIDER_PRIORITY_XIAOHONGSHU,
+            "youtube": settings.PROVIDER_PRIORITY_YOUTUBE,
+            "pinterest": settings.PROVIDER_PRIORITY_PINTEREST,
+            "facebook": settings.PROVIDER_PRIORITY_FACEBOOK,
+            "douyin": settings.PROVIDER_PRIORITY_DOUYIN,
+            "kuaishou": settings.PROVIDER_PRIORITY_KUAISHOU,
+        }
+
+        for platform, priority_config in platform_config_map.items():
+            if priority_config:
+                # 解析配置字符串，例如 "cobalt" 或 "tikhub,cobalt"
+                provider_names = [p.strip().lower() for p in priority_config.split(",") if p.strip()]
+                providers = []
+
+                for name in provider_names:
+                    if name in provider_map:
+                        providers.append(provider_map[name])
+                    else:
+                        logger.warning(f"Unknown provider '{name}' in PROVIDER_PRIORITY_{platform.upper()}, skipping")
+
+                if providers:
+                    logger.info(f"Custom provider priority for {platform}: {[p.provider_name for p in providers]}")
+                    default_chains[platform] = providers
+                else:
+                    logger.warning(f"No valid providers in PROVIDER_PRIORITY_{platform.upper()}, using default")
 
         return default_chains
 
@@ -177,11 +211,12 @@ class VideoResolver:
                 return video_info, provider_name
 
             except (VideoNotFoundError, ProviderError) as e:
-                # 记录失败，尝试下一个提供者
+                # Record failure, try next provider
+                # Escape braces in error message to prevent loguru format issues
+                error_str = str(e).replace("{", "{{").replace("}", "}}")
                 logger.warning(
-                    f"{provider_name} failed to resolve video: {e}",
-                    platform=platform,
-                    video_id=video_id
+                    f"{provider_name} failed to resolve video: {error_str} "
+                    f"[platform={platform}, video_id={video_id}]"
                 )
 
                 resolution_log["attempts"].append({
@@ -193,11 +228,12 @@ class VideoResolver:
                 continue  # 尝试下一个提供者
 
             except Exception as e:
-                # 未预期的错误，记录但继续尝试下一个提供者
+                # Unexpected error, log but continue to try next provider
+                # Escape braces in error message to prevent loguru format issues
+                error_str = str(e).replace("{", "{{").replace("}", "}}")
                 logger.error(
-                    f"Unexpected error with {provider_name}: {e}",
-                    platform=platform,
-                    video_id=video_id,
+                    f"Unexpected error with {provider_name}: {error_str} "
+                    f"[platform={platform}, video_id={video_id}]",
                     exc_info=True
                 )
 
@@ -209,7 +245,14 @@ class VideoResolver:
 
                 continue
 
-        # 所有提供者都失败了
+        # All providers failed
+        # Build detailed error message for debugging
+        error_details = "; ".join([
+            f"{a['provider']}: {a['error']}"
+            for a in resolution_log["attempts"]
+            if not a["success"]
+        ])
+
         logger.error(
             f"All providers failed to resolve video",
             platform=platform,
@@ -218,8 +261,8 @@ class VideoResolver:
         )
 
         raise VideoResolverError(
-            f"Failed to resolve video from all providers. "
-            f"Platform: {platform}, Video ID: {video_id}"
+            f"All providers failed for platform '{platform}', video_id '{video_id}'. "
+            f"Errors: [{error_details}]"
         )
 
     def _adapt_data(

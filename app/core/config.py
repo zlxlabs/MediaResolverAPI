@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     TIKHUB_API_KEY: str = ""
     TIKHUB_RATE_LIMIT: int = 10
 
+    # TikTok fallback API region list (comma-separated, ordered by priority)
+    # When the primary API (fetch_one_video) fails, these regions will be tried
+    # sequentially with the fetch_one_video_v3 endpoint
+    TIKTOK_FALLBACK_REGIONS: str = "SA,US,JP"
+
     # Cobalt API
     COBALT_API_BASE: str = ""
     COBALT_ENABLED: bool = True
@@ -76,8 +81,17 @@ class Settings(BaseSettings):
     LOG_FILE_PATH: str = "./logs"
     LOG_RETENTION_DAYS: int = 30
 
-    # Provider priority (optional override)
-    PROVIDER_PRIORITY: dict = {}
+    # Provider priority per platform (optional override)
+    # Format: "provider1,provider2" e.g. "cobalt" or "tikhub,cobalt"
+    # Supported providers: tikhub, cobalt
+    PROVIDER_PRIORITY_TIKTOK: str = ""
+    PROVIDER_PRIORITY_INSTAGRAM: str = ""
+    PROVIDER_PRIORITY_XIAOHONGSHU: str = ""
+    PROVIDER_PRIORITY_YOUTUBE: str = ""
+    PROVIDER_PRIORITY_PINTEREST: str = ""
+    PROVIDER_PRIORITY_FACEBOOK: str = ""
+    PROVIDER_PRIORITY_DOUYIN: str = ""
+    PROVIDER_PRIORITY_KUAISHOU: str = ""
 
     model_config = {
         "env_file": ".env",
