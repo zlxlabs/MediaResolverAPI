@@ -38,7 +38,8 @@ class TikHubProvider(BaseProvider):
         "kuaishou": "/api/v1/kuaishou/web/fetch_one_video_v2",
         "youtube": "/api/v1/youtube/web/get_video_info",
         "xiaohongshu": "/api/v1/xiaohongshu/web/get_note_info_v3",
-        "instagram": "/api/v1/instagram/web_app/fetch_post_media_by_url",
+        # 旧端点 web_app/fetch_post_media_by_url 已被 TikHub 下线(404)，改用 v2
+        "instagram": "/api/v1/instagram/v2/fetch_post_info",
     }
 
     # 平台与视频ID参数名的映射
@@ -48,7 +49,7 @@ class TikHubProvider(BaseProvider):
         "kuaishou": "photo_id",
         "youtube": "video_id",
         "xiaohongshu": "share_text",  # 小红书使用完整URL
-        "instagram": "url",  # Instagram使用完整URL
+        "instagram": "code_or_url",  # Instagram v2 接受 shortcode 或完整URL
     }
 
     # 抖音终态 reason（私密/部分可见）—— 再降级也拿不到，立即短路
@@ -395,10 +396,17 @@ class TikHubProvider(BaseProvider):
             # 小红书新API返回的数据包含 user, video, desc 等字段
             return "user" in response_data or "desc" in response_data
         elif platform == "instagram":
-            # Instagram新API返回的数据结构: data.data.medias
-            # 也兼容旧格式: data.is_video
+            # v2 fetch_post_info 返回: data.data.{is_video, video_url, code, ...}
+            # 兼容更早格式: data.data.medias / full_name，以及 data.is_video
             inner_data = response_data.get("data", {})
-            return "medias" in inner_data or "full_name" in inner_data or "is_video" in response_data
+            return (
+                "video_url" in inner_data
+                or "is_video" in inner_data
+                or "code" in inner_data
+                or "medias" in inner_data
+                or "full_name" in inner_data
+                or "is_video" in response_data
+            )
 
         return True
 
