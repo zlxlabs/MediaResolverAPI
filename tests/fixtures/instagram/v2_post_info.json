@@ -1,0 +1,551 @@
+{
+  "code": 200,
+  "request_id": "05bfc103-e263-4ea7-a020-d082c7b3a3a6",
+  "message": "Request successful. This request will incur a charge.",
+  "message_zh": "请求成功，本次请求将被计费。",
+  "support": "Discord: https://discord.gg/aMEAS8Xsvz",
+  "time": "2026-06-16 02:00:21",
+  "time_stamp": 1781600421,
+  "time_zone": "America/Los_Angeles",
+  "docs": "https://api.tikhub.io/#/Instagram-V2-API/fetch_post_info_api_v1_instagram_v2_fetch_post_info_get",
+  "cache_message": "This response is cached and accessible via the URL below for 24 hours at no extra cost. The cache is for request tracing only — it doesn't affect the API's data freshness and won't be returned through the API again.",
+  "cache_message_zh": "本次响应已缓存，可通过下方 URL 直接查看，有效期 24 小时，访问缓存链接无额外费用。缓存仅用于请求溯源，不影响接口数据的时效性，也不会再次通过接口返回。",
+  "cache_url": "https://cache.tikhub.io/api/v1/cache/public/05bfc103-e263-4ea7-a020-d082c7b3a3a6?sign=c216e319158d669842b271a78dc411b9e78ff021c6c498574d7f96f9b069ff21",
+  "router": "/api/v1/instagram/v2/fetch_post_info",
+  "params": {
+    "code_or_url": "DR9FE94jBop"
+  },
+  "data": {
+    "data": {
+      "accessibility_caption": null,
+      "are_remixes_crosspostable": true,
+      "boost_unavailable_identifier": null,
+      "boost_unavailable_reason": null,
+      "boost_unavailable_reason_v2": null,
+      "can_reply": false,
+      "can_reshare": true,
+      "can_save": true,
+      "caption": {
+        "created_at": 1765093600,
+        "created_at_utc": 1765093600,
+        "did_report_as_spam": false,
+        "has_translation": true,
+        "hashtags": [],
+        "id": "3782201593618504233",
+        "is_covered": false,
+        "is_ranked_comment": false,
+        "mentions": [
+          "@annabookani.gold"
+        ],
+        "pk": "17877749526356164",
+        "private_reply_status": 0,
+        "share_enabled": false,
+        "text": "بله بله😍 مگه نه ؟ لطفا با صدا گوش بدید 🫠😍\n\nدستبندهای زیر گرم با نمای فوق العاده و زیبا 😍🤌🏽✨\nبرای خرید لطفا واتسپ و دایرکت پیام بدید\n\nطلا ۱۸ عیار ✨\n\nبا فاکتور رسمی ✨\n\n @annabookani.gold 🤍",
+        "text_translation": "Yes yes 😍 isn't it ? Please listen with sound 🫠😍\n\nHot underarm bracelets with an amazing view 😍✨\nTo purchase kindly whatsapp and dm\n\n18k gold ✨\n\nWith official invoice ✨\n\n @annabookani.gold 🤍",
+        "type": 1
+      },
+      "caption_is_edited": false,
+      "clips_metadata": {
+        "achievements_info": {
+          "num_earned_achievements": null,
+          "show_achievements": false
+        },
+        "additional_audio_info": {
+          "additional_audio_username": null,
+          "audio_reattribution_info": {
+            "should_allow_restore": false
+          }
+        },
+        "asset_recommendation_info": null,
+        "audio_canonical_id": "18411062788118743",
+        "audio_ranking_info": {
+          "best_audio_cluster_id": "1711709126205092"
+        },
+        "audio_type": "original_sounds",
+        "basel_template_info_for_ig_app": {
+          "is_basel_template": null,
+          "should_show_reuse_setting_for_owner": false,
+          "use_template_deeplink": null
+        },
+        "branded_content_tag_info": {
+          "can_add_tag": false
+        },
+        "breaking_content_info": null,
+        "breaking_creator_info": null,
+        "challenge_info": null,
+        "clips_creation_entry_point": "clips",
+        "content_appreciation_info": {
+          "enabled": false,
+          "entry_point_container": null
+        },
+        "contextual_highlight_info": null,
+        "cutout_sticker_info": [],
+        "disable_use_in_clips_client_cache": false,
+        "external_media_info": null,
+        "featured_label": null,
+        "is_fan_club_promo_video": false,
+        "is_public_chat_welcome_video": false,
+        "is_shared_to_fb": false,
+        "mashup_info": {
+          "can_toggle_mashups_allowed": false,
+          "formatted_mashups_count": null,
+          "has_been_mashed_up": false,
+          "has_nonmimicable_additional_audio": true,
+          "is_creator_requesting_mashup": false,
+          "is_light_weight_check": true,
+          "is_light_weight_reuse_allowed_check": false,
+          "is_pivot_page_available": false,
+          "is_reuse_allowed": true,
+          "mashup_type": null,
+          "mashups_allowed": true,
+          "mashups_allowed_for_carousel": false,
+          "non_privacy_filtered_mashups_media_count": 0,
+          "original_media": null,
+          "privacy_filtered_mashups_media_count": null
+        },
+        "may_have_template_info": null,
+        "merchandising_pill_info": null,
+        "music_info": null,
+        "nux_info": null,
+        "original_sound_info": {
+          "allow_creator_to_rename": true,
+          "attributed_custom_audio_asset_id": null,
+          "audio_asset_start_time_in_ms": 0,
+          "audio_filter_infos": null,
+          "audio_id": 1087586153224913,
+          "audio_parts": [],
+          "audio_parts_by_filter": [],
+          "can_remix_be_shared_to_fb": true,
+          "can_remix_be_shared_to_fb_expansion": true,
+          "consumption_info": {
+            "display_labels": null,
+            "display_media_id": null,
+            "inline_audio_label": null,
+            "is_bookmarked": false,
+            "is_trending_in_clips": false,
+            "should_mute_audio_reason": "",
+            "should_mute_audio_reason_type": null,
+            "user_notes": null
+          },
+          "derived_content_start_time_in_composition_in_ms": 0,
+          "duration_in_ms": 11850,
+          "fb_downstream_use_xpost_metadata": {
+            "downstream_use_xpost_deny_reason": "NONE"
+          },
+          "formatted_clips_media_count": null,
+          "hide_remixing": false,
+          "ig_artist": {
+            "full_name": "طلاوی | گالری طلا/ گردنبند/ دستبند/ گوشواره/ انگشتر",
+            "id": "76749728886",
+            "is_private": false,
+            "is_verified": false,
+            "pk": "76749728886",
+            "profile_pic_id": "3712841822092410053",
+            "profile_pic_url": "https://scontent-cph2-1.cdninstagram.com/v/t51.82787-19/541601946_17848087740552887_2161071414574436744_n.jpg?stp=dst-jpg_e0_s150x150_tt6&efg=eyJ2ZW5jb2RlX3RhZyI6InByb2ZpbGVfcGljLmRqYW5nby4xMDgwLmMyIn0&_nc_ht=scontent-cph2-1.cdninstagram.com&_nc_cat=111&_nc_oc=Q6cZ2gHKOGxppJLIIaUn0j7YzNpVHgZ4mNJSWTYfPUPhoR9iz3x4yCcLRu74ULrdwpU6CZU&_nc_ohc=C4D2UGNnDKUQ7kNvwFMg72X&_nc_gid=fECGxbzgo0StmKYYyW3UWw&edm=ALQROFkBAAAA&ccb=7-5&ig_cache_key=GJowSCC3FrLBvWg-AIjR9W8Aq-0dbmNDAQAB1501500j-ccb7-5&oh=00_Af_LljvGVfgUzwvm--VnlPZIXSDVLDfMCo5B8q_lTd6VzA&oe=6A36D56C&_nc_sid=fc8dfb",
+            "username": "talavigold"
+          },
+          "is_audio_automatically_attributed": false,
+          "is_eligible_for_audio_effects": true,
+          "is_eligible_for_vinyl_sticker": true,
+          "is_explicit": false,
+          "is_original_audio_download_eligible": true,
+          "is_reuse_disabled": false,
+          "is_xpost_from_fb": false,
+          "oa_owner_is_music_artist": false,
+          "original_audio_subtype": "default",
+          "original_audio_title": "Original audio",
+          "original_media_id": "3728895081089374519",
+          "overlap_duration_in_ms": 11850,
+          "previous_trend_rank": null,
+          "progressive_download_url": "https://scontent-cph2-1.cdninstagram.com/o1/v/t2/f2/m69/AQMPodHyV6dFXewMK2rfrT29pja1xCHcFJmc6Yg3EBaErBVMQTN0hSmgfL-16i_mYApAgPf99C75pgTcpvdVzO55.mp4?strext=1&_nc_cat=100&_nc_sid=ef5aa3&_nc_ht=scontent-cph2-1.cdninstagram.com&_nc_ohc=yV06dYrEtwQQ7kNvwHMFH2F&efg=eyJ2ZW5jb2RlX3RhZyI6Inhwdl9wcm9ncmVzc2l2ZS5WSV9VU0VDQVNFX1BST0RVQ1RfVFlQRS4uQzMuMC5wcm9ncmVzc2l2ZV9hdWRpbyIsInhwdl9hc3NldF9pZCI6ODEwMzI4Njg1MDE5MjAyLCJhc3NldF9hZ2VfZGF5cyI6MjY0LCJ2aV91c2VjYXNlX2lkIjoxMDgyNywiZHVyYXRpb25fcyI6MTEsInVybGdlbl9zb3VyY2UiOiJ3d3cifQ%3D%3D&ccb=17-1&_nc_gid=fECGxbzgo0StmKYYyW3UWw&_nc_zt=28&_nc_ss=783ba&oh=00_Af-qRehlYFICoCpcLtNlxLoSBhC-M6V917PWrSYPBPYXKA&oe=6A36CF46",
+          "should_mute_audio": false,
+          "time_created": 1758739073,
+          "trend_rank": null,
+          "xpost_fb_creator_info": null
+        },
+        "originality_info": null,
+        "professional_clips_upsell_type": 0,
+        "reels_on_the_rise_info": null,
+        "reusable_text_attribute_string": null,
+        "reusable_text_info": null,
+        "shopping_info": null,
+        "show_achievements": false,
+        "show_tips": null,
+        "template_info": {
+          "attribution_info": {
+            "image_versions": null,
+            "owner_username": "annabookani.gold",
+            "template_media_id": "3782201593618504233"
+          },
+          "effects_info": {
+            "overall_effect_id": null,
+            "segment_effects_info": []
+          },
+          "fb_downstream_use_xpost_metadata": {
+            "downstream_use_xpost_deny_reason": "NONE"
+          },
+          "min_num_segments": 3,
+          "reusable_media_assets_info": null,
+          "segments_info": [
+            {
+              "duration_in_ms": 4520,
+              "reusable_template_media_asset_end_time_ms": null,
+              "reusable_template_media_asset_start_time_ms": null
+            },
+            {
+              "duration_in_ms": 1373,
+              "reusable_template_media_asset_end_time_ms": null,
+              "reusable_template_media_asset_start_time_ms": null
+            },
+            {
+              "duration_in_ms": 1948,
+              "reusable_template_media_asset_end_time_ms": null,
+              "reusable_template_media_asset_start_time_ms": null
+            },
+            {
+              "duration_in_ms": 3226,
+              "reusable_template_media_asset_end_time_ms": null,
+              "reusable_template_media_asset_start_time_ms": null
+            }
+          ],
+          "should_hide_cta": true,
+          "smart_template_info": null,
+          "template_clips_media_id": "3782201593618504233",
+          "timed_stickers_info": null,
+          "timed_texts_info": {
+            "text_info_list": [
+              {
+                "alignment": "center",
+                "animation": "none",
+                "colors": [
+                  {
+                    "count": 36,
+                    "hex_rgba_color": "#a0694bff"
+                  }
+                ],
+                "effects": "none",
+                "end_time_ms": 4519.983333333334,
+                "font_size": 30,
+                "height": 0.16874999999999998,
+                "id": "17877749541356164",
+                "is_animated": 0,
+                "offset_x": 0.500200678580951,
+                "offset_y": 0.2389120523479884,
+                "rotation_degree": 0,
+                "scale": 0.566214724032676,
+                "start_time_ms": 112.13333333333334,
+                "text": "کادو خریدن واسه دخترا خیلی راحته🥲🫠",
+                "text_emphasis_mode": "inverted",
+                "text_format_type": "ig_literature",
+                "width": 0.9829457364341085,
+                "z_index": 1
+              }
+            ]
+          },
+          "transition_effects_info": null
+        },
+        "viewer_interaction_settings": null
+      },
+      "clips_tab_pinned_user_ids": [],
+      "coauthor_producer_can_see_organic_insights": false,
+      "coauthor_producers": [],
+      "code": "DR9FE94jBop",
+      "collaborator_edit_eligibility": false,
+      "comment_inform_treatment": {
+        "action_type": null,
+        "should_have_inform_treatment": false,
+        "text": "",
+        "url": null
+      },
+      "comment_likes_enabled": true,
+      "comments_disabled": null,
+      "commerce_integrity_review_decision": "",
+      "community_notes_info": {
+        "enable_submission_friction": false,
+        "has_viewer_submitted_note": false,
+        "is_eligible_for_request_a_note": true,
+        "note_submission_disabled": false
+      },
+      "creative_config": null,
+      "crosspost_metadata": {
+        "fb_downstream_use_xpost_metadata": {
+          "downstream_use_xpost_deny_reason": "NONE"
+        }
+      },
+      "cutout_sticker_info": [],
+      "deleted_reason": 0,
+      "device_timestamp": 176509358075898,
+      "disable_caption_and_comment": false,
+      "eligible_insights_entrypoints": "NONE",
+      "fb_user_tags": {
+        "in": []
+      },
+      "fbid": "17877749502356164",
+      "featured_products": [],
+      "filter_type": 0,
+      "floating_context_items": [],
+      "fundraiser_tag": {
+        "has_standalone_fundraiser": false
+      },
+      "gen_ai_chat_with_ai_cta_info": null,
+      "gen_ai_detection_method": {
+        "detection_method": "NONE"
+      },
+      "has_audio": true,
+      "has_high_risk_gen_ai_inform_treatment": false,
+      "has_liked": false,
+      "has_privately_liked": false,
+      "has_shared_to_fb": 0,
+      "has_tagged_users": false,
+      "has_views_fetching": true,
+      "hidden_likes_string_variant": -1,
+      "id": "3782201593618504233",
+      "ig_media_sharing_disabled": false,
+      "igbio_product": null,
+      "image_versions": {
+        "additional_items": {
+          "first_frame": {
+            "height": 639,
+            "is_spatial_image": false,
+            "url": "https://scontent-cph2-1.cdninstagram.com/v/t51.71878-15/590984336_1575493560470858_6329653605861741720_n.jpg?stp=dst-jpegr_e15_p360x360_tt6&_nc_cat=102&ccb=7-5&_nc_sid=58cdad&efg=eyJ2ZW5jb2RlX3RhZyI6IkNMSVBTLnhwaWRzLjY0MC5oZHIudmlkZW9fYWRkaXRpb25hbF9jb3Zlcl9mcmFtZS5DMyJ9&_nc_ohc=DRFWy6INv0wQ7kNvwHn8Q1a&_nc_oc=Adoj1O2-ESq-oRqMaYlcEbnJH8EJ10ROFz6uQIkd_qVYx-URrNAWZ1NA7CwnkVebiWY&_nc_ad=z-m&_nc_cid=0&_nc_zt=23&se=-1&_nc_ht=scontent-cph2-1.cdninstagram.com&_nc_gid=fECGxbzgo0StmKYYyW3UWw&_nc_ss=7a3ba&oh=00_Af8PhfW081Kv43Lo1PigHWXWZvKS5ZH8lXSKruf9vPts5Q&oe=6A36E5AD",
+            "width": 360
+          },
+          "igtv_first_frame": {
+            "height": 639,
+            "is_spatial_image": false,
+            "url": "https://scontent-cph2-1.cdninstagram.com/v/t51.71878-15/590984336_1575493560470858_6329653605861741720_n.jpg?stp=dst-jpegr_e15_p360x360_tt6&_nc_cat=102&ccb=7-5&_nc_sid=58cdad&efg=eyJ2ZW5jb2RlX3RhZyI6IkNMSVBTLnhwaWRzLjY0MC5oZHIudmlkZW9fYWRkaXRpb25hbF9jb3Zlcl9mcmFtZS5DMyJ9&_nc_ohc=DRFWy6INv0wQ7kNvwHn8Q1a&_nc_oc=Adoj1O2-ESq-oRqMaYlcEbnJH8EJ10ROFz6uQIkd_qVYx-URrNAWZ1NA7CwnkVebiWY&_nc_ad=z-m&_nc_cid=0&_nc_zt=23&se=-1&_nc_ht=scontent-cph2-1.cdninstagram.com&_nc_gid=fECGxbzgo0StmKYYyW3UWw&_nc_ss=7a3ba&oh=00_Af8PhfW081Kv43Lo1PigHWXWZvKS5ZH8lXSKruf9vPts5Q&oe=6A36E5AD",
+            "width": 360
+          },
+          "smart_frame": null
+        },
+        "items": [
+          {
+            "height": 639,
+            "is_spatial_image": false,
+            "url": "https://scontent-cph2-1.cdninstagram.com/v/t51.71878-15/587789959_4660822317477805_481524169016102113_n.jpg?stp=dst-jpegr_e15_p360x360_tt6&_nc_cat=102&ig_cache_key=Mzc4MjIwMTU5MzYxODUwNDIzMw%3D%3D.3-ccb7-5&ccb=7-5&_nc_sid=58cdad&efg=eyJ2ZW5jb2RlX3RhZyI6IkNMSVBTLnhwaWRzLjY0MC5oZHIudmlkZW9fbmZyYW1lX2NvdmVyX2ZyYW1lLkMzIn0%3D&_nc_ohc=fqdWjihV1vEQ7kNvwFCHYTv&_nc_oc=AdrihqQ3rfCdSZrIgbVUQPvcWo6ALayF6Uhq1Wg178f2JbGFrc5iNnHbC7it65PBsD8&_nc_ad=z-m&_nc_cid=0&_nc_zt=23&se=-1&_nc_ht=scontent-cph2-1.cdninstagram.com&_nc_gid=fECGxbzgo0StmKYYyW3UWw&_nc_ss=7a3ba&oh=00_Af9IwpywXiwmCLspfcv0ChGCvVVKGfEe2oIZOTJjBoHOQg&oe=6A36E884",
+            "width": 360
+          }
+        ],
+        "scrubber_spritesheet_info_candidates": {
+          "default": {
+            "file_size_kb": 305,
+            "max_thumbnails_per_sprite": 105,
+            "rendered_width": 96,
+            "sprite_height": 1232,
+            "sprite_urls": [
+              "https://scontent-cph2-1.cdninstagram.com/v/t51.71878-15/591109223_2671325549867520_3694383063180972311_n.jpg?_nc_ht=scontent-cph2-1.cdninstagram.com&_nc_cat=100&_nc_oc=Q6cZ2gHKOGxppJLIIaUn0j7YzNpVHgZ4mNJSWTYfPUPhoR9iz3x4yCcLRu74ULrdwpU6CZU&_nc_ohc=qJ-rb-zOr_gQ7kNvwHZqIFS&_nc_gid=fECGxbzgo0StmKYYyW3UWw&edm=ALQROFkBAAAA&ccb=7-5&oh=00_Af8m6OpAlsjDa6ErAFnbdMBOxLZjhfImKjfuGSfWV_6wmQ&oe=6A36F5B3&_nc_sid=fc8dfb"
+            ],
+            "sprite_width": 1500,
+            "thumbnail_duration": 0.1054857142857143,
+            "thumbnail_height": 176,
+            "thumbnail_width": 100,
+            "thumbnails_per_row": 15,
+            "total_thumbnail_num_per_sprite": 105,
+            "video_length": 11.076
+          }
+        }
+      },
+      "integrity_review_decision": "pending",
+      "invited_coauthor_producers": [],
+      "is_affiliate_commission_eligible": false,
+      "is_artist_pick": false,
+      "is_comments_gif_composer_enabled": true,
+      "is_cutout_sticker_allowed": true,
+      "is_dash_eligible": 1,
+      "is_educational": null,
+      "is_eligible_content_for_post_roll_ad": false,
+      "is_eligible_for_autodub": false,
+      "is_eligible_for_autodub_upsell": false,
+      "is_eligible_for_organic_eager_refresh": true,
+      "is_eligible_for_poe": false,
+      "is_eligible_for_poe_premium": false,
+      "is_eligible_for_rta": false,
+      "is_in_profile_grid": false,
+      "is_open_to_public_submission": false,
+      "is_organic_product_tagging_eligible": true,
+      "is_paid_partnership": false,
+      "is_photo_comments_composer_enabled_for_author": false,
+      "is_pinned": false,
+      "is_post_live_clips_media": false,
+      "is_quiet_post": false,
+      "is_reshare_of_text_post_app_media_in_ig": false,
+      "is_reuse_allowed": true,
+      "is_short_drama": false,
+      "is_social_ufi_disabled": false,
+      "is_tagged_media_shared_to_viewer_profile_grid": false,
+      "is_third_party_downloads_eligible": true,
+      "is_video": true,
+      "lat": 35.75920344,
+      "like_and_view_counts_disabled": false,
+      "lng": 51.46989235,
+      "location": {
+        "address": "Heravi square",
+        "city": "",
+        "external_source": "facebook_places",
+        "facebook_places_id": 303384033467568,
+        "lat": 35.75920344,
+        "lng": 51.46989235,
+        "name": "Heravi Centre",
+        "pk": "303384033467568",
+        "short_name": "Heravi Centre"
+      },
+      "locations": [],
+      "media_attributions_data": [],
+      "media_cropping_info": {
+        "four_by_three_crop": {
+          "crop_bottom": 0.8370565045992115,
+          "crop_left": 0,
+          "crop_right": 1,
+          "crop_top": 0.08804204993429697
+        }
+      },
+      "media_format": "video",
+      "media_name": "reel",
+      "media_notes": {
+        "items": []
+      },
+      "media_overlay_info": null,
+      "media_reposter_bottomsheet_enabled": false,
+      "media_type": 2,
+      "media_ui_attributions_data": [],
+      "media_ui_attributions_data_v2": [],
+      "meta_ai_suggested_prompts": [],
+      "metrics": {
+        "comment_count": 64,
+        "fb_comment_count": null,
+        "fb_like_count": null,
+        "fb_play_count": null,
+        "ig_play_count": 30534,
+        "like_count": 972,
+        "play_count": 30534,
+        "repost_count": null,
+        "save_count": null,
+        "share_count": 158,
+        "user_follower_count": null,
+        "user_media_count": null,
+        "view_count": null
+      },
+      "music_metadata": null,
+      "number_of_qualities": 8,
+      "original_height": 1920,
+      "original_lang_for_translations": "en",
+      "original_width": 1080,
+      "pk": "3782201593618504233",
+      "preview_comments": [],
+      "product_type": "clips",
+      "related_ads_pivots_media_info": "USER_NOT_IN_TEST_GROUP",
+      "related_ads_pivots_response": {
+        "media_info": "USER_NOT_IN_TEST_GROUP",
+        "selected_ctas": []
+      },
+      "report_info": {
+        "has_viewer_submitted_report": false
+      },
+      "share_count_disabled": false,
+      "sharing_friction_info": {
+        "bloks_app_url": null,
+        "sharing_friction_payload": null,
+        "should_have_sharing_friction": false
+      },
+      "shop_routing_user_id": null,
+      "should_show_author_pog_for_tagged_media_shared_to_profile_grid": false,
+      "social_context": [],
+      "sponsor_tags": [],
+      "subscribe_cta_visible": false,
+      "subtype_name_for_REST__": "XDTClipsMedia",
+      "tagged_users": [],
+      "taken_at": 1765093599,
+      "taken_at_date": "2025-12-07T07:46:39+00:00",
+      "taken_at_ts": 1765093599,
+      "teen_project_info": null,
+      "thumbnail_url": "https://scontent-cph2-1.cdninstagram.com/v/t51.71878-15/587789959_4660822317477805_481524169016102113_n.jpg?stp=dst-jpegr_e15_p360x360_tt6&_nc_cat=102&ig_cache_key=Mzc4MjIwMTU5MzYxODUwNDIzMw%3D%3D.3-ccb7-5&ccb=7-5&_nc_sid=58cdad&efg=eyJ2ZW5jb2RlX3RhZyI6IkNMSVBTLnhwaWRzLjY0MC5oZHIudmlkZW9fbmZyYW1lX2NvdmVyX2ZyYW1lLkMzIn0%3D&_nc_ohc=fqdWjihV1vEQ7kNvwFCHYTv&_nc_oc=AdrihqQ3rfCdSZrIgbVUQPvcWo6ALayF6Uhq1Wg178f2JbGFrc5iNnHbC7it65PBsD8&_nc_ad=z-m&_nc_cid=0&_nc_zt=23&se=-1&_nc_ht=scontent-cph2-1.cdninstagram.com&_nc_gid=fECGxbzgo0StmKYYyW3UWw&_nc_ss=7a3ba&oh=00_Af9IwpywXiwmCLspfcv0ChGCvVVKGfEe2oIZOTJjBoHOQg&oe=6A36E884",
+      "timeline_pinned_user_ids": [],
+      "top_likers": [],
+      "translated_langs_for_autodub": [],
+      "tya_media_related_topics": [],
+      "user": {
+        "account_badges": [],
+        "account_type": 2,
+        "can_see_quiet_post_attribution": true,
+        "eligible_for_text_app_activation_badge": false,
+        "fan_club_info": {
+          "autosave_to_exclusive_highlight": null,
+          "connected_member_count": null,
+          "fan_club_id": null,
+          "fan_club_name": null,
+          "fan_consideration_page_revamp_eligiblity": null,
+          "has_created_ssc": null,
+          "has_enough_subscribers_for_ssc": null,
+          "is_fan_club_gifting_eligible": null,
+          "is_fan_club_referral_eligible": null,
+          "is_free_trial_eligible": null,
+          "largest_public_bc_id": null,
+          "should_show_playlists_in_profile_tab": null,
+          "subscriber_count": null
+        },
+        "fbid_v2": "17841400770765009",
+        "feed_post_reshare_disabled": false,
+        "full_name": "✨گالری طلای آنا بوکانی✨",
+        "has_anonymous_profile_picture": false,
+        "id": "320601692",
+        "is_active_on_text_post_app": false,
+        "is_favorite": false,
+        "is_private": false,
+        "is_ring_creator": false,
+        "is_unpublished": false,
+        "is_verified": false,
+        "latest_reel_media": 1781596215,
+        "profile_pic_id": "3766378995034907487",
+        "profile_pic_url": "https://scontent-cph2-1.cdninstagram.com/v/t51.82787-19/581955263_18538145869025693_8950969416779683885_n.jpg?stp=dst-jpg_e0_s150x150_tt6&efg=eyJ2ZW5jb2RlX3RhZyI6InByb2ZpbGVfcGljLmRqYW5nby4xMDgwLmMyIn0&_nc_ht=scontent-cph2-1.cdninstagram.com&_nc_cat=105&_nc_oc=Q6cZ2gHKOGxppJLIIaUn0j7YzNpVHgZ4mNJSWTYfPUPhoR9iz3x4yCcLRu74ULrdwpU6CZU&_nc_ohc=xpgtWdDo79QQ7kNvwHCf3or&_nc_gid=fECGxbzgo0StmKYYyW3UWw&edm=ALQROFkBAAAA&ccb=7-5&ig_cache_key=GL-uryKdUVFvWNxBAC3YiaJCOzh8bmNDAQAB1501500j-ccb7-5&oh=00_Af_W9QdE7rH_2NzAwHEJkSwCQizXKP0PQZWuA3f2nxVxBQ&oe=6A36E1BC&_nc_sid=fc8dfb",
+        "show_account_transparency_details": true,
+        "show_ring_award": false,
+        "text_post_app_is_private": true,
+        "third_party_downloads_enabled": 1,
+        "transparency_product_enabled": false,
+        "user_activation_info": [],
+        "username": "annabookani.gold"
+      },
+      "video_codec": "av01.0.05M.08.0.111.01.01.01.0",
+      "video_duration": 11.074000358581543,
+      "video_sticker_locales": [
+        "en",
+        "pt",
+        "hi",
+        "es"
+      ],
+      "video_url": "https://scontent-cph2-1.cdninstagram.com/o1/v/t2/f2/m86/AQMkMMWTSMGDOHOg4K5PqK-RUuqVWj92ke_3Oe_sGyJKie0FHi3MnocKZDkKZ5cS24DKVf7kRXZ04hxuv3nY1Z-J5oW60tDJm4_dRD4.mp4?_nc_cat=103&_nc_sid=5e9851&_nc_ht=scontent-cph2-1.cdninstagram.com&_nc_ohc=ftICyojhCIEQ7kNvwGN-Cw2&efg=eyJ2ZW5jb2RlX3RhZyI6Inhwdl9wcm9ncmVzc2l2ZS5JTlNUQUdSQU0uQ0xJUFMuQzMuNzIwLmRhc2hfYmFzZWxpbmVfMV92MSIsInhwdl9hc3NldF9pZCI6ODQ4MjQ3MzE4MTEyNTg2LCJhc3NldF9hZ2VfZGF5cyI6MTkxLCJ2aV91c2VjYXNlX2lkIjoxMDA5OSwiZHVyYXRpb25fcyI6MTEsInVybGdlbl9zb3VyY2UiOiJ3d3cifQ%3D%3D&ccb=17-1&vs=d00c124ae77fb50c&_nc_vs=HBksFQIYUmlnX3hwdl9yZWVsc19wZXJtYW5lbnRfc3JfcHJvZC8yOTQxRDE0QUFGNjI1ODU2QUYyMUFEREU2RjI3QzNBMV92aWRlb19kYXNoaW5pdC5tcDQVAALIARIAFQIYR2lnX3hwdl9yZWVsc19wZXJtYW5lbnRfc3JfcHJvZC8xMzAwMjYxMzg1MTk2Mjc5XzkwMTYwNjgxNTY0NTA0NjA2ODgubXA0FQICyAESACgAGAAbAogHdXNlX29pbAExEnByb2dyZXNzaXZlX3JlY2lwZQExFQAAJpSln4G_3oEDFQIoAkMzLBdAJjMzMzMzMxgSZGFzaF9iYXNlbGluZV8xX3YxEQB1_gdl5p0BAA&_nc_gid=fECGxbzgo0StmKYYyW3UWw&_nc_zt=28&_nc_ss=7a3ba&oh=00_Af-5zHua4kY9BYbGWn_1nIBYyK_B6ANEv3iIIYMFBPT6zg&oe=6A32DBE0",
+      "video_versions": [
+        {
+          "bandwidth": 1333378,
+          "fallback": null,
+          "height": 1280,
+          "id": "1405240631222887v",
+          "type": 101,
+          "url": "https://scontent-cph2-1.cdninstagram.com/o1/v/t2/f2/m86/AQMkMMWTSMGDOHOg4K5PqK-RUuqVWj92ke_3Oe_sGyJKie0FHi3MnocKZDkKZ5cS24DKVf7kRXZ04hxuv3nY1Z-J5oW60tDJm4_dRD4.mp4?_nc_cat=103&_nc_sid=5e9851&_nc_ht=scontent-cph2-1.cdninstagram.com&_nc_ohc=ftICyojhCIEQ7kNvwGN-Cw2&efg=eyJ2ZW5jb2RlX3RhZyI6Inhwdl9wcm9ncmVzc2l2ZS5JTlNUQUdSQU0uQ0xJUFMuQzMuNzIwLmRhc2hfYmFzZWxpbmVfMV92MSIsInhwdl9hc3NldF9pZCI6ODQ4MjQ3MzE4MTEyNTg2LCJhc3NldF9hZ2VfZGF5cyI6MTkxLCJ2aV91c2VjYXNlX2lkIjoxMDA5OSwiZHVyYXRpb25fcyI6MTEsInVybGdlbl9zb3VyY2UiOiJ3d3cifQ%3D%3D&ccb=17-1&vs=d00c124ae77fb50c&_nc_vs=HBksFQIYUmlnX3hwdl9yZWVsc19wZXJtYW5lbnRfc3JfcHJvZC8yOTQxRDE0QUFGNjI1ODU2QUYyMUFEREU2RjI3QzNBMV92aWRlb19kYXNoaW5pdC5tcDQVAALIARIAFQIYR2lnX3hwdl9yZWVsc19wZXJtYW5lbnRfc3JfcHJvZC8xMzAwMjYxMzg1MTk2Mjc5XzkwMTYwNjgxNTY0NTA0NjA2ODgubXA0FQICyAESACgAGAAbAogHdXNlX29pbAExEnByb2dyZXNzaXZlX3JlY2lwZQExFQAAJpSln4G_3oEDFQIoAkMzLBdAJjMzMzMzMxgSZGFzaF9iYXNlbGluZV8xX3YxEQB1_gdl5p0BAA&_nc_gid=fECGxbzgo0StmKYYyW3UWw&_nc_zt=28&_nc_ss=7a3ba&oh=00_Af-5zHua4kY9BYbGWn_1nIBYyK_B6ANEv3iIIYMFBPT6zg&oe=6A32DBE0",
+          "url_expiration_timestamp_us": null,
+          "width": 720
+        },
+        {
+          "bandwidth": 1333378,
+          "fallback": null,
+          "height": 1280,
+          "id": "1405240631222887v",
+          "type": 102,
+          "url": "https://scontent-cph2-1.cdninstagram.com/o1/v/t2/f2/m86/AQMkMMWTSMGDOHOg4K5PqK-RUuqVWj92ke_3Oe_sGyJKie0FHi3MnocKZDkKZ5cS24DKVf7kRXZ04hxuv3nY1Z-J5oW60tDJm4_dRD4.mp4?_nc_cat=103&_nc_sid=5e9851&_nc_ht=scontent-cph2-1.cdninstagram.com&_nc_ohc=ftICyojhCIEQ7kNvwGN-Cw2&efg=eyJ2ZW5jb2RlX3RhZyI6Inhwdl9wcm9ncmVzc2l2ZS5JTlNUQUdSQU0uQ0xJUFMuQzMuNzIwLmRhc2hfYmFzZWxpbmVfMV92MSIsInhwdl9hc3NldF9pZCI6ODQ4MjQ3MzE4MTEyNTg2LCJhc3NldF9hZ2VfZGF5cyI6MTkxLCJ2aV91c2VjYXNlX2lkIjoxMDA5OSwiZHVyYXRpb25fcyI6MTEsInVybGdlbl9zb3VyY2UiOiJ3d3cifQ%3D%3D&ccb=17-1&vs=d00c124ae77fb50c&_nc_vs=HBksFQIYUmlnX3hwdl9yZWVsc19wZXJtYW5lbnRfc3JfcHJvZC8yOTQxRDE0QUFGNjI1ODU2QUYyMUFEREU2RjI3QzNBMV92aWRlb19kYXNoaW5pdC5tcDQVAALIARIAFQIYR2lnX3hwdl9yZWVsc19wZXJtYW5lbnRfc3JfcHJvZC8xMzAwMjYxMzg1MTk2Mjc5XzkwMTYwNjgxNTY0NTA0NjA2ODgubXA0FQICyAESACgAGAAbAogHdXNlX29pbAExEnByb2dyZXNzaXZlX3JlY2lwZQExFQAAJpSln4G_3oEDFQIoAkMzLBdAJjMzMzMzMxgSZGFzaF9iYXNlbGluZV8xX3YxEQB1_gdl5p0BAA&_nc_gid=fECGxbzgo0StmKYYyW3UWw&_nc_zt=28&_nc_ss=7a3ba&oh=00_Af-5zHua4kY9BYbGWn_1nIBYyK_B6ANEv3iIIYMFBPT6zg&oe=6A32DBE0",
+          "url_expiration_timestamp_us": null,
+          "width": 720
+        },
+        {
+          "bandwidth": 1333378,
+          "fallback": null,
+          "height": 1280,
+          "id": "1405240631222887v",
+          "type": 103,
+          "url": "https://scontent-cph2-1.cdninstagram.com/o1/v/t2/f2/m86/AQMkMMWTSMGDOHOg4K5PqK-RUuqVWj92ke_3Oe_sGyJKie0FHi3MnocKZDkKZ5cS24DKVf7kRXZ04hxuv3nY1Z-J5oW60tDJm4_dRD4.mp4?_nc_cat=103&_nc_sid=5e9851&_nc_ht=scontent-cph2-1.cdninstagram.com&_nc_ohc=ftICyojhCIEQ7kNvwGN-Cw2&efg=eyJ2ZW5jb2RlX3RhZyI6Inhwdl9wcm9ncmVzc2l2ZS5JTlNUQUdSQU0uQ0xJUFMuQzMuNzIwLmRhc2hfYmFzZWxpbmVfMV92MSIsInhwdl9hc3NldF9pZCI6ODQ4MjQ3MzE4MTEyNTg2LCJhc3NldF9hZ2VfZGF5cyI6MTkxLCJ2aV91c2VjYXNlX2lkIjoxMDA5OSwiZHVyYXRpb25fcyI6MTEsInVybGdlbl9zb3VyY2UiOiJ3d3cifQ%3D%3D&ccb=17-1&vs=d00c124ae77fb50c&_nc_vs=HBksFQIYUmlnX3hwdl9yZWVsc19wZXJtYW5lbnRfc3JfcHJvZC8yOTQxRDE0QUFGNjI1ODU2QUYyMUFEREU2RjI3QzNBMV92aWRlb19kYXNoaW5pdC5tcDQVAALIARIAFQIYR2lnX3hwdl9yZWVsc19wZXJtYW5lbnRfc3JfcHJvZC8xMzAwMjYxMzg1MTk2Mjc5XzkwMTYwNjgxNTY0NTA0NjA2ODgubXA0FQICyAESACgAGAAbAogHdXNlX29pbAExEnByb2dyZXNzaXZlX3JlY2lwZQExFQAAJpSln4G_3oEDFQIoAkMzLBdAJjMzMzMzMxgSZGFzaF9iYXNlbGluZV8xX3YxEQB1_gdl5p0BAA&_nc_gid=fECGxbzgo0StmKYYyW3UWw&_nc_zt=28&_nc_ss=7a3ba&oh=00_Af-5zHua4kY9BYbGWn_1nIBYyK_B6ANEv3iIIYMFBPT6zg&oe=6A32DBE0",
+          "url_expiration_timestamp_us": null,
+          "width": 720
+        }
+      ]
+    }
+  }
+}
