@@ -1,0 +1,15 @@
+{
+  "code": 200,
+  "router": "/api/v1/douyin/web/fetch_one_video",
+  "params": { "aweme_id": "7592102779420115355" },
+  "data": {
+    "status_code": 0,
+    "aweme_detail": {
+      "aweme_id": "7592102779420115355",
+      "desc": "envelope 合法但缺少可播放直链",
+      "author": { "nickname": "x", "unique_id": "x" },
+      "statistics": { "digg_count": 1 }
+    },
+    "log_pb": { "impr_id": "synthetic-ok-no-video" }
+  }
+}
