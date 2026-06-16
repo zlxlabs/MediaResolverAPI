@@ -19,6 +19,16 @@ class VideoNotFoundError(ProviderError):
     pass
 
 
+class DouyinTerminalError(VideoNotFoundError):
+    """
+    抖音终态失败：视频私密/部分可见/不可恢复，再降级也无意义。
+
+    继承 VideoNotFoundError 以兼容现有捕获；VideoResolver 会单独识别此异常，
+    不再 fallback 到下一个 provider（见 video_resolver.py）。
+    """
+    pass
+
+
 class BaseProvider(ABC):
     """
     视频信息提供者基类

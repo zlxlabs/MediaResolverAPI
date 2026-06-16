@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Dict, Optional
 from loguru import logger
 
-from .base import BaseProvider, ProviderError, VideoNotFoundError
+from .base import BaseProvider, ProviderError, VideoNotFoundError, DouyinTerminalError
 from ...core.config import settings
 from ...utils.http_client import HTTPClient
 
@@ -47,6 +47,41 @@ class TikHubProvider(BaseProvider):
         "xiaohongshu": "share_text",  # 小红书使用完整URL
         "instagram": "url",  # Instagram使用完整URL
     }
+
+    # 抖音终态 reason（私密/部分可见）—— 再降级也拿不到，立即短路
+    DOUYIN_TERMINAL_REASONS = {5, 10}
+
+    @staticmethod
+    def _classify_douyin(response: Dict) -> str:
+        """
+        对抖音响应做三态分类（codex #9：扫整个 filter_list，不假设 index 0）。
+
+        Returns:
+            "terminal"  : 私密/部分可见等终态，应立即短路不再试后续端点
+            "retryable" : 版权受限(reason=8)/空/异常 envelope，应试下一端点
+            "ok"        : 含作品详情，交由解析器进一步校验
+        """
+        if not isinstance(response, dict):
+            return "retryable"
+        payload = response.get("data")
+        if not isinstance(payload, dict):
+            return "retryable"
+
+        filters = payload.get("filter_list")
+        if isinstance(filters, list) and filters:
+            reasons = {
+                f.get("reason") for f in filters if isinstance(f, dict)
+            }
+            if reasons & TikHubProvider.DOUYIN_TERMINAL_REASONS:
+                return "terminal"
+            return "retryable"
+
+        # 有作品详情（web/app 的 aweme_detail，或 hybrid 的 data 根）
+        if isinstance(payload.get("aweme_detail"), dict) and payload.get("aweme_detail"):
+            return "ok"
+        if "aweme_id" in payload:
+            return "ok"
+        return "retryable"
 
     def __init__(self):
         """初始化 TikHub 提供者"""
