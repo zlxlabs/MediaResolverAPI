@@ -126,7 +126,8 @@ class VideoResolver:
         platform: str,
         video_id: str,
         original_url: str,
-        force_refresh: bool = False
+        force_refresh: bool = False,
+        use_hybrid: bool = False
     ) -> Tuple[VideoInfo, str]:
         """
         解析视频信息
@@ -183,7 +184,8 @@ class VideoResolver:
                 raw_data = await provider.fetch_video_info(
                     platform=platform,
                     video_id=video_id,
-                    original_url=original_url
+                    original_url=original_url,
+                    use_hybrid=use_hybrid
                 )
 
                 # 使用对应的适配器转换数据

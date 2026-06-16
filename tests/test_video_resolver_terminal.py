@@ -18,7 +18,7 @@ class FakeProvider:
         self.exc = exc
         self.called = False
 
-    async def fetch_video_info(self, platform, video_id, original_url):
+    async def fetch_video_info(self, platform, video_id, original_url, **kwargs):
         self.called = True
         if self.exc:
             raise self.exc

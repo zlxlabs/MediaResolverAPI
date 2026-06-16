@@ -113,12 +113,20 @@ async def resolve_url(
     }
 
     try:
+        platform = None
+        video_id = None
+        use_hybrid = False  # 抖音入口兜底：拿不到 aweme_id 时改走 hybrid/video_data
+
         # Step 1: Resolve short URL if needed
         if url_parser.is_short_url(original_url):
             logger.info(f"Resolving short URL: {original_url}")
             resolved = await url_parser.resolve_short_url(original_url)
             if resolved:
                 original_url = resolved
+            elif url_parser.identify_platform(original_url) == "douyin":
+                # 抖音短链展开失败：不 400，改走 hybrid（其内部自带短链展开）
+                logger.info("Short URL expand failed, falling back to douyin hybrid")
+                platform, use_hybrid = "douyin", True
             else:
                 log_data["error_msg"] = "Failed to resolve short URL"
                 raise HTTPException(
@@ -127,22 +135,28 @@ async def resolve_url(
                 )
 
         # Step 2: Parse URL to identify platform and video ID
-        platform, video_id = url_parser.parse_url(original_url)
+        if not use_hybrid:
+            platform, video_id = url_parser.parse_url(original_url)
+            if platform == "douyin" and not video_id:
+                # 抖音但 ID 提取失败（如新链接格式）：改走 hybrid 兜底
+                logger.info("Douyin id extraction failed, falling back to hybrid")
+                use_hybrid = True
+            elif not platform or not video_id:
+                log_data["platform"] = platform
+                log_data["error_msg"] = "Unsupported URL"
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unsupported URL or could not extract video ID: {original_url}",
+                )
+
         log_data["platform"] = platform
         log_data["video_id"] = video_id
 
-        if not platform or not video_id:
-            log_data["error_msg"] = "Unsupported URL"
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unsupported URL or could not extract video ID: {original_url}",
-            )
-
-        # Step 3: Check cache
         cache_service = CacheService(db)
         translated_desc = None
 
-        if not request.force_refresh:
+        # Step 3: Check cache（仅在已知 video_id 时；hybrid 路径要解析后才拿到 aweme_id）
+        if not use_hybrid and not request.force_refresh:
             cached_info, cached_translation = cache_service.get_cached_video(
                 platform, video_id
             )
@@ -162,10 +176,16 @@ async def resolve_url(
         resolver = get_video_resolver()
         video_info, provider_name = await resolver.resolve(
             platform=platform,
-            video_id=video_id,
+            video_id=video_id or "",
             original_url=original_url,
+            use_hybrid=use_hybrid,
         )
         log_data["provider"] = provider_name
+
+        # hybrid 路径：用解析出的 aweme_id 归一化回填（codex #8 缓存语义）
+        if use_hybrid:
+            video_id = video_info.video_id
+            log_data["video_id"] = video_id
 
         # Step 5: Translate description (if requested and not Chinese)
         if request.translate and settings.TRANSLATION_ENABLED:

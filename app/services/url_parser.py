@@ -95,6 +95,21 @@ class URLParser:
         logger.info(f"成功解析URL - 平台: {platform}, 视频ID: {video_id}")
         return platform, video_id
 
+    def identify_platform(self, url: str) -> Optional[str]:
+        """
+        仅根据 URL 域名识别平台（不要求能提取出视频 ID）。
+
+        用于路由层在「无法提取 video_id」时判断是否为抖音，从而决定是否走 hybrid 兜底。
+
+        Args:
+            url: 原始 URL
+
+        Returns:
+            Optional[str]: 平台名称，无法识别返回 None
+        """
+        domain = extract_domain(url)
+        return self._identify_platform(domain) if domain else None
+
     def is_short_url(self, url: str) -> bool:
         """
         判断是否为短链接
