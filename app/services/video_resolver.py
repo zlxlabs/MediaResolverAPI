@@ -7,7 +7,14 @@
 from typing import List, Dict, Optional, Tuple
 from loguru import logger
 
-from .providers import BaseProvider, TikHubProvider, CobaltProvider, ProviderError, VideoNotFoundError
+from .providers import (
+    BaseProvider,
+    TikHubProvider,
+    CobaltProvider,
+    ProviderError,
+    VideoNotFoundError,
+    DouyinTerminalError,
+)
 from .adapters import TikHubAdapter, CobaltAdapter
 from .platforms.base import VideoInfo
 from ..core.config import settings
@@ -209,6 +216,23 @@ class VideoResolver:
                 logger.debug(f"Resolution log: {resolution_log}")
 
                 return video_info, provider_name
+
+            except DouyinTerminalError as e:
+                # 终态失败（私密/部分可见/不可恢复）：立即停止责任链，不再 fallback
+                # 即便 env 覆盖了 douyin 链加入了其它 provider 也不试（codex #5）
+                logger.info(
+                    f"Terminal failure, stopping provider chain: {e} "
+                    f"[platform={platform}, video_id={video_id}]"
+                )
+                resolution_log["attempts"].append({
+                    "provider": provider_name,
+                    "success": False,
+                    "error": f"terminal: {str(e)}",
+                })
+                raise VideoResolverError(
+                    f"Video unavailable (terminal) for platform '{platform}', "
+                    f"video_id '{video_id}': {str(e)}"
+                )
 
             except (VideoNotFoundError, ProviderError) as e:
                 # Record failure, try next provider
