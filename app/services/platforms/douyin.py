@@ -47,9 +47,31 @@ class DouyinService(BasePlatformService):
             logger.error(f"获取抖音视频信息失败: {e}")
             return None
 
+    def _extract_detail(self, response_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        从 TikHub 响应中定位「作品详情」对象（schema 自适应）。
+
+        实测三种响应结构（见 docs/douyin-fallback-design.md §12）：
+        - web v1/v2 与 app v3：详情在 ``data.aweme_detail``
+        - hybrid/video_data：详情字段直接铺在 ``data`` 上（无 aweme_detail 包裹）
+
+        Returns:
+            Optional[Dict]: 作品详情字典；无法定位时返回 None
+        """
+        data = self._safe_get(response_data, "data")
+        if not isinstance(data, dict):
+            return None
+        aweme_detail = data.get("aweme_detail")
+        if isinstance(aweme_detail, dict) and aweme_detail:
+            return aweme_detail
+        # hybrid：data 本身即详情
+        if "aweme_id" in data:
+            return data
+        return None
+
     def _parse_response(self, response_data: Dict[str, Any]) -> Optional[VideoInfo]:
         """
-        解析抖音API响应数据
+        解析抖音API响应数据（schema 自适应，通吃 web/app/hybrid 三种结构）
 
         Args:
             response_data: API响应数据
@@ -58,9 +80,9 @@ class DouyinService(BasePlatformService):
             Optional[VideoInfo]: 解析后的视频信息对象
         """
         try:
-            aweme_detail = self._safe_get(response_data, "data.aweme_detail")
+            aweme_detail = self._extract_detail(response_data)
             if not aweme_detail:
-                logger.error("抖音响应数据中缺少aweme_detail字段")
+                logger.error("抖音响应数据中缺少作品详情字段(aweme_detail / data)")
                 return None
 
             # 基础信息

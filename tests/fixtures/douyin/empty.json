@@ -1,0 +1,9 @@
+{
+  "code": 200,
+  "router": "/api/v1/douyin/web/fetch_one_video",
+  "params": { "aweme_id": "0000000000000000000" },
+  "data": {
+    "status_code": 0,
+    "log_pb": { "impr_id": "synthetic-empty" }
+  }
+}

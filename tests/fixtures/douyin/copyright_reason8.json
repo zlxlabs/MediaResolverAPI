@@ -1,0 +1,17 @@
+{
+  "code": 200,
+  "router": "/api/v1/douyin/web/fetch_one_video",
+  "params": { "aweme_id": "0000000000000000000" },
+  "data": {
+    "status_code": 0,
+    "filter_list": [
+      {
+        "aweme_id": "0000000000000000000",
+        "reason": 8,
+        "filter_reason": "该内容因海外版权限制，暂时无法观看（短剧，电影片段等）",
+        "notice": "版权受限"
+      }
+    ],
+    "log_pb": { "impr_id": "synthetic-copyright" }
+  }
+}

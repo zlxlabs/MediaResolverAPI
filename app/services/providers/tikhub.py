@@ -4,15 +4,18 @@ TikHub 视频信息提供者
 封装对 TikHub API 的调用，支持多个平台的视频信息获取
 """
 
+import asyncio
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Tuple
 from loguru import logger
+import httpx
 
-from .base import BaseProvider, ProviderError, VideoNotFoundError
+from .base import BaseProvider, ProviderError, VideoNotFoundError, DouyinTerminalError
 from ...core.config import settings
 from ...utils.http_client import HTTPClient
+from ..platforms.douyin import DouyinService
 
 
 class TikHubProvider(BaseProvider):
@@ -47,6 +50,58 @@ class TikHubProvider(BaseProvider):
         "xiaohongshu": "share_text",  # 小红书使用完整URL
         "instagram": "url",  # Instagram使用完整URL
     }
+
+    # 抖音终态 reason（私密/部分可见）—— 再降级也拿不到，立即短路
+    DOUYIN_TERMINAL_REASONS = {5, 10}
+
+    # 抖音端点降级链：(名称, 路径, 入参名)。按序串行尝试直到命中。
+    # web v1 → web v2(同源备份) → app v3-v3(跨源 + 解版权限制 reason=8)
+    DOUYIN_CHAIN: List[Tuple[str, str, str]] = [
+        ("web_v1", "/api/v1/douyin/web/fetch_one_video", "aweme_id"),
+        ("web_v2", "/api/v1/douyin/web/fetch_one_video_v2", "aweme_id"),
+        ("app_v3", "/api/v1/douyin/app/v3/fetch_one_video_v3", "aweme_id"),
+    ]
+    # hybrid 入口兜底：吃原始 url/分享文本，内部自带短链展开（由路由层在 id 提取失败时触发）
+    DOUYIN_HYBRID: Tuple[str, str, str] = (
+        "hybrid", "/api/v1/hybrid/video_data", "url",
+    )
+
+    # 单端超时与整链总预算（秒）。单端调用 max_retries=0，靠链本身做重试，
+    # 避免 HTTPClient 默认 max_retries=3 把耗时放大到 ~180s（codex #3）。
+    DOUYIN_PER_ENDPOINT_TIMEOUT = 25
+    DOUYIN_TOTAL_BUDGET = 50.0
+
+    @staticmethod
+    def _classify_douyin(response: Dict) -> str:
+        """
+        对抖音响应做三态分类（codex #9：扫整个 filter_list，不假设 index 0）。
+
+        Returns:
+            "terminal"  : 私密/部分可见等终态，应立即短路不再试后续端点
+            "retryable" : 版权受限(reason=8)/空/异常 envelope，应试下一端点
+            "ok"        : 含作品详情，交由解析器进一步校验
+        """
+        if not isinstance(response, dict):
+            return "retryable"
+        payload = response.get("data")
+        if not isinstance(payload, dict):
+            return "retryable"
+
+        filters = payload.get("filter_list")
+        if isinstance(filters, list) and filters:
+            reasons = {
+                f.get("reason") for f in filters if isinstance(f, dict)
+            }
+            if reasons & TikHubProvider.DOUYIN_TERMINAL_REASONS:
+                return "terminal"
+            return "retryable"
+
+        # 有作品详情（web/app 的 aweme_detail，或 hybrid 的 data 根）
+        if isinstance(payload.get("aweme_detail"), dict) and payload.get("aweme_detail"):
+            return "ok"
+        if "aweme_id" in payload:
+            return "ok"
+        return "retryable"
 
     def __init__(self):
         """初始化 TikHub 提供者"""
@@ -104,6 +159,12 @@ class TikHubProvider(BaseProvider):
 
         if not self.api_key:
             raise ProviderError("TikHub API key is not configured")
+
+        # 抖音走多级端点降级链（取→分类→解析校验→重试，全在 provider 内闭环）
+        if platform == "douyin":
+            return await self._fetch_douyin(
+                video_id, original_url, use_hybrid=kwargs.get("use_hybrid", False)
+            )
 
         endpoint = self.PLATFORM_ENDPOINTS[platform]
         param_name = self.PLATFORM_PARAMS[platform]
@@ -176,6 +237,122 @@ class TikHubProvider(BaseProvider):
                 video_id=video_id
             )
             raise ProviderError(f"TikHub API request failed: {str(e)}")
+
+    async def _fetch_douyin(
+        self, video_id: str, original_url: str, use_hybrid: bool = False
+    ) -> Dict:
+        """
+        抖音多级端点降级链：串行尝试，命中即返回；终态立即短路；全失败抛错。
+
+        Args:
+            video_id: aweme_id（hybrid 模式下可为空）
+            original_url: 原始 url/分享文本（hybrid 模式使用）
+            use_hybrid: True 则只走 hybrid 入口兜底（由路由层在 id 提取失败时触发）
+
+        Returns:
+            Dict: 命中端点的原始响应（交由 adapter 用 schema 自适应解析器解析）
+
+        Raises:
+            DouyinTerminalError: 私密/部分可见等终态，立即短路
+            VideoNotFoundError: 全链失败
+            ProviderError: 总预算超时或认证失败
+        """
+        chain = [self.DOUYIN_HYBRID] if use_hybrid else list(self.DOUYIN_CHAIN)
+        attempts: List[Dict] = []
+        target = video_id or original_url
+
+        try:
+            async with asyncio.timeout(self.DOUYIN_TOTAL_BUDGET):
+                for name, path, param in chain:
+                    try:
+                        data = await self._call_douyin_endpoint(
+                            name, path, param, video_id, original_url
+                        )
+                    except DouyinTerminalError:
+                        raise
+                    except ProviderError as e:
+                        attempts.append({"endpoint": name, "decision": "http_error", "error": str(e)})
+                        self.log_warning(f"Douyin endpoint {name} http error: {e}")
+                        continue
+
+                    decision = self._classify_douyin(data)
+                    if decision == "terminal":
+                        self.log_info(
+                            "Douyin terminal response, short-circuit",
+                            endpoint=name, target=target,
+                        )
+                        raise DouyinTerminalError(
+                            f"Douyin video unavailable (private/partial): {target}"
+                        )
+                    if decision == "retryable":
+                        attempts.append({"endpoint": name, "decision": "retryable"})
+                        continue
+
+                    # ok：解析校验，解析不出可播放直链也算可重试（codex #10）
+                    if self._douyin_has_playable(data):
+                        self.log_info(
+                            "Douyin endpoint hit", endpoint=name, target=target
+                        )
+                        return data
+                    attempts.append({"endpoint": name, "decision": "parse_failed"})
+                    self.log_warning(f"Douyin endpoint {name} ok but no playable url")
+        except asyncio.TimeoutError:
+            self.log_error(
+                f"Douyin chain timed out after {self.DOUYIN_TOTAL_BUDGET}s",
+                target=target, attempts=attempts,
+            )
+            raise ProviderError(
+                f"Douyin endpoint chain timed out after {self.DOUYIN_TOTAL_BUDGET}s "
+                f"[attempts={attempts}]"
+            )
+
+        raise VideoNotFoundError(
+            f"Douyin all endpoints failed for '{target}' [attempts={attempts}]"
+        )
+
+    async def _call_douyin_endpoint(
+        self, name: str, path: str, param: str, video_id: str, original_url: str
+    ) -> Dict:
+        """
+        调单个抖音端点。单端 max_retries=0（重试交给链本身，避免超时放大）。
+
+        catch httpx.HTTPStatusError 并尽量取出错误体（codex #4）：终态/受限信息常藏在
+        4xx body 的 filter_list 里，取出来交给分类器，而非吞成不透明错误。
+        """
+        url = f"{self.api_base}{path}"
+        param_value = original_url if param == "url" else video_id
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        try:
+            async with HTTPClient(
+                timeout=self.DOUYIN_PER_ENDPOINT_TIMEOUT, max_retries=0
+            ) as client:
+                response = await client.get(
+                    url, params={param: param_value}, headers=headers
+                )
+                return response.json()
+        except httpx.HTTPStatusError as e:
+            resp = e.response
+            status = resp.status_code if resp is not None else None
+            if status == 401:
+                raise ProviderError("TikHub API authentication failed")
+            body = None
+            if resp is not None:
+                try:
+                    body = resp.json()
+                except Exception:
+                    body = None
+            if isinstance(body, dict):
+                return body  # 交给分类器判定 terminal/retryable
+            raise ProviderError(f"{name} HTTP {status}")
+        except ProviderError:
+            raise
+        except Exception as e:
+            raise ProviderError(f"{name} request failed: {e}")
+
+    def _douyin_has_playable(self, data: Dict) -> bool:
+        """用 DouyinService 的 schema 自适应解析器校验是否能解析出无水印直链。"""
+        info = DouyinService(self.api_key, self.api_base)._parse_response(data)
+        return bool(info and info.video_url)
 
     def _validate_response(self, data: Dict, platform: str) -> bool:
         """
