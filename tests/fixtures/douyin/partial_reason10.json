@@ -1,0 +1,17 @@
+{
+  "code": 200,
+  "router": "/api/v1/douyin/web/fetch_one_video",
+  "params": { "aweme_id": "0000000000000000000" },
+  "data": {
+    "status_code": 0,
+    "filter_list": [
+      {
+        "aweme_id": "0000000000000000000",
+        "reason": 10,
+        "filter_reason": "该内容被标记为部分可见，仅作者选择的部分用户可见",
+        "notice": "部分可见"
+      }
+    ],
+    "log_pb": { "impr_id": "synthetic-partial" }
+  }
+}
