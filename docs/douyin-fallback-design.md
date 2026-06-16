@@ -1,7 +1,13 @@
 # 抖音无水印解析 · 多级降级机制设计
 
-> 状态：已过 `/plan-eng-review`（架构/代码质量/测试/性能四节）+ codex 外部交叉评审。决策已锁定，待实现。
-> 分支：master ｜ 数据源：TikHub API V5.3.2
+> 状态：**已实现**（TDD，9 个测试文件 / 全量 68 passed，真实环境端点链 + hybrid 双路径冒烟通过）。
+> 分支：feat/douyin-multilevel-fallback ｜ 数据源：TikHub API V5.3.2
+> 已过 `/plan-eng-review`（架构/代码质量/测试/性能四节）+ codex 外部交叉评审。
+
+> **实现要点（与初版设计的差异，已按实测校准）：**
+> 1. 不新增 `_parse_hybrid_response`；改为 `DouyinService._extract_detail` **schema 自适应**，一个解析器通吃 web/app/hybrid（实测 app 与 web 同构、hybrid 换根；codex #11）。
+> 2. `TikHubAdapter` **无需改动** —— schema 自适应解析器使 adapter 仍走 `_parse_response` 即可。
+> 3. `HTTPClient` **无需改动** —— 已有 `max_retries` 参数，链中按 `max_retries=0` 调用即可，超时由 `asyncio.timeout` 总预算兜底。
 
 ---
 
@@ -73,19 +79,18 @@ VideoResolver.resolve  (provider 链 tikhub→… 不变)
    ▼
 TikHubProvider.fetch_video_info(douyin)  ← 取→分类→解析→重试 全在 provider 内 (E1)
    │
-   │  端点链 = [ (T1 web v1, parse_web),
-   │            (T2 web v2, parse_web),
-   │            (T3 app v3-v3, parse_app) ]
-   │  （入口为 hybrid-url 时：链首替换为 (hybrid/video_data, parse_hybrid)）
+   │  端点链 = [ T1 web v1, T2 web v2, T3 app v3-v3 ]
+   │  （use_hybrid 时：链替换为单元素 [ hybrid/video_data ]）
+   │  解析统一用 DouyinService._parse_response（schema 自适应，自动探测 detail 根）
    │
    ├─ for endpoint in chain  (总预算 asyncio.timeout ≈50s 包住整链)
-   │   ├─ fetch(endpoint, 单端超时~20-25s, HTTPClient retries 调小)
+   │   ├─ fetch(endpoint, 单端超时~25s, max_retries=0)
    │   ├─ classify(whole response):           ← #9 整响应分类器，非单索引
-   │   │     ├ TERMINAL (reason∈{5,10}/已删除/404) ─▶ raise DouyinTerminalError  ← #5 独立异常
-   │   │     │                                        └▶ 立即短路，不试后续端点
+   │   │     ├ TERMINAL (reason∈{5,10}) ─▶ raise DouyinTerminalError  ← #5 独立异常
+   │   │     │                                  └▶ 立即短路，不试后续端点
    │   │     ├ RETRYABLE (reason=8 / envelope 异常 / 空) ─▶ 试下一端点
-   │   │     └ OK ─▶ parser(response)
-   │   └─ parser 失败也算 RETRYABLE ─▶ 试下一端点   ← #10 解析失败也重试
+   │   │     └ OK ─▶ 解析校验 _douyin_has_playable
+   │   └─ 解析不出可播放直链也算 RETRYABLE ─▶ 试下一端点   ← #10
    │
    ├─ 命中 ─▶ 返回 VideoInfo
    └─ 全链失败 ─▶ VideoNotFoundError(含每端点尝试摘要)
@@ -104,40 +109,49 @@ TikHubProvider.fetch_video_info(douyin)  ← 取→分类→解析→重试 全�
 | 文件 | 改动 | 关联决策 |
 |------|------|----------|
 | `app/services/providers/tikhub.py` | douyin 的 `PLATFORM_ENDPOINTS` 单端点 → 端点链（dataclass 列表：endpoint/param/parser/kind）；`fetch_video_info` 对 douyin 走「取→分类→解析→重试」闭环；新增 `_classify_douyin(response)` 整响应分类器；catch `httpx.HTTPStatusError` 取终态体（#4）；单端超时 + 总预算 `asyncio.timeout`（#3） | E1,A1,A2,#3,#4,#9,#10 |
-| `app/services/platforms/douyin.py` | 保留 `_parse_response`，**web v1/v2/app v3 三者复用同一个**（实测均为 `data.aweme_detail` 同构，见 §12）；仅新增 `_parse_hybrid_response`（hybrid 的 `data` 即 detail，换根路径）。建议把 `_parse_response` 重构出一个吃 `detail` dict 的内部方法，两个 root 共享 | A1,结构 |
-| `app/services/providers/base.py` | 新增 `DouyinTerminalError(VideoNotFoundError)` | #5,A2 |
-| `app/services/video_resolver.py` | `resolve` 识别终态异常不再 fallback 到下一 provider；attempts 日志补端点级字段 | #5,#12 |
-| `app/services/adapters/tikhub_adapter.py` | douyin 走透传（provider 已产出 VideoInfo），不再强制 `_parse_response` | E1 |
-| `app/api/resolve.py` | 短链展开/ID 提取失败（douyin）不直接 400 → 走 hybrid 解析路径；缓存改为「拿到 aweme_id 后再写/命中」 | E2,#6,#7,#8 |
-| `app/utils/http_client.py` | 暴露可调 `max_retries`（供链式调用调小，避免重试×端点放大）| #3 |
-| 测试 fixtures | 新增脱敏真实样本：T1/T2/T3/版权/私密/删除/hybrid | #13 |
+| `app/services/platforms/douyin.py` | ✅ `_parse_response` 改为 schema 自适应（新增 `_extract_detail` 自动探测 `data.aweme_detail` 或 `data` 根），web/app/hybrid 三者复用同一解析器 | A1,结构 |
+| `app/services/providers/base.py` | ✅ 新增 `DouyinTerminalError(VideoNotFoundError)`（并由 `providers/__init__` 导出） | #5,A2 |
+| `app/services/providers/tikhub.py` | ✅ 抖音端点降级链 `_fetch_douyin` + `_classify_douyin` 分类器 + `_call_douyin_endpoint`(catch HTTPStatusError) + `_douyin_has_playable` 解析校验 + 单端超时/总预算 | E1,A1,A2,#3,#4,#9,#10 |
+| `app/services/video_resolver.py` | ✅ `resolve` 识别 `DouyinTerminalError` 不再 fallback；新增 `use_hybrid` 透传 | #5 |
+| `app/services/adapters/tikhub_adapter.py` | ⬜ 无需改动（schema 自适应解析器使 adapter 维持 `_parse_response`） | E1 |
+| `app/api/resolve.py` | ✅ 短链展开/ID 提取失败（douyin）不 400 → 走 hybrid；用解析出的 aweme_id 归一化缓存键 | E2,#6,#7,#8 |
+| `app/services/url_parser.py` | ✅ 新增 `identify_platform`（仅按域名识别，不要求能提 ID） | E2 |
+| `app/utils/http_client.py` | ⬜ 无需改动（已有 `max_retries`，链中传 0 即可） | #3 |
+| `tests/fixtures/douyin/` | ✅ 真实样本 web_v1/web_v2/app_v3/hybrid + 合成 private/partial/copyright/empty/ok_no_video | #13 |
 
-约 7 个文件，0~1 个新数据类 + 1 个新异常类，未触发复杂度硬上限。
+实际改动 6 个源文件（+1 个 `__init__` 导出），1 个新异常类，未触发复杂度硬上限。终态真实样本（私密/删除）仍可用 `scripts/collect_douyin_fixtures.py --prefix` 按需补采。
 
 ---
 
 ## 6. 测试计划（complete-by-default，全部 mock `HTTPClient` + 真实样本 fixture）
 
-`tests/fixtures/douyin/`（新建，**脱敏真实响应**，#13）：`web_v1.json`、`web_v2.json`、`app_v3.json`、`copyright_reason8.json`、`private_reason5.json`、`deleted.json`、`hybrid.json`。
+`tests/fixtures/douyin/`（**脱敏真实响应** + 合成终态，#13）：真实 `web_v1.json`/`web_v2.json`/`app_v3.json`/`hybrid.json`；合成 `private_reason5.json`/`partial_reason10.json`/`copyright_reason8.json`/`empty.json`/`ok_no_video.json`。
 
-`tests/test_tikhub_provider_douyin.py`（新建）：
+`tests/test_tikhub_provider_douyin.py`（异常 + 分类器 + 端点链）：
+- 异常契约：`DouyinTerminalError` 是 `VideoNotFoundError` 子类
+- 分类器：web/app/hybrid→ok；reason 5/10→terminal；reason 8/empty→retryable；扫整 filter_list（codex #9）
 - T1 命中即返回，断言 T2/T3 **未被调用**
-- T1 空 → T2 命中
-- T1/T2 空(reason=8) → T3(v3) 命中
-- **reason=5/10 / 已删除 → `DouyinTerminalError`，断言 T2/T3 未被调用**（回归铁律：终态短路核心保证）
-- 解析失败（envelope 合法但 `play_addr` 缺失）→ 视为可重试，试下一端点（#10）
-- 全链空 → `VideoNotFoundError`，错误含各端点尝试摘要
-- 总预算超时 → 在 ~50s 处中止，不到 180s（#3）
-- `httpx.HTTPStatusError` 携带终态体 → 正确分类（#4）
+- T1 空 → T2 命中；T1/T2 reason=8 → T3(v3) 命中
+- **reason=5/10 → `DouyinTerminalError`，断言后续端点未被调用**（回归铁律）
+- 解析失败（envelope 合法但无直链 `ok_no_video`）→ 可重试，试下一端点（#10）
+- 全链空 → `VideoNotFoundError`；单端 HTTP error → 继续下一端点
+- `use_hybrid=True` → 只调 hybrid
+- `httpx.HTTPStatusError` 携终态体 → 取出并正确分类（#4）
+- 总预算超时 → `ProviderError("timed out")`，不到 180s（#3）
 
-`tests/test_douyin_parser.py`（新建）：
-- `_parse_response` / `_parse_app_response` / `_parse_hybrid_response` 各吃对应 fixture → 同一 `VideoInfo` 形状，断言 `video_url` 非空、宽高/统计映射正确
+`tests/test_douyin_parser.py`（解析器 schema 自适应）：
+- `_parse_response` 吃 web_v1/web_v2/app_v3/hybrid → 同一 `VideoInfo` 形状，`video_url` 非空、宽高/统计正确
+- hybrid 根为 `data` 本身仍解析成功；private/partial/empty → None
 
-`tests/test_url_parser.py` / `test_resolve_api.py`（扩展/新建）：
-- douyin 短链展开失败 / id 提取失败 → 触发 hybrid 路径（[→整合]：路由层到 provider 的一条整合测试）
-- 终态视频 → API 返回清晰错误而非空白失败
+`tests/test_video_resolver_terminal.py`（resolver 终态 / T6）：
+- `DouyinTerminalError` 立即停链不 fallback；普通 `ProviderError` 仍继续下一 provider
 
-唯一整合测试：「短剧降级到 T3」与「入口失败走 hybrid」跨层链路。无 LLM/E2E 需求。
+`tests/test_resolve_hybrid.py`（路由层 hybrid / T7，整合）：
+- 正常路径走 video_id（非 hybrid）
+- 抖音短链展开失败 / ID 提取失败 → 走 hybrid 并用返回 aweme_id 归一化
+- 非抖音展开失败 → 维持 400
+
+全量 68 passed；真实环境端点链 + hybrid 双路径冒烟通过。无 LLM/E2E 需求。
 
 ---
 
@@ -194,35 +208,35 @@ TikHubProvider.fetch_video_info(douyin)  ← 取→分类→解析→重试 全�
 
 > 由本次评审 + codex 外部意见综合，每项对应具体发现。
 
-- [ ] **T1 (P1, human ~1h / CC ~10min)** — providers/base — 新增 `DouyinTerminalError(VideoNotFoundError)`
+- [x] **T1 (P1, human ~1h / CC ~10min)** — providers/base — 新增 `DouyinTerminalError(VideoNotFoundError)`
   - Surfaced by: codex #5 — 终态在 resolver 层会被 continue 到下个 provider
   - Files: `app/services/providers/base.py`
   - Verify: import + isinstance 测试
-- [ ] **T2 (P1, human ~2h / CC ~20min)** — providers/tikhub — douyin 整响应分类器 `_classify_douyin`（terminal/retryable/ok）
+- [x] **T2 (P1, human ~2h / CC ~20min)** — providers/tikhub — douyin 整响应分类器 `_classify_douyin`（terminal/retryable/ok）
   - Surfaced by: A2 + codex #9/#10 — 区分终态/可重试，整响应而非单索引，解析失败也可重试
   - Files: `app/services/providers/tikhub.py`
   - Verify: `test_tikhub_provider_douyin.py` 分类用例
-- [ ] **T3 (P1, human ~3h / CC ~25min)** — providers/tikhub + platforms/douyin — douyin 端点链 + provider 内「取→分类→解析→重试」闭环；web v1/v2/app v3 复用 `_parse_response`，仅新增 `_parse_hybrid_response`（实测 app v3 同构、hybrid 换根，见 §12）
+- [x] **T3 (P1, human ~3h / CC ~25min)** — providers/tikhub + platforms/douyin — douyin 端点链 + provider 内「取→分类→解析→重试」闭环；web v1/v2/app v3 复用 `_parse_response`，仅新增 `_parse_hybrid_response`（实测 app v3 同构、hybrid 换根，见 §12）
   - Surfaced by: 范围(三级链) + A1 + E1 — 每端点独立解析器、解析搬进 provider
   - Files: `app/services/providers/tikhub.py`, `app/services/platforms/douyin.py`, `app/services/adapters/tikhub_adapter.py`
   - Verify: 链顺序/命中/全失败用例
-- [ ] **T4 (P1, human ~1h / CC ~10min)** — utils/http_client + tikhub — 单端超时 ~20-25s + `asyncio.timeout` 总预算 ~50s + 调小 retries
+- [x] **T4 (P1, human ~1h / CC ~10min)** — utils/http_client + tikhub — 单端超时 ~20-25s + `asyncio.timeout` 总预算 ~50s + 调小 retries
   - Surfaced by: 性能问题4 + codex #3 — max_retries=3 放大超时到 ~180s+
   - Files: `app/utils/http_client.py`, `app/services/providers/tikhub.py`
   - Verify: 总预算超时用例
-- [ ] **T5 (P1, human ~1h / CC ~10min)** — providers/tikhub — catch `httpx.HTTPStatusError` 取终态响应体
+- [x] **T5 (P1, human ~1h / CC ~10min)** — providers/tikhub — catch `httpx.HTTPStatusError` 取终态响应体
   - Surfaced by: codex #4 — raise_for_status 让 404/429 分支成死代码
   - Files: `app/services/providers/tikhub.py`, `app/utils/http_client.py`
   - Verify: HTTPStatusError 携终态体分类用例
-- [ ] **T6 (P1, human ~1h / CC ~10min)** — services/video_resolver — 终态异常不再 fallback 到下个 provider + attempts 端点级日志
+- [x] **T6 (P1, human ~1h / CC ~10min)** — services/video_resolver — 终态异常不再 fallback 到下个 provider + attempts 端点级日志
   - Surfaced by: codex #5/#12
   - Files: `app/services/video_resolver.py`
   - Verify: env 覆盖链时终态不 fallback 用例
-- [ ] **T7 (P1, human ~2.5h / CC ~20min)** — api/resolve + url_parser — 短链展开/ID 提取失败走 hybrid 路径 + 缓存语义（拿到 aweme_id 后写/命中）
+- [x] **T7 (P1, human ~2.5h / CC ~20min)** — api/resolve + url_parser — 短链展开/ID 提取失败走 hybrid 路径 + 缓存语义（拿到 aweme_id 后写/命中）
   - Surfaced by: 范围(hybrid 兜底) + E2 + codex #6/#7/#8
   - Files: `app/api/resolve.py`, `app/services/url_parser.py`
   - Verify: 入口失败→hybrid 整合测试 + 缓存归一化用例
-- [ ] **T8 (P1, human ~2h / CC ~20min)** — tests — fixtures(脱敏真实样本) + 全部单测/整合测试
+- [x] **T8 (P1, human ~2h / CC ~20min)** — tests — fixtures(脱敏真实样本) + 全部单测/整合测试
   - Surfaced by: 测试评审 + codex #13
   - Files: `tests/fixtures/douyin/*.json`, `tests/test_tikhub_provider_douyin.py`, `tests/test_douyin_parser.py`, `tests/test_url_parser.py`, `tests/test_resolve_api.py`
   - Verify: `pytest tests/ -q`
