@@ -251,11 +251,11 @@ class URLParser:
     def _extract_instagram_id(self, url: str) -> Optional[str]:
         """提取Instagram帖子ID"""
         # 格式: https://www.instagram.com/reel/DOtvKBZDCAO/
+        # 或: https://www.instagram.com/reels/DOtvKBZDCAO/
         # 或: https://www.instagram.com/p/DOtvKBZDCAO/
-        if '/reel/' in url or '/p/' in url:
-            match = re.search(r'/(reel|p)/([a-zA-Z0-9_-]+)', url)
-            if match:
-                return match.group(2)
+        match = re.search(r'/(?:reels?|p|tv)/([a-zA-Z0-9_-]+)', url)
+        if match:
+            return match.group(1)
 
         return None
 
