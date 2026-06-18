@@ -145,6 +145,25 @@ async def test_param_construction_per_endpoint(monkeypatch):
     assert seen["app_v3_v3"] == {"aweme_id": AID}
 
 
+def test_has_playable_suppresses_error_file_writes(monkeypatch):
+    """
+    评审 Issue 12：校验路径解析失败不得落盘（降级链每端点都写会放大写盘）。
+    _tiktok_has_playable 必须置 suppress_error_save，使 _save_error_response 跳过写文件。
+    """
+    provider = TikHubProvider()
+    wrote = []
+    # 若真去落盘，open 会被调用——这里断言根本不应触达落盘逻辑
+    monkeypatch.setattr(
+        "app.services.platforms.tiktok.open",
+        lambda *a, **k: wrote.append(a) or (_ for _ in ()).throw(AssertionError("不应写文件")),
+        raising=False,
+    )
+    # aweme_detail 存在但无 video → 解析失败路径（会触发 _save_error_response）
+    bad = {"data": {"aweme_detail": {"aweme_id": "x", "desc": "no video"}}}
+    assert provider._tiktok_has_playable(bad) is False
+    assert wrote == []  # 抑制生效，零写盘
+
+
 async def test_chain_total_budget_timeout(monkeypatch):
     provider = TikHubProvider()
     monkeypatch.setattr(TikHubProvider, "TIKTOK_TOTAL_BUDGET", 0.05)

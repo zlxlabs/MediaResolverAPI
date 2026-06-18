@@ -611,7 +611,10 @@ class TikHubProvider(BaseProvider):
 
     def _tiktok_has_playable(self, data: Dict) -> bool:
         """用 TikTokService（非 DouyinService）校验直链，保 play_addr_h264 优先（Issue 7）。"""
-        info = TikTokService(self.api_key, self.api_base)._parse_response(data)
+        svc = TikTokService(self.api_key, self.api_base)
+        # 校验路径抑制失败落盘，避免降级链每个端点解析失败都写文件（评审 Issue 12）。
+        svc.suppress_error_save = True
+        info = svc._parse_response(data)
         return bool(info and info.video_url)
 
     async def _fetch_instagram(self, video_id: str, original_url: str) -> Dict:
