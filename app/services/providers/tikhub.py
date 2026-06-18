@@ -31,6 +31,7 @@ from ..platforms.xiaohongshu import XiaohongshuService
 from ..platforms.kuaishou import KuaishouService
 from ..platforms.tiktok import TikTokService
 from ..platforms.instagram import InstagramService
+from ..platforms.youtube import YouTubeService
 
 
 class TikHubProvider(BaseProvider):
@@ -135,6 +136,32 @@ class TikHubProvider(BaseProvider):
     ]
     INSTAGRAM_PER_ENDPOINT_TIMEOUT = 25
     INSTAGRAM_TOTAL_BUDGET = 55.0
+
+    # YouTube 端点降级链：(名称, 路径, 入参名)。两端 video_id 入参。
+    # web(data.videos.items, 预解析直链) → web_v2(data.streamingData.formats, muxed)。
+    # 实测 schema 不同，YouTubeService 自适应（_adaptive_video_streams）。
+    # v3(playerResponse) / web_v2/get_video_info(snake_case) 另一套 schema，暂不入链（见 TODOS）。
+    # YouTube 有 cobalt 兜底 → 分类器不出终态（_classify_youtube）。
+    YOUTUBE_CHAIN: List[Tuple[str, str, str]] = [
+        ("web", "/api/v1/youtube/web/get_video_info", "video_id"),
+        ("web_v2", "/api/v1/youtube/web/get_video_info_v2", "video_id"),
+    ]
+    YOUTUBE_PER_ENDPOINT_TIMEOUT = 25
+    YOUTUBE_TOTAL_BUDGET = 55.0
+
+    @staticmethod
+    def _classify_youtube(response: Dict) -> str:
+        """
+        YouTube 三态分类。YouTube 有 cobalt 兜底 → 永不出终态（评审 Issue 6）。
+
+        Returns:
+            "retryable" : 定位不到 envelope 数据（空/错误/区域限制等）
+            "ok"        : 有 envelope 数据，交由解析器判定是否含可用视频流
+        """
+        if not isinstance(response, dict):
+            return "retryable"
+        data = response.get("data")
+        return "ok" if isinstance(data, dict) and data else "retryable"
 
     @staticmethod
     def _classify_instagram(response: Dict) -> str:
@@ -325,6 +352,10 @@ class TikHubProvider(BaseProvider):
         # Instagram 走多级端点降级链（v2 → v1_by_url）
         if platform == "instagram":
             return await self._fetch_instagram(video_id, original_url)
+
+        # YouTube 走多级端点降级链（web → web_v2）
+        if platform == "youtube":
+            return await self._fetch_youtube(video_id, original_url)
 
         endpoint = self.PLATFORM_ENDPOINTS[platform]
         param_name = self.PLATFORM_PARAMS[platform]
@@ -701,6 +732,37 @@ class TikHubProvider(BaseProvider):
     def _instagram_has_playable(self, data: Dict) -> bool:
         """用 InstagramService（自动识别 v1/v2 schema）校验是否能解析出视频直链。"""
         info = InstagramService(self.api_key, self.api_base)._parse_response(data)
+        return bool(info and info.video_url)
+
+    async def _fetch_youtube(self, video_id: str, original_url: str) -> Dict:
+        """
+        YouTube 多级降级（薄封装，骨架见 _run_chain）。
+
+        链：web/get_video_info(data.videos.items) → web/get_video_info_v2(streamingData)。
+        两端 video_id 入参，YouTubeService 自适应两套 schema。
+        YouTube 有 cobalt 兜底 → 不出终态（区域限制/无流 → has_playable False → retryable → cobalt）。
+        """
+        chain = list(self.YOUTUBE_CHAIN)
+
+        def build_params(endpoint: Tuple) -> Dict:
+            _name, _path, param = endpoint
+            return {param: video_id}
+
+        return await self._run_chain(
+            chain=chain,
+            build_params=build_params,
+            classify=self._classify_youtube,
+            has_playable=self._youtube_has_playable,
+            terminal_exc=TerminalError,  # 占位：cobalt 兜底平台不出终态，不会被 raise
+            total_budget=self.YOUTUBE_TOTAL_BUDGET,
+            per_timeout=self.YOUTUBE_PER_ENDPOINT_TIMEOUT,
+            target=video_id or original_url,
+            label="YouTube",
+        )
+
+    def _youtube_has_playable(self, data: Dict) -> bool:
+        """用 YouTubeService（自适应 videos.items / streamingData）校验是否能解析出视频流。"""
+        info = YouTubeService(self.api_key, self.api_base)._parse_response(data)
         return bool(info and info.video_url)
 
     def _validate_response(self, data: Dict, platform: str) -> bool:

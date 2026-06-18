@@ -1,0 +1,34 @@
+{
+  "data": {
+    "videoDetails": {
+      "videoId": "dQw4w9WgXcQ",
+      "title": "youtube test (v2)",
+      "shortDescription": "desc",
+      "author": "Rick Astley",
+      "channelId": "UCuAXFkgsw1L7xaCfnd5JJOw",
+      "viewCount": "1000000"
+    },
+    "streamingData": {
+      "formats": [
+        {
+          "itag": 18,
+          "url": "https://rr2.googlevideo.com/yt_v2_360.mp4",
+          "width": 640,
+          "height": 360,
+          "qualityLabel": "360p",
+          "mimeType": "video/mp4; codecs=\"avc1.42001E, mp4a.40.2\""
+        }
+      ],
+      "adaptiveFormats": [
+        {
+          "itag": 137,
+          "url": "https://rr2.googlevideo.com/yt_v2_1080_videoonly.mp4",
+          "width": 1920,
+          "height": 1080,
+          "qualityLabel": "1080p",
+          "mimeType": "video/mp4; codecs=\"avc1.640028\""
+        }
+      ]
+    }
+  }
+}

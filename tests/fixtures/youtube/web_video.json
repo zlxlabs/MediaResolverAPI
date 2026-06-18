@@ -1,0 +1,22 @@
+{
+  "data": {
+    "id": "dQw4w9WgXcQ",
+    "title": "youtube test (web)",
+    "description": "desc",
+    "channel": {"name": "Rick Astley", "id": "UCuAXFkgsw1L7xaCfnd5JJOw"},
+    "viewCount": 1000000,
+    "likeCount": 50000,
+    "publishedTime": "2009-10-25",
+    "videos": {
+      "items": [
+        {
+          "url": "https://rr2.googlevideo.com/yt_web_1080.mp4",
+          "width": 1920,
+          "height": 1080,
+          "quality": "1080p",
+          "hasAudio": true
+        }
+      ]
+    }
+  }
+}
