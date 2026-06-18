@@ -5,11 +5,7 @@ TikHub 视频信息提供者
 """
 
 import asyncio
-import json
-from datetime import datetime
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-from loguru import logger
+from typing import Callable, Dict, List, Optional, Tuple
 import httpx
 
 import re
@@ -19,13 +15,19 @@ from .base import (
     BaseProvider,
     ProviderError,
     VideoNotFoundError,
+    TerminalError,
     DouyinTerminalError,
     XhsTerminalError,
+    KuaishouTerminalError,
 )
 from ...core.config import settings
 from ...utils.http_client import HTTPClient
 from ..platforms.douyin import DouyinService
 from ..platforms.xiaohongshu import XiaohongshuService
+from ..platforms.kuaishou import KuaishouService
+from ..platforms.tiktok import TikTokService
+from ..platforms.instagram import InstagramService
+from ..platforms.youtube import YouTubeService
 
 
 class TikHubProvider(BaseProvider):
@@ -41,28 +43,12 @@ class TikHubProvider(BaseProvider):
     - instagram
     """
 
-    # 平台与 TikHub API 端点的映射
-    PLATFORM_ENDPOINTS = {
-        "douyin": "/api/v1/douyin/web/fetch_one_video",
-        "tiktok": "/api/v1/tiktok/app/v3/fetch_one_video",
-        "kuaishou": "/api/v1/kuaishou/web/fetch_one_video_v2",
-        "youtube": "/api/v1/youtube/web/get_video_info",
-        # 旧端点 web/get_note_info_v3 已被 TikHub 下线(404)；小红书改走 XHS_CHAIN 多级降级
-        # （此处仅供 supports_platform 识别，实际取数见 _fetch_xiaohongshu）
-        "xiaohongshu": "/api/v1/xiaohongshu/app_v2/get_video_note_detail",
-        # 旧端点 web_app/fetch_post_media_by_url 已被 TikHub 下线(404)，改用 v2
-        "instagram": "/api/v1/instagram/v2/fetch_post_info",
-    }
-
-    # 平台与视频ID参数名的映射
-    PLATFORM_PARAMS = {
-        "douyin": "aweme_id",
-        "tiktok": "aweme_id",
-        "kuaishou": "photo_id",
-        "youtube": "video_id",
-        "xiaohongshu": "share_text",  # 小红书使用完整URL
-        "instagram": "code_or_url",  # Instagram v2 接受 shortcode 或完整URL
-    }
+    # 支持的平台集合（supports_platform 的唯一真相来源）。
+    # 各平台的实际端点不再是单值，而是多级降级链（见 *_CHAIN 常量 + _fetch_<plat>），
+    # 原 PLATFORM_ENDPOINTS/PLATFORM_PARAMS 已随通用 GET 路径删除（评审 Issue 3）。
+    SUPPORTED_PLATFORMS = frozenset({
+        "douyin", "tiktok", "kuaishou", "youtube", "xiaohongshu", "instagram",
+    })
 
     # 抖音终态 reason（私密/部分可见）—— 再降级也拿不到，立即短路
     DOUYIN_TERMINAL_REASONS = {5, 10}
@@ -93,6 +79,101 @@ class TikHubProvider(BaseProvider):
     ]
     XHS_PER_ENDPOINT_TIMEOUT = 25
     XHS_TOTAL_BUDGET = 50.0
+
+    # 快手端点降级链：(名称, 路径, 入参名)。串行尝试直到命中。
+    # web_v2 仅凭 photo_id（现状，data.photo）→ 首选；
+    # web_share 吃 share_text=原始url（data 为 list），覆盖 id 提取失败的兜底，
+    # 与 web_v2 同一套 camelCase manifest schema，解析器自适应（见 KuaishouService._extract_photo）。
+    # app/* 端点为另一套 snake_case schema，暂不入链（见 TODOS）。
+    KUAISHOU_CHAIN: List[Tuple[str, str, str]] = [
+        ("web_v2", "/api/v1/kuaishou/web/fetch_one_video_v2", "photo_id"),
+        ("web_share", "/api/v1/kuaishou/web/fetch_one_video", "share_text"),
+    ]
+    # 2 端点 × 25s = 50s，总预算留 5s 余量保证两端都能跑（codex/Issue 4）。
+    KUAISHOU_PER_ENDPOINT_TIMEOUT = 25
+    KUAISHOU_TOTAL_BUDGET = 55.0
+
+    # TikTok 端点降级链：(名称, 路径, 入参名)。同源抖音 schema（data.aweme_detail），
+    # 三端同 schema 由 TikTokService 解析（保 play_addr_h264 优先，评审 Issue 7）。
+    # share_url(aweme_details 复数) / web(itemId) 为另一套 schema，暂不入链（见 TODOS）。
+    # TikTok 有 cobalt 兜底 → 分类器不出终态（_classify_tiktok），链走完落 cobalt。
+    TIKTOK_CHAIN: List[Tuple[str, str, str]] = [
+        ("app_v3", "/api/v1/tiktok/app/v3/fetch_one_video", "aweme_id"),
+        ("app_v3_v2", "/api/v1/tiktok/app/v3/fetch_one_video_v2", "aweme_id"),
+        ("app_v3_v3", "/api/v1/tiktok/app/v3/fetch_one_video_v3", "aweme_id"),
+    ]
+    # 长链（3 端点）单端降至 18s，总预算 60s（3×18=54<60，保证三端都能跑，Issue 4）。
+    TIKTOK_PER_ENDPOINT_TIMEOUT = 18
+    TIKTOK_TOTAL_BUDGET = 60.0
+
+    # Instagram 端点降级链：(名称, 路径, 入参名)。两端入参都喂原始 url（code_or_url
+    # 接受 shortcode 或 url；post_url 接受 url），仅参数名不同。
+    # v3(400 flaky) / v1_by_id(需数字 post_id) 暂不入链（见 TODOS）。
+    # IG 有 cobalt 兜底 → 分类器不出终态（_classify_instagram，含轮播非视频 Issue 8）。
+    INSTAGRAM_CHAIN: List[Tuple[str, str, str]] = [
+        ("v2", "/api/v1/instagram/v2/fetch_post_info", "code_or_url"),
+        ("v1_by_url", "/api/v1/instagram/v1/fetch_post_by_url", "post_url"),
+    ]
+    INSTAGRAM_PER_ENDPOINT_TIMEOUT = 25
+    INSTAGRAM_TOTAL_BUDGET = 55.0
+
+    # YouTube 端点降级链：(名称, 路径, 入参名)。两端 video_id 入参。
+    # web(data.videos.items, 预解析直链) → web_v2(data.streamingData.formats, muxed)。
+    # 实测 schema 不同，YouTubeService 自适应（_adaptive_video_streams）。
+    # v3(playerResponse) / web_v2/get_video_info(snake_case) 另一套 schema，暂不入链（见 TODOS）。
+    # YouTube 有 cobalt 兜底 → 分类器不出终态（_classify_youtube）。
+    YOUTUBE_CHAIN: List[Tuple[str, str, str]] = [
+        ("web", "/api/v1/youtube/web/get_video_info", "video_id"),
+        ("web_v2", "/api/v1/youtube/web/get_video_info_v2", "video_id"),
+    ]
+    YOUTUBE_PER_ENDPOINT_TIMEOUT = 25
+    YOUTUBE_TOTAL_BUDGET = 55.0
+
+    @staticmethod
+    def _classify_youtube(response: Dict) -> str:
+        """
+        YouTube 三态分类。YouTube 有 cobalt 兜底 → 永不出终态（评审 Issue 6）。
+
+        Returns:
+            "retryable" : 定位不到 envelope 数据（空/错误/区域限制等）
+            "ok"        : 有 envelope 数据，交由解析器判定是否含可用视频流
+        """
+        if not isinstance(response, dict):
+            return "retryable"
+        data = response.get("data")
+        return "ok" if isinstance(data, dict) and data else "retryable"
+
+    @staticmethod
+    def _classify_instagram(response: Dict) -> str:
+        """
+        IG 三态分类。IG 有 cobalt 兜底 → 永不出终态（评审 Issue 6）；非视频（图文/
+        轮播）≠不可用——轮播子节点可能含视频（codex Issue 8），统一交 has_playable
+        判定，判不出 → retryable 落 cobalt。
+
+        Returns:
+            "retryable" : 定位不到 envelope 数据（空/错误）
+            "ok"        : 有 envelope 数据，交由解析器判定是否含视频
+        """
+        if not isinstance(response, dict):
+            return "retryable"
+        data = response.get("data")
+        return "ok" if isinstance(data, dict) and data else "retryable"
+
+    @staticmethod
+    def _classify_kuaishou(response: Dict) -> str:
+        """
+        快手响应三态分类。快手为 tikhub 单源平台，但当前无已确认的终态样本
+        （私密/删除），故只出 ok/retryable，不臆造终态（私密/删除会走完链 →
+        VideoNotFoundError，零误报；见评审 Issue 2）。
+
+        Returns:
+            "retryable" : 定位不到视频节点（空/错误 envelope），试下一端点
+            "ok"        : 定位到视频节点，交由解析器进一步校验
+        """
+        if not isinstance(response, dict):
+            return "retryable"
+        node = KuaishouService._extract_photo(response)
+        return "ok" if node else "retryable"
 
     @staticmethod
     def _classify_xhs(response: Dict) -> str:
@@ -126,12 +207,18 @@ class TikHubProvider(BaseProvider):
         return urllib.parse.unquote(match.group(1))
 
     @staticmethod
-    def _classify_douyin(response: Dict) -> str:
+    def _classify_aweme(response: Dict, *, allow_terminal: bool) -> str:
         """
-        对抖音响应做三态分类（codex #9：扫整个 filter_list，不假设 index 0）。
+        抖音/TikTok 同源 envelope 三态分类（aweme_detail/aweme_id/filter_list）。
+        codex #9：扫整个 filter_list，不假设 index 0。
+
+        allow_terminal：
+          True  — 单源平台（抖音，无 cobalt）：命中终态 reason 立即短路。
+          False — 有 cobalt 兜底的平台（TikTok）：终态降级为 retryable，让链走完后
+                  落到 cobalt（评审 Issue 6：误判终态会让 cobalt 永远跑不到）。
 
         Returns:
-            "terminal"  : 私密/部分可见等终态，应立即短路不再试后续端点
+            "terminal"  : 仅 allow_terminal 时，私密/部分可见等终态
             "retryable" : 版权受限(reason=8)/空/异常 envelope，应试下一端点
             "ok"        : 含作品详情，交由解析器进一步校验
         """
@@ -146,7 +233,7 @@ class TikHubProvider(BaseProvider):
             reasons = {
                 f.get("reason") for f in filters if isinstance(f, dict)
             }
-            if reasons & TikHubProvider.DOUYIN_TERMINAL_REASONS:
+            if allow_terminal and (reasons & TikHubProvider.DOUYIN_TERMINAL_REASONS):
                 return "terminal"
             return "retryable"
 
@@ -156,6 +243,16 @@ class TikHubProvider(BaseProvider):
         if "aweme_id" in payload:
             return "ok"
         return "retryable"
+
+    @staticmethod
+    def _classify_douyin(response: Dict) -> str:
+        """抖音（tikhub 单源）：允许终态短路。"""
+        return TikHubProvider._classify_aweme(response, allow_terminal=True)
+
+    @staticmethod
+    def _classify_tiktok(response: Dict) -> str:
+        """TikTok（有 cobalt 兜底）：终态降级为 retryable，链走完落 cobalt（Issue 6）。"""
+        return TikHubProvider._classify_aweme(response, allow_terminal=False)
 
     def __init__(self):
         """初始化 TikHub 提供者"""
@@ -181,7 +278,7 @@ class TikHubProvider(BaseProvider):
         Returns:
             bool: 是否支持
         """
-        return platform.lower() in self.PLATFORM_ENDPOINTS
+        return platform.lower() in self.SUPPORTED_PLATFORMS
 
     async def fetch_video_info(
         self,
@@ -224,282 +321,140 @@ class TikHubProvider(BaseProvider):
         if platform == "xiaohongshu":
             return await self._fetch_xiaohongshu(video_id, original_url)
 
-        endpoint = self.PLATFORM_ENDPOINTS[platform]
-        param_name = self.PLATFORM_PARAMS[platform]
-        url = f"{self.api_base}{endpoint}"
+        # 快手走多级端点降级链（web_v2 → web_share）
+        if platform == "kuaishou":
+            return await self._fetch_kuaishou(video_id, original_url)
 
-        # 小红书和Instagram需要传递完整URL，其他平台传递video_id
-        if platform in ["xiaohongshu", "instagram"]:
-            param_value = original_url
-        else:
-            param_value = video_id
+        # TikTok 走多级端点降级链（app/v3 → _v2 → _v3）
+        if platform == "tiktok":
+            return await self._fetch_tiktok(video_id, original_url)
 
-        self.log_info(
-            f"Fetching video info from TikHub",
-            platform=platform,
-            video_id=video_id,
-            endpoint=endpoint,
-            param_name=param_name,
-            param_value=param_value
-        )
+        # Instagram 走多级端点降级链（v2 → v1_by_url）
+        if platform == "instagram":
+            return await self._fetch_instagram(video_id, original_url)
 
-        try:
-            async with HTTPClient() as client:
-                response = await client.get(
-                    url,
-                    params={param_name: param_value},
-                    headers={"Authorization": f"Bearer {self.api_key}"},
-                    timeout=60.0  # 60秒超时
-                )
+        # YouTube 走多级端点降级链（web → web_v2）
+        if platform == "youtube":
+            return await self._fetch_youtube(video_id, original_url)
 
-                if response.status_code == 404:
-                    raise VideoNotFoundError(f"Video not found: {video_id}")
-                elif response.status_code == 401:
-                    raise ProviderError("TikHub API authentication failed")
-                elif response.status_code == 429:
-                    raise ProviderError("TikHub API rate limit exceeded")
-                elif response.status_code != 200:
-                    raise ProviderError(
-                        f"TikHub API returned error: {response.status_code} - {response.text}"
-                    )
+        # 全 6 平台均已走通用引擎多级降级链；到此说明 SUPPORTED_PLATFORMS 加了平台
+        # 却漏接 dispatch 分支 —— 显式报错而非静默返回 None（防隐藏路径）。
+        raise ProviderError(f"No fallback chain wired for platform '{platform}'")
 
-                data = response.json()
+    # ================= 通用多级降级引擎（抖音/小红书/快手/TikTok/IG/YT 共用） =================
+    #
+    #   取 token/参数 → build_chain(按条件裁剪) ──┐
+    #                                            ▼
+    #   ┌──────────────── _run_chain（asyncio.timeout 总预算兜底）────────────────┐
+    #   │  for endpoint in chain:                                                 │
+    #   │     data = _call_endpoint(name, path, build_params(endpoint))  # 单端    │
+    #   │              · max_retries=0（重试交给链，避免超时放大 codex #3）          │
+    #   │              · 4xx 取 body 交分类器（终态信息常藏 body codex #4）          │
+    #   │     decision = classify(data)                                           │
+    #   │        terminal  → raise terminal_exc        # 立即短路                   │
+    #   │        retryable → 记录, 下一端点                                         │
+    #   │        ok        → has_playable(data)?                                   │
+    #   │                       return data            # 命中即停                   │
+    #   │                       记 parse_failed, 下一端点                          │
+    #   └────────────────────────────────────────────────────────────────────────┘
+    #   超时 → ProviderError("timed out")   全链未命中 → VideoNotFoundError
+    #
+    # 各平台只配置差异：chain（端点表）/ build_params（入参构造）/ classify（三态分类器）
+    # / has_playable（解析校验）/ terminal_exc（终态异常类）。骨架在此唯一实现（DRY）。
 
-                # 检查响应数据的有效性
-                if not self._validate_response(data, platform):
-                    self.log_error(
-                        f"Invalid video data returned from TikHub",
-                        platform=platform,
-                        video_id=video_id,
-                        response_keys=list(data.keys()) if isinstance(data, dict) else None,
-                        data_keys=list(data.get("data", {}).keys()) if isinstance(data, dict) and "data" in data else None
-                    )
-                    # Save failed response to logs folder for debugging
-                    self._save_failed_response(data, platform, video_id)
-                    raise VideoNotFoundError(f"Invalid video data returned from TikHub")
-
-                self.log_info(
-                    f"Successfully fetched video info from TikHub",
-                    platform=platform,
-                    video_id=video_id
-                )
-
-                return data
-
-        except (VideoNotFoundError, ProviderError):
-            raise
-        except Exception as e:
-            self.log_error(
-                f"Failed to fetch video info from TikHub: {e}",
-                platform=platform,
-                video_id=video_id
-            )
-            raise ProviderError(f"TikHub API request failed: {str(e)}")
-
-    async def _fetch_douyin(
-        self, video_id: str, original_url: str, use_hybrid: bool = False
+    async def _run_chain(
+        self,
+        *,
+        chain: List[Tuple],
+        build_params: Callable[[Tuple], Dict],
+        classify: Callable[[Dict], str],
+        has_playable: Callable[[Dict], bool],
+        terminal_exc: type,
+        total_budget: float,
+        per_timeout: float,
+        target: str,
+        label: str,
     ) -> Dict:
         """
-        抖音多级端点降级链：串行尝试，命中即返回；终态立即短路；全失败抛错。
+        通用多级端点降级引擎：串行尝试 chain，命中即返回；终态立即短路；全失败抛错。
 
         Args:
-            video_id: aweme_id（hybrid 模式下可为空）
-            original_url: 原始 url/分享文本（hybrid 模式使用）
-            use_hybrid: True 则只走 hybrid 入口兜底（由路由层在 id 提取失败时触发）
-
-        Returns:
-            Dict: 命中端点的原始响应（交由 adapter 用 schema 自适应解析器解析）
+            chain: 已按条件裁剪好的端点表，元素至少为 (name, path, ...)。
+            build_params: 端点元组 → TikHub query 参数 dict（含 id/url/token 等差异）。
+            classify: 响应 → "terminal" | "retryable" | "ok" 三态分类器。
+            has_playable: 响应 → 能否解析出无水印直链（ok 后的最终校验）。
+            terminal_exc: 该平台终态异常类（须为 TerminalError 子类，立即短路）。
+            total_budget / per_timeout: 整链总预算 / 单端超时（秒）。
+            target: 日志用标识（video_id / note_id / url）。
+            label: 日志用平台名（"Douyin"/"Xiaohongshu"/...）。
 
         Raises:
-            DouyinTerminalError: 私密/部分可见等终态，立即短路
-            VideoNotFoundError: 全链失败
-            ProviderError: 总预算超时或认证失败
+            terminal_exc: 内容终态不可恢复，立即短路。
+            VideoNotFoundError: 全链未命中。
+            ProviderError: 总预算超时或认证失败。
         """
-        chain = [self.DOUYIN_HYBRID] if use_hybrid else list(self.DOUYIN_CHAIN)
         attempts: List[Dict] = []
-        target = video_id or original_url
-
         try:
-            async with asyncio.timeout(self.DOUYIN_TOTAL_BUDGET):
-                for name, path, param in chain:
+            async with asyncio.timeout(total_budget):
+                for endpoint in chain:
+                    name, path = endpoint[0], endpoint[1]
                     try:
-                        data = await self._call_douyin_endpoint(
-                            name, path, param, video_id, original_url
+                        data = await self._call_endpoint(
+                            name, path, build_params(endpoint), per_timeout
                         )
-                    except DouyinTerminalError:
-                        raise
                     except ProviderError as e:
                         attempts.append({"endpoint": name, "decision": "http_error", "error": str(e)})
-                        self.log_warning(f"Douyin endpoint {name} http error: {e}")
+                        self.log_warning(f"{label} endpoint {name} http error: {e}")
                         continue
 
-                    decision = self._classify_douyin(data)
+                    decision = classify(data)
                     if decision == "terminal":
                         self.log_info(
-                            "Douyin terminal response, short-circuit",
+                            f"{label} terminal response, short-circuit",
                             endpoint=name, target=target,
                         )
-                        raise DouyinTerminalError(
-                            f"Douyin video unavailable (private/partial): {target}"
+                        raise terminal_exc(
+                            f"{label} content unavailable (terminal): {target}"
                         )
                     if decision == "retryable":
                         attempts.append({"endpoint": name, "decision": "retryable"})
                         continue
 
                     # ok：解析校验，解析不出可播放直链也算可重试（codex #10）
-                    if self._douyin_has_playable(data):
-                        self.log_info(
-                            "Douyin endpoint hit", endpoint=name, target=target
-                        )
+                    if has_playable(data):
+                        self.log_info(f"{label} endpoint hit", endpoint=name, target=target)
                         return data
                     attempts.append({"endpoint": name, "decision": "parse_failed"})
-                    self.log_warning(f"Douyin endpoint {name} ok but no playable url")
+                    self.log_warning(f"{label} endpoint {name} ok but no playable url")
         except asyncio.TimeoutError:
             self.log_error(
-                f"Douyin chain timed out after {self.DOUYIN_TOTAL_BUDGET}s",
+                f"{label} chain timed out after {total_budget}s",
                 target=target, attempts=attempts,
             )
             raise ProviderError(
-                f"Douyin endpoint chain timed out after {self.DOUYIN_TOTAL_BUDGET}s "
+                f"{label} endpoint chain timed out after {total_budget}s "
                 f"[attempts={attempts}]"
             )
 
         raise VideoNotFoundError(
-            f"Douyin all endpoints failed for '{target}' [attempts={attempts}]"
+            f"{label} all endpoints failed for '{target}' [attempts={attempts}]"
         )
 
-    async def _call_douyin_endpoint(
-        self, name: str, path: str, param: str, video_id: str, original_url: str
+    async def _call_endpoint(
+        self, name: str, path: str, params: Dict, per_timeout: float
     ) -> Dict:
         """
-        调单个抖音端点。单端 max_retries=0（重试交给链本身，避免超时放大）。
+        调单个 TikHub 端点（合并自原 _call_douyin_endpoint / _call_xhs_endpoint，仅差
+        参数构造，已上移到各平台的 build_params 回调）。
 
-        catch httpx.HTTPStatusError 并尽量取出错误体（codex #4）：终态/受限信息常藏在
-        4xx body 的 filter_list 里，取出来交给分类器，而非吞成不透明错误。
+        单端 max_retries=0（重试交给链本身，避免 HTTPClient 默认重试把超时放大）。
+        catch httpx.HTTPStatusError 并尽量取出错误体交给分类器（codex #4）：终态/受限
+        信息常藏在 4xx body 的 filter_list 里，取出来而非吞成不透明错误。
         """
-        url = f"{self.api_base}{path}"
-        param_value = original_url if param == "url" else video_id
-        headers = {"Authorization": f"Bearer {self.api_key}"}
-        try:
-            async with HTTPClient(
-                timeout=self.DOUYIN_PER_ENDPOINT_TIMEOUT, max_retries=0
-            ) as client:
-                response = await client.get(
-                    url, params={param: param_value}, headers=headers
-                )
-                return response.json()
-        except httpx.HTTPStatusError as e:
-            resp = e.response
-            status = resp.status_code if resp is not None else None
-            if status == 401:
-                raise ProviderError("TikHub API authentication failed")
-            body = None
-            if resp is not None:
-                try:
-                    body = resp.json()
-                except Exception:
-                    body = None
-            if isinstance(body, dict):
-                return body  # 交给分类器判定 terminal/retryable
-            raise ProviderError(f"{name} HTTP {status}")
-        except ProviderError:
-            raise
-        except Exception as e:
-            raise ProviderError(f"{name} request failed: {e}")
-
-    def _douyin_has_playable(self, data: Dict) -> bool:
-        """用 DouyinService 的 schema 自适应解析器校验是否能解析出无水印直链。"""
-        info = DouyinService(self.api_key, self.api_base)._parse_response(data)
-        return bool(info and info.video_url)
-
-    async def _fetch_xiaohongshu(self, note_id: str, original_url: str) -> Dict:
-        """
-        小红书多级端点降级链：串行尝试，命中即返回；图文等终态立即短路；全失败抛错。
-
-        链序：app_v2(note_id) → web_v3(note_id + xsec_token)。
-        app_v2 不依赖 token 故首选；token 缺失时 web_v3 自动跳过。
-
-        Returns:
-            Dict: 命中端点的原始响应（交由 XiaohongshuService._parse_response 解析）
-
-        Raises:
-            XhsTerminalError: 图文笔记/删除/私密等终态，立即短路
-            VideoNotFoundError: 全链失败
-            ProviderError: 总预算超时或认证失败
-        """
-        token = self._extract_xsec_token(original_url)
-        # token 缺失时跳过需要 token 的端点（web_v3）
-        chain = [
-            (name, path, mode)
-            for name, path, mode in self.XHS_CHAIN
-            if mode != "note_id_token" or token
-        ]
-        attempts: List[Dict] = []
-
-        try:
-            async with asyncio.timeout(self.XHS_TOTAL_BUDGET):
-                for name, path, mode in chain:
-                    try:
-                        data = await self._call_xhs_endpoint(
-                            name, path, mode, note_id, token
-                        )
-                    except ProviderError as e:
-                        attempts.append({"endpoint": name, "decision": "http_error", "error": str(e)})
-                        self.log_warning(f"Xiaohongshu endpoint {name} http error: {e}")
-                        continue
-
-                    decision = self._classify_xhs(data)
-                    if decision == "terminal":
-                        self.log_info(
-                            "Xiaohongshu terminal response (image/unavailable), short-circuit",
-                            endpoint=name, note_id=note_id,
-                        )
-                        raise XhsTerminalError(
-                            f"Xiaohongshu note has no video (image/unavailable): {note_id}"
-                        )
-                    if decision == "retryable":
-                        attempts.append({"endpoint": name, "decision": "retryable"})
-                        continue
-
-                    # ok：解析校验，解析不出可播放直链也算可重试
-                    if self._xhs_has_playable(data):
-                        self.log_info(
-                            "Xiaohongshu endpoint hit", endpoint=name, note_id=note_id
-                        )
-                        return data
-                    attempts.append({"endpoint": name, "decision": "parse_failed"})
-                    self.log_warning(f"Xiaohongshu endpoint {name} ok but no playable url")
-        except asyncio.TimeoutError:
-            self.log_error(
-                f"Xiaohongshu chain timed out after {self.XHS_TOTAL_BUDGET}s",
-                note_id=note_id, attempts=attempts,
-            )
-            raise ProviderError(
-                f"Xiaohongshu endpoint chain timed out after {self.XHS_TOTAL_BUDGET}s "
-                f"[attempts={attempts}]"
-            )
-
-        raise VideoNotFoundError(
-            f"Xiaohongshu all endpoints failed for '{note_id}' [attempts={attempts}]"
-        )
-
-    async def _call_xhs_endpoint(
-        self, name: str, path: str, mode: str, note_id: str, token: Optional[str]
-    ) -> Dict:
-        """
-        调单个小红书端点。单端 max_retries=0（重试交给链本身，避免超时放大）。
-
-        catch httpx.HTTPStatusError 并尽量取出错误体交给分类器（与抖音一致）。
-        """
-        params: Dict[str, str] = {"note_id": note_id}
-        if mode == "note_id_token":
-            params["xsec_token"] = token or ""
         url = f"{self.api_base}{path}"
         headers = {"Authorization": f"Bearer {self.api_key}"}
         try:
-            async with HTTPClient(
-                timeout=self.XHS_PER_ENDPOINT_TIMEOUT, max_retries=0
-            ) as client:
+            async with HTTPClient(timeout=per_timeout, max_retries=0) as client:
                 response = await client.get(url, params=params, headers=headers)
                 return response.json()
         except httpx.HTTPStatusError as e:
@@ -521,104 +476,210 @@ class TikHubProvider(BaseProvider):
         except Exception as e:
             raise ProviderError(f"{name} request failed: {e}")
 
+    async def _fetch_douyin(
+        self, video_id: str, original_url: str, use_hybrid: bool = False
+    ) -> Dict:
+        """
+        抖音多级降级（薄封装，骨架见 _run_chain）。
+
+        链：web v1 → web v2(同源备份) → app v3-v3(跨源, 解版权 reason=8)。
+        use_hybrid=True 时只走 hybrid 入口兜底（吃原始 url，由路由层在 id 提取失败时触发）。
+        抖音为 tikhub 单源平台，允许终态短路（DouyinTerminalError）。
+        """
+        chain = [self.DOUYIN_HYBRID] if use_hybrid else list(self.DOUYIN_CHAIN)
+
+        def build_params(endpoint: Tuple) -> Dict:
+            _name, _path, param = endpoint
+            # hybrid 端点入参为 url，其余端点为 aweme_id
+            return {param: original_url if param == "url" else video_id}
+
+        return await self._run_chain(
+            chain=chain,
+            build_params=build_params,
+            classify=self._classify_douyin,
+            has_playable=self._douyin_has_playable,
+            terminal_exc=DouyinTerminalError,
+            total_budget=self.DOUYIN_TOTAL_BUDGET,
+            per_timeout=self.DOUYIN_PER_ENDPOINT_TIMEOUT,
+            target=video_id or original_url,
+            label="Douyin",
+        )
+
+    def _douyin_has_playable(self, data: Dict) -> bool:
+        """用 DouyinService 的 schema 自适应解析器校验是否能解析出无水印直链。"""
+        info = DouyinService(self.api_key, self.api_base)._parse_response(data)
+        return bool(info and info.video_url)
+
+    async def _fetch_xiaohongshu(self, note_id: str, original_url: str) -> Dict:
+        """
+        小红书多级降级（薄封装，骨架见 _run_chain）。
+
+        链：app_v2(note_id, 不依赖 token, 首选) → web_v3(note_id + xsec_token)。
+        token 缺失时 web_v3 端点在链构造阶段被裁剪掉。
+        小红书为 tikhub 单源平台，允许终态短路（XhsTerminalError，图文/删除/私密）。
+        """
+        token = self._extract_xsec_token(original_url)
+        # token 缺失时跳过需要 token 的端点（web_v3）
+        chain = [
+            (name, path, mode)
+            for name, path, mode in self.XHS_CHAIN
+            if mode != "note_id_token" or token
+        ]
+
+        def build_params(endpoint: Tuple) -> Dict:
+            _name, _path, mode = endpoint
+            params: Dict[str, str] = {"note_id": note_id}
+            if mode == "note_id_token":
+                params["xsec_token"] = token or ""
+            return params
+
+        return await self._run_chain(
+            chain=chain,
+            build_params=build_params,
+            classify=self._classify_xhs,
+            has_playable=self._xhs_has_playable,
+            terminal_exc=XhsTerminalError,
+            total_budget=self.XHS_TOTAL_BUDGET,
+            per_timeout=self.XHS_PER_ENDPOINT_TIMEOUT,
+            target=note_id,
+            label="Xiaohongshu",
+        )
+
     def _xhs_has_playable(self, data: Dict) -> bool:
         """用 XiaohongshuService 的 schema 自适应解析器校验是否能解析出无水印直链。"""
         info = XiaohongshuService(self.api_key, self.api_base)._parse_response(data)
         return bool(info and info.video_url)
 
-    def _validate_response(self, data: Dict, platform: str) -> bool:
+    async def _fetch_kuaishou(self, video_id: str, original_url: str) -> Dict:
         """
-        验证 TikHub API 响应数据的有效性
+        快手多级降级（薄封装，骨架见 _run_chain）。
 
-        这里只做最基础的验证，确保响应包含 data 字段。
-        更详细的数据结构验证由各平台的 _parse_response 方法负责。
-
-        Args:
-            data: API 响应数据
-            platform: 平台名称
-
-        Returns:
-            bool: 数据是否有效
+        链：web_v2(photo_id, data.photo) → web_share(share_text=url, data[0])。
+        两端同一 camelCase manifest schema，解析器自适应。快手为单源平台（无 cobalt），
+        但当前分类器不出终态（无真实终态样本），私密/删除走完链 → VideoNotFoundError。
         """
-        if not isinstance(data, dict):
-            return False
+        chain = list(self.KUAISHOU_CHAIN)
 
-        # 检查是否有 data 字段
-        if "data" not in data:
-            return False
+        def build_params(endpoint: Tuple) -> Dict:
+            _name, _path, param = endpoint
+            # web_share 入参为 share_text=原始url，其余为 photo_id
+            return {param: original_url if param == "share_text" else video_id}
 
-        response_data = data.get("data", {})
+        return await self._run_chain(
+            chain=chain,
+            build_params=build_params,
+            classify=self._classify_kuaishou,
+            has_playable=self._kuaishou_has_playable,
+            terminal_exc=KuaishouTerminalError,
+            total_budget=self.KUAISHOU_TOTAL_BUDGET,
+            per_timeout=self.KUAISHOU_PER_ENDPOINT_TIMEOUT,
+            target=video_id or original_url,
+            label="Kuaishou",
+        )
 
-        # 确保 data 字段不为空
-        if not response_data:
-            return False
+    def _kuaishou_has_playable(self, data: Dict) -> bool:
+        """用 KuaishouService 的 schema 自适应解析器校验是否能解析出可播放直链。"""
+        info = KuaishouService(self.api_key, self.api_base)._parse_response(data)
+        return bool(info and info.video_url)
 
-        # 根据平台检查关键字段（宽松验证，兼容多种格式）
-        if platform == "douyin" or platform == "tiktok":
-            # TikTok 兼容两种格式：data.aweme_detail.* 或 data.*
-            # 只要 data 存在且包含 aweme_detail 或 aweme_id 就认为有效
-            return "aweme_detail" in response_data or "aweme_id" in response_data
-        elif platform == "kuaishou":
-            return "photo" in response_data
-        elif platform == "youtube":
-            # YouTube API 返回的数据包含 title, channel 等字段
-            return "title" in response_data or "videoDetails" in response_data
-        elif platform == "xiaohongshu":
-            # 小红书新API返回的数据包含 user, video, desc 等字段
-            return "user" in response_data or "desc" in response_data
-        elif platform == "instagram":
-            # v2 fetch_post_info 返回: data.data.{is_video, video_url, code, ...}
-            # 兼容更早格式: data.data.medias / full_name，以及 data.is_video
-            inner_data = response_data.get("data", {})
-            return (
-                "video_url" in inner_data
-                or "is_video" in inner_data
-                or "code" in inner_data
-                or "medias" in inner_data
-                or "full_name" in inner_data
-                or "is_video" in response_data
-            )
-
-        return True
-
-    def _save_failed_response(self, data: Dict, platform: str, video_id: str) -> None:
+    async def _fetch_tiktok(self, video_id: str, original_url: str) -> Dict:
         """
-        Save failed TikHub response to logs folder for debugging.
+        TikTok 多级降级（薄封装，骨架见 _run_chain）。
 
-        Args:
-            data: The response data from TikHub API
-            platform: Platform name
-            video_id: Video ID
+        链：app/v3/fetch_one_video → _v2 → _v3，三端同 data.aweme_detail schema。
+        has_playable 用 TikTokService（保 play_addr_h264 优先，评审 Issue 7）；
+        classify 复用同源 aweme envelope 逻辑但不出终态（有 cobalt 兜底，Issue 6）。
+        terminal_exc 实际不会被触发（_classify_tiktok 永不返回 terminal）。
         """
-        try:
-            # Get logs directory path
-            logs_dir = Path(settings.LOG_FILE_PATH)
-            if not logs_dir.is_absolute():
-                # Find project root (contains pyproject.toml)
-                current_file = Path(__file__)
-                project_root = current_file
-                while project_root.parent != project_root:
-                    if (project_root / "pyproject.toml").exists():
-                        break
-                    project_root = project_root.parent
-                if not (project_root / "pyproject.toml").exists():
-                    project_root = Path.cwd()
-                logs_dir = project_root / logs_dir
+        chain = list(self.TIKTOK_CHAIN)
 
-            # Create tikhub_failures subdirectory
-            failures_dir = logs_dir / "tikhub_failures"
-            failures_dir.mkdir(parents=True, exist_ok=True)
+        def build_params(endpoint: Tuple) -> Dict:
+            _name, _path, param = endpoint
+            return {param: video_id}
 
-            # Generate filename with timestamp
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"{timestamp}_{platform}_{video_id}.json"
-            filepath = failures_dir / filename
+        return await self._run_chain(
+            chain=chain,
+            build_params=build_params,
+            classify=self._classify_tiktok,
+            has_playable=self._tiktok_has_playable,
+            terminal_exc=TerminalError,  # 占位：cobalt 兜底平台不出终态，不会被 raise
+            total_budget=self.TIKTOK_TOTAL_BUDGET,
+            per_timeout=self.TIKTOK_PER_ENDPOINT_TIMEOUT,
+            target=video_id or original_url,
+            label="TikTok",
+        )
 
-            # Save response data
-            with open(filepath, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+    def _tiktok_has_playable(self, data: Dict) -> bool:
+        """用 TikTokService（非 DouyinService）校验直链，保 play_addr_h264 优先（Issue 7）。"""
+        svc = TikTokService(self.api_key, self.api_base)
+        # 校验路径抑制失败落盘，避免降级链每个端点解析失败都写文件（评审 Issue 12）。
+        svc.suppress_error_save = True
+        info = svc._parse_response(data)
+        return bool(info and info.video_url)
 
-            logger.info(f"Failed TikHub response saved to {filepath}")
+    async def _fetch_instagram(self, video_id: str, original_url: str) -> Dict:
+        """
+        Instagram 多级降级（薄封装，骨架见 _run_chain）。
 
-        except Exception as e:
-            logger.warning(f"Failed to save TikHub response to file: {e}")
+        链：v2/fetch_post_info(code_or_url) → v1/fetch_post_by_url(post_url)，两端
+        入参都喂 original_url（仅参数名不同），InstagramService 自动识别 v1/v2 schema。
+        IG 有 cobalt 兜底 → 不出终态（非视频 → has_playable False → retryable → 落 cobalt）。
+        """
+        chain = list(self.INSTAGRAM_CHAIN)
+
+        def build_params(endpoint: Tuple) -> Dict:
+            _name, _path, param = endpoint
+            # code_or_url 接受 shortcode 或完整 url；post_url 接受完整 url。统一喂原始 url。
+            return {param: original_url}
+
+        return await self._run_chain(
+            chain=chain,
+            build_params=build_params,
+            classify=self._classify_instagram,
+            has_playable=self._instagram_has_playable,
+            terminal_exc=TerminalError,  # 占位：cobalt 兜底平台不出终态，不会被 raise
+            total_budget=self.INSTAGRAM_TOTAL_BUDGET,
+            per_timeout=self.INSTAGRAM_PER_ENDPOINT_TIMEOUT,
+            target=video_id or original_url,
+            label="Instagram",
+        )
+
+    def _instagram_has_playable(self, data: Dict) -> bool:
+        """用 InstagramService（自动识别 v1/v2 schema）校验是否能解析出视频直链。"""
+        info = InstagramService(self.api_key, self.api_base)._parse_response(data)
+        return bool(info and info.video_url)
+
+    async def _fetch_youtube(self, video_id: str, original_url: str) -> Dict:
+        """
+        YouTube 多级降级（薄封装，骨架见 _run_chain）。
+
+        链：web/get_video_info(data.videos.items) → web/get_video_info_v2(streamingData)。
+        两端 video_id 入参，YouTubeService 自适应两套 schema。
+        YouTube 有 cobalt 兜底 → 不出终态（区域限制/无流 → has_playable False → retryable → cobalt）。
+        """
+        chain = list(self.YOUTUBE_CHAIN)
+
+        def build_params(endpoint: Tuple) -> Dict:
+            _name, _path, param = endpoint
+            return {param: video_id}
+
+        return await self._run_chain(
+            chain=chain,
+            build_params=build_params,
+            classify=self._classify_youtube,
+            has_playable=self._youtube_has_playable,
+            terminal_exc=TerminalError,  # 占位：cobalt 兜底平台不出终态，不会被 raise
+            total_budget=self.YOUTUBE_TOTAL_BUDGET,
+            per_timeout=self.YOUTUBE_PER_ENDPOINT_TIMEOUT,
+            target=video_id or original_url,
+            label="YouTube",
+        )
+
+    def _youtube_has_playable(self, data: Dict) -> bool:
+        """用 YouTubeService（自适应 videos.items / streamingData）校验是否能解析出视频流。"""
+        info = YouTubeService(self.api_key, self.api_base)._parse_response(data)
+        return bool(info and info.video_url)
+
+    # 注：原 _validate_response / _save_failed_response（通用 GET 路径的响应校验与
+    # 失败落盘）已随全平台迁移到引擎而删除——有效性现由各链的 classify + has_playable
+    # 唯一判定（评审 Issue 3：消除两套有效性来源）。

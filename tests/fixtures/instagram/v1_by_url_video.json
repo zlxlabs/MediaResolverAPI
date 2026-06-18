@@ -1,0 +1,12 @@
+{
+  "data": {
+    "is_video": true,
+    "video_url": "https://scontent.cdninstagram.com/test_ig_v1.mp4",
+    "id": "3001",
+    "shortcode": "DZJj5MMsWxA",
+    "owner": {"id": "1", "username": "tester"},
+    "dimensions": {"width": 720, "height": 1280},
+    "video_view_count": 1000,
+    "video_play_count": 1200
+  }
+}

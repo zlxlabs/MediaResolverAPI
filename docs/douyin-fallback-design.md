@@ -1,5 +1,10 @@
 # 抖音无水印解析 · 多级降级机制设计
 
+> **⚠️ 已迁移到通用引擎（2026-06）**：抖音专用 `_fetch_douyin`/`_call_douyin_endpoint` 链逻辑已抽取为
+> 配置驱动的**通用多级降级引擎**（`_run_chain` + `_call_endpoint`），抖音现为引擎的薄封装（链配置 +
+> `_classify_douyin` 分类器），**行为不变**（原测试全绿）。本文档的链序/终态语义/hybrid 兜底仍准确，
+> 仅实现位置变化。引擎设计与全平台链配置见 [generic-fallback-engine.md](generic-fallback-engine.md)。
+
 > 状态：**已实现**（TDD，9 个测试文件 / 全量 68 passed，真实环境端点链 + hybrid 双路径冒烟通过）。
 > 分支：feat/douyin-multilevel-fallback ｜ 数据源：TikHub API V5.3.2
 > 已过 `/plan-eng-review`（架构/代码质量/测试/性能四节）+ codex 外部交叉评审。

@@ -64,18 +64,32 @@ class YouTubeService(BasePlatformService):
                 logger.error("YouTube响应数据中缺少data字段")
                 return None
 
-            # 基础信息
-            video_id = self._safe_get(data, "id", "")
-            title = self._safe_get(data, "title", "")
-            description = self._safe_get(data, "description", "")
+            # 自适应基础信息，兼容两套 schema（评审 codex Issue 10）：
+            #   web/get_video_info     → data.id/title/channel/viewCount/...
+            #   web/get_video_info_v2  → data.videoDetails.{videoId,title,author,channelId,viewCount}
+            video_details = data.get("videoDetails") if isinstance(data.get("videoDetails"), dict) else None
+            if video_details:
+                video_id = self._safe_get(video_details, "videoId", "")
+                title = self._safe_get(video_details, "title", "")
+                description = self._safe_get(video_details, "shortDescription", "")
+                author_name = self._safe_get(video_details, "author", "")
+                author_id = self._safe_get(video_details, "channelId", "")
+                view_count = self._parse_count(self._safe_get(video_details, "viewCount"))
+                like_count = None
+                publish_time = ""
+            else:
+                video_id = self._safe_get(data, "id", "")
+                title = self._safe_get(data, "title", "")
+                description = self._safe_get(data, "description", "")
+                channel = self._safe_get(data, "channel", {})
+                author_name = self._safe_get(channel, "name", "")
+                author_id = self._safe_get(channel, "id", "")
+                view_count = self._parse_count(self._safe_get(data, "viewCount"))
+                like_count = self._parse_count(self._safe_get(data, "likeCount"))
+                publish_time = self._safe_get(data, "publishedTime", "")
 
-            # 作者信息
-            channel = self._safe_get(data, "channel", {})
-            author_name = self._safe_get(channel, "name", "")
-            author_id = self._safe_get(channel, "id", "")
-
-            # 视频文件信息 - 选择最佳质量的有音频视频
-            videos = self._safe_get(data, "videos.items", [])
+            # 视频文件信息 - 选择最佳质量的有音频视频（自适应两套 schema）
+            videos = self._adaptive_video_streams(data)
             best_video = self._select_best_video(videos)
 
             if not best_video:
@@ -87,14 +101,8 @@ class YouTubeService(BasePlatformService):
             height = self._safe_get(best_video, "height", 0)
             quality = self._safe_get(best_video, "quality", "")
 
-            # 统计信息
-            view_count = self._parse_count(self._safe_get(data, "viewCount"))
-            like_count = self._parse_count(self._safe_get(data, "likeCount"))
-            comment_count_text = self._safe_get(data, "commentCountText", "")
-            comment_count = self._parse_count(comment_count_text)
-
-            # 发布时间
-            publish_time = self._safe_get(data, "publishedTime", "")
+            # 评论数（仅 current schema 有）
+            comment_count = self._parse_count(self._safe_get(data, "commentCountText", ""))
 
             return VideoInfo(
                 video_id=video_id,
@@ -117,6 +125,38 @@ class YouTubeService(BasePlatformService):
         except Exception as e:
             logger.error(f"解析YouTube响应数据失败: {e}")
             return None
+
+    @staticmethod
+    def _adaptive_video_streams(data: Dict[str, Any]) -> list:
+        """
+        归一化视频流列表，兼容 TikHub 多端点的不同 schema（评审 codex Issue 10）：
+
+          web/get_video_info     → data.videos.items（已含 url/width/height/quality/hasAudio）
+          web/get_video_info_v2  → data.streamingData.formats（muxed 合流，含 url，无 cipher 时可直用）
+
+        v2 只取 formats（音视频合流），不取 adaptiveFormats（纯视频/纯音频）；
+        跳过 signatureCipher（无 url）的格式——拿不到直链就让链降级到下一端点/cobalt。
+        """
+        items = data.get("videos")
+        if isinstance(items, dict) and items.get("items"):
+            return items["items"]
+
+        streaming = data.get("streamingData")
+        if isinstance(streaming, dict):
+            normalized = []
+            for fmt in (streaming.get("formats") or []):
+                url = fmt.get("url")
+                if not url:
+                    continue  # signatureCipher 格式无直链，跳过
+                normalized.append({
+                    "url": url,
+                    "width": fmt.get("width", 0),
+                    "height": fmt.get("height", 0),
+                    "quality": fmt.get("qualityLabel") or fmt.get("quality") or "",
+                    "hasAudio": True,  # formats[] 为合流
+                })
+            return normalized
+        return []
 
     def _select_best_video(self, videos: list) -> Optional[Dict[str, Any]]:
         """

@@ -40,6 +40,17 @@ class XhsTerminalError(TerminalError):
     pass
 
 
+class KuaishouTerminalError(TerminalError):
+    """
+    快手终态失败：私密/删除等不可恢复。
+
+    快手为 tikhub 单源平台（无 cobalt 兜底），允许终态短路。当前分类器尚未
+    判定终态（无已确认的私密/删除样本，见 tikhub._classify_kuaishou），此异常
+    为接入预留——拿到真实终态样本后启用。
+    """
+    pass
+
+
 class BaseProvider(ABC):
     """
     视频信息提供者基类

@@ -166,13 +166,19 @@ class TikTokService(BasePlatformService):
         """
         Save error response to JSON file.
 
+        校验路径（TikHubProvider._tiktok_has_playable）会对降级链上每个端点调用
+        _parse_response；解析失败时若每次都落盘，5 端点链会放大写盘（评审 Issue 12）。
+        故当 suppress_error_save=True 时跳过落盘——校验只关心能否解析出直链，不需调试件。
+
         Args:
             response_data: Response data
             error_type: Error type description
 
         Returns:
-            str: Saved file path
+            str: Saved file path（被抑制时返回 ""）
         """
+        if getattr(self, "suppress_error_save", False):
+            return ""
         try:
             # Create error log directory
             error_dir = Path("./logs/error_responses")

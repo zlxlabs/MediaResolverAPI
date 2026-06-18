@@ -1,0 +1,30 @@
+{
+  "data": {
+    "result": 1,
+    "photo": {
+      "id": "3xh683uyhqbzan4",
+      "caption": "快手测试视频",
+      "userName": "测试用户",
+      "userId": "3x78tdkxcz6zkk2",
+      "timestamp": 1744099200000,
+      "likeCount": 123,
+      "commentCount": 45,
+      "forwardCount": 6,
+      "viewCount": 7890,
+      "manifest": {
+        "adaptationSet": [
+          {
+            "representation": [
+              {
+                "url": "https://v2-zj-bjun.kwaicdn.com/upic/test_web_v2.mp4",
+                "width": 720,
+                "height": 1280,
+                "qualityType": "HD"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

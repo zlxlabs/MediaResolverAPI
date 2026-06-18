@@ -1,0 +1,21 @@
+{
+  "data": {
+    "aweme_detail": {
+      "aweme_id": "7636256306424253729",
+      "desc": "tiktok test video (app_v3_v2)",
+      "author": {"nickname": "crescentmart", "unique_id": "crescentmart"},
+      "video": {
+        "play_addr_h264": {
+          "url_list": ["https://v16m.tiktokcdn-us.com/test_app_v3_v2.mp4"],
+          "width": 576,
+          "height": 1024
+        }
+      },
+      "statistics": {
+        "play_count": 100, "digg_count": 20, "comment_count": 3,
+        "share_count": 4, "collect_count": 5
+      },
+      "create_time": 1700000000
+    }
+  }
+}

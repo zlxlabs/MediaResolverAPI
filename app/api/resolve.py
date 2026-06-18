@@ -22,6 +22,12 @@ from ..services.translation.openai import TranslationService
 
 router = APIRouter(dependencies=[Depends(verify_api_key)])
 
+# 平台已识别但 video_id 提取失败时，可凭原始 url 兜底的平台集合：
+# 其降级链含吃 url 的端点（kuaishou web_share=share_text / instagram v2 code_or_url + v1 post_url），
+# 故无需 video_id 也能解析；不在此集合的平台（tiktok/youtube/xiaohongshu）仍按 400 处理。
+# 抖音另由 use_hybrid 兜底，不在此列。（评审 Issue 5）
+URL_FALLBACK_PLATFORMS = frozenset({"kuaishou", "instagram"})
+
 # Shared service instances
 _video_resolver: Optional[VideoResolver] = None
 _translation_service: Optional[TranslationService] = None
@@ -141,6 +147,11 @@ async def resolve_url(
                 # 抖音但 ID 提取失败（如新链接格式）：改走 hybrid 兜底
                 logger.info("Douyin id extraction failed, falling back to hybrid")
                 use_hybrid = True
+            elif platform in URL_FALLBACK_PLATFORMS and not video_id:
+                # 平台已识别但 ID 提取失败（如新链接格式）：不 400，放行让该平台降级链的
+                # by_url 端点用原始 url 兜底（kuaishou web_share / instagram v1+v2）。
+                # video_id 保持空，chain 的 build_params 改喂 original_url（评审 Issue 5）。
+                logger.info(f"{platform} id extraction failed, falling back to by_url chain")
             elif not platform or not video_id:
                 log_data["platform"] = platform
                 log_data["error_msg"] = "Unsupported URL"
@@ -155,8 +166,8 @@ async def resolve_url(
         cache_service = CacheService(db)
         translated_desc = None
 
-        # Step 3: Check cache（仅在已知 video_id 时；hybrid 路径要解析后才拿到 aweme_id）
-        if not use_hybrid and not request.force_refresh:
+        # Step 3: Check cache（仅在已知 video_id 时；hybrid / by_url 兜底要解析后才拿到 id）
+        if not use_hybrid and video_id and not request.force_refresh:
             cached_info, cached_translation = cache_service.get_cached_video(
                 platform, video_id
             )
@@ -182,8 +193,8 @@ async def resolve_url(
         )
         log_data["provider"] = provider_name
 
-        # hybrid 路径：用解析出的 aweme_id 归一化回填（codex #8 缓存语义）
-        if use_hybrid:
+        # hybrid / by_url 兜底路径：用解析出的真实 id 归一化回填（缓存语义 codex #8 / 评审 Issue 5）
+        if use_hybrid or not video_id:
             video_id = video_info.video_id
             log_data["video_id"] = video_id
 

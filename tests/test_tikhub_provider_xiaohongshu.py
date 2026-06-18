@@ -87,18 +87,18 @@ def test_classify_retryable(fixture):
 # ----------------------------- 端点降级链 -----------------------------
 
 def _provider_with(monkeypatch, mapping):
-    """构造 provider，把 _call_xhs_endpoint 替换为按端点名返回 mapping 的桩。"""
+    """构造 provider，把通用 _call_endpoint 替换为按端点名返回 mapping 的桩。"""
     provider = TikHubProvider()
     calls = []
 
-    async def fake_call(self, name, path, mode, note_id, token):
+    async def fake_call(self, name, path, params, per_timeout):
         calls.append(name)
         resp = mapping[name]
         if isinstance(resp, Exception):
             raise resp
         return resp
 
-    monkeypatch.setattr(TikHubProvider, "_call_xhs_endpoint", fake_call)
+    monkeypatch.setattr(TikHubProvider, "_call_endpoint", fake_call)
     return provider, calls
 
 
@@ -195,9 +195,7 @@ async def test_call_endpoint_returns_body_on_http_status_error(monkeypatch):
     monkeypatch.setattr(
         "app.services.providers.tikhub.HTTPClient", lambda *a, **k: _FakeClient()
     )
-    body = await provider._call_xhs_endpoint(
-        "app_v2", "/p", "note_id", NOTE_ID, None
-    )
+    body = await provider._call_endpoint("app_v2", "/p", {"note_id": NOTE_ID}, 25)
     assert body == err_body
     assert TikHubProvider._classify_xhs(body) == "retryable"
 
@@ -207,10 +205,10 @@ async def test_chain_total_budget_timeout(monkeypatch):
     provider = TikHubProvider()
     monkeypatch.setattr(TikHubProvider, "XHS_TOTAL_BUDGET", 0.05)
 
-    async def slow_call(self, name, path, mode, note_id, token):
+    async def slow_call(self, name, path, params, per_timeout):
         await asyncio.sleep(1)
         return load("app_v2_video")
 
-    monkeypatch.setattr(TikHubProvider, "_call_xhs_endpoint", slow_call)
+    monkeypatch.setattr(TikHubProvider, "_call_endpoint", slow_call)
     with pytest.raises(ProviderError, match="timed out"):
         await provider.fetch_video_info("xiaohongshu", NOTE_ID, URL)
