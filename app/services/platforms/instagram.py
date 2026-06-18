@@ -205,7 +205,7 @@ class InstagramService(BasePlatformService):
                 width=width,
                 height=height,
                 quality="",  # Instagram API does not provide quality info
-                view_count=max(view_count, play_count),  # Use max of view_count and play_count
+                view_count=max(view_count or 0, play_count or 0),  # 取较大值；字段缺失时按 0（避免 max(None,None) 崩溃）
                 like_count=like_count,
                 comment_count=0,  # Not directly available in v1 API
                 share_count=0,

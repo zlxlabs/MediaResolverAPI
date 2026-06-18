@@ -30,6 +30,7 @@ from ..platforms.douyin import DouyinService
 from ..platforms.xiaohongshu import XiaohongshuService
 from ..platforms.kuaishou import KuaishouService
 from ..platforms.tiktok import TikTokService
+from ..platforms.instagram import InstagramService
 
 
 class TikHubProvider(BaseProvider):
@@ -123,6 +124,33 @@ class TikHubProvider(BaseProvider):
     # 长链（3 端点）单端降至 18s，总预算 60s（3×18=54<60，保证三端都能跑，Issue 4）。
     TIKTOK_PER_ENDPOINT_TIMEOUT = 18
     TIKTOK_TOTAL_BUDGET = 60.0
+
+    # Instagram 端点降级链：(名称, 路径, 入参名)。两端入参都喂原始 url（code_or_url
+    # 接受 shortcode 或 url；post_url 接受 url），仅参数名不同。
+    # v3(400 flaky) / v1_by_id(需数字 post_id) 暂不入链（见 TODOS）。
+    # IG 有 cobalt 兜底 → 分类器不出终态（_classify_instagram，含轮播非视频 Issue 8）。
+    INSTAGRAM_CHAIN: List[Tuple[str, str, str]] = [
+        ("v2", "/api/v1/instagram/v2/fetch_post_info", "code_or_url"),
+        ("v1_by_url", "/api/v1/instagram/v1/fetch_post_by_url", "post_url"),
+    ]
+    INSTAGRAM_PER_ENDPOINT_TIMEOUT = 25
+    INSTAGRAM_TOTAL_BUDGET = 55.0
+
+    @staticmethod
+    def _classify_instagram(response: Dict) -> str:
+        """
+        IG 三态分类。IG 有 cobalt 兜底 → 永不出终态（评审 Issue 6）；非视频（图文/
+        轮播）≠不可用——轮播子节点可能含视频（codex Issue 8），统一交 has_playable
+        判定，判不出 → retryable 落 cobalt。
+
+        Returns:
+            "retryable" : 定位不到 envelope 数据（空/错误）
+            "ok"        : 有 envelope 数据，交由解析器判定是否含视频
+        """
+        if not isinstance(response, dict):
+            return "retryable"
+        data = response.get("data")
+        return "ok" if isinstance(data, dict) and data else "retryable"
 
     @staticmethod
     def _classify_kuaishou(response: Dict) -> str:
@@ -293,6 +321,10 @@ class TikHubProvider(BaseProvider):
         # TikTok 走多级端点降级链（app/v3 → _v2 → _v3）
         if platform == "tiktok":
             return await self._fetch_tiktok(video_id, original_url)
+
+        # Instagram 走多级端点降级链（v2 → v1_by_url）
+        if platform == "instagram":
+            return await self._fetch_instagram(video_id, original_url)
 
         endpoint = self.PLATFORM_ENDPOINTS[platform]
         param_name = self.PLATFORM_PARAMS[platform]
@@ -637,6 +669,38 @@ class TikHubProvider(BaseProvider):
     def _tiktok_has_playable(self, data: Dict) -> bool:
         """用 TikTokService（非 DouyinService）校验直链，保 play_addr_h264 优先（Issue 7）。"""
         info = TikTokService(self.api_key, self.api_base)._parse_response(data)
+        return bool(info and info.video_url)
+
+    async def _fetch_instagram(self, video_id: str, original_url: str) -> Dict:
+        """
+        Instagram 多级降级（薄封装，骨架见 _run_chain）。
+
+        链：v2/fetch_post_info(code_or_url) → v1/fetch_post_by_url(post_url)，两端
+        入参都喂 original_url（仅参数名不同），InstagramService 自动识别 v1/v2 schema。
+        IG 有 cobalt 兜底 → 不出终态（非视频 → has_playable False → retryable → 落 cobalt）。
+        """
+        chain = list(self.INSTAGRAM_CHAIN)
+
+        def build_params(endpoint: Tuple) -> Dict:
+            _name, _path, param = endpoint
+            # code_or_url 接受 shortcode 或完整 url；post_url 接受完整 url。统一喂原始 url。
+            return {param: original_url}
+
+        return await self._run_chain(
+            chain=chain,
+            build_params=build_params,
+            classify=self._classify_instagram,
+            has_playable=self._instagram_has_playable,
+            terminal_exc=TerminalError,  # 占位：cobalt 兜底平台不出终态，不会被 raise
+            total_budget=self.INSTAGRAM_TOTAL_BUDGET,
+            per_timeout=self.INSTAGRAM_PER_ENDPOINT_TIMEOUT,
+            target=video_id or original_url,
+            label="Instagram",
+        )
+
+    def _instagram_has_playable(self, data: Dict) -> bool:
+        """用 InstagramService（自动识别 v1/v2 schema）校验是否能解析出视频直链。"""
+        info = InstagramService(self.api_key, self.api_base)._parse_response(data)
         return bool(info and info.video_url)
 
     def _validate_response(self, data: Dict, platform: str) -> bool:
