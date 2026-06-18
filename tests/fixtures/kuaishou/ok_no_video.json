@@ -1,0 +1,14 @@
+{
+  "data": {
+    "result": 1,
+    "photo": {
+      "id": "3xh683uyhqbzan4",
+      "caption": "有节点但无可播放流",
+      "userName": "测试用户",
+      "userId": "3x78tdkxcz6zkk2",
+      "manifest": {
+        "adaptationSet": []
+      }
+    }
+  }
+}

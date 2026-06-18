@@ -21,11 +21,13 @@ from .base import (
     VideoNotFoundError,
     DouyinTerminalError,
     XhsTerminalError,
+    KuaishouTerminalError,
 )
 from ...core.config import settings
 from ...utils.http_client import HTTPClient
 from ..platforms.douyin import DouyinService
 from ..platforms.xiaohongshu import XiaohongshuService
+from ..platforms.kuaishou import KuaishouService
 
 
 class TikHubProvider(BaseProvider):
@@ -93,6 +95,35 @@ class TikHubProvider(BaseProvider):
     ]
     XHS_PER_ENDPOINT_TIMEOUT = 25
     XHS_TOTAL_BUDGET = 50.0
+
+    # 快手端点降级链：(名称, 路径, 入参名)。串行尝试直到命中。
+    # web_v2 仅凭 photo_id（现状，data.photo）→ 首选；
+    # web_share 吃 share_text=原始url（data 为 list），覆盖 id 提取失败的兜底，
+    # 与 web_v2 同一套 camelCase manifest schema，解析器自适应（见 KuaishouService._extract_photo）。
+    # app/* 端点为另一套 snake_case schema，暂不入链（见 TODOS）。
+    KUAISHOU_CHAIN: List[Tuple[str, str, str]] = [
+        ("web_v2", "/api/v1/kuaishou/web/fetch_one_video_v2", "photo_id"),
+        ("web_share", "/api/v1/kuaishou/web/fetch_one_video", "share_text"),
+    ]
+    # 2 端点 × 25s = 50s，总预算留 5s 余量保证两端都能跑（codex/Issue 4）。
+    KUAISHOU_PER_ENDPOINT_TIMEOUT = 25
+    KUAISHOU_TOTAL_BUDGET = 55.0
+
+    @staticmethod
+    def _classify_kuaishou(response: Dict) -> str:
+        """
+        快手响应三态分类。快手为 tikhub 单源平台，但当前无已确认的终态样本
+        （私密/删除），故只出 ok/retryable，不臆造终态（私密/删除会走完链 →
+        VideoNotFoundError，零误报；见评审 Issue 2）。
+
+        Returns:
+            "retryable" : 定位不到视频节点（空/错误 envelope），试下一端点
+            "ok"        : 定位到视频节点，交由解析器进一步校验
+        """
+        if not isinstance(response, dict):
+            return "retryable"
+        node = KuaishouService._extract_photo(response)
+        return "ok" if node else "retryable"
 
     @staticmethod
     def _classify_xhs(response: Dict) -> str:
@@ -223,6 +254,10 @@ class TikHubProvider(BaseProvider):
         # 小红书走多级端点降级链（app_v2 → web_v3）
         if platform == "xiaohongshu":
             return await self._fetch_xiaohongshu(video_id, original_url)
+
+        # 快手走多级端点降级链（web_v2 → web_share）
+        if platform == "kuaishou":
+            return await self._fetch_kuaishou(video_id, original_url)
 
         endpoint = self.PLATFORM_ENDPOINTS[platform]
         param_name = self.PLATFORM_PARAMS[platform]
@@ -503,6 +538,38 @@ class TikHubProvider(BaseProvider):
     def _xhs_has_playable(self, data: Dict) -> bool:
         """用 XiaohongshuService 的 schema 自适应解析器校验是否能解析出无水印直链。"""
         info = XiaohongshuService(self.api_key, self.api_base)._parse_response(data)
+        return bool(info and info.video_url)
+
+    async def _fetch_kuaishou(self, video_id: str, original_url: str) -> Dict:
+        """
+        快手多级降级（薄封装，骨架见 _run_chain）。
+
+        链：web_v2(photo_id, data.photo) → web_share(share_text=url, data[0])。
+        两端同一 camelCase manifest schema，解析器自适应。快手为单源平台（无 cobalt），
+        但当前分类器不出终态（无真实终态样本），私密/删除走完链 → VideoNotFoundError。
+        """
+        chain = list(self.KUAISHOU_CHAIN)
+
+        def build_params(endpoint: Tuple) -> Dict:
+            _name, _path, param = endpoint
+            # web_share 入参为 share_text=原始url，其余为 photo_id
+            return {param: original_url if param == "share_text" else video_id}
+
+        return await self._run_chain(
+            chain=chain,
+            build_params=build_params,
+            classify=self._classify_kuaishou,
+            has_playable=self._kuaishou_has_playable,
+            terminal_exc=KuaishouTerminalError,
+            total_budget=self.KUAISHOU_TOTAL_BUDGET,
+            per_timeout=self.KUAISHOU_PER_ENDPOINT_TIMEOUT,
+            target=video_id or original_url,
+            label="Kuaishou",
+        )
+
+    def _kuaishou_has_playable(self, data: Dict) -> bool:
+        """用 KuaishouService 的 schema 自适应解析器校验是否能解析出可播放直链。"""
+        info = KuaishouService(self.api_key, self.api_base)._parse_response(data)
         return bool(info and info.video_url)
 
     def _validate_response(self, data: Dict, platform: str) -> bool:

@@ -47,6 +47,28 @@ class KuaishouService(BasePlatformService):
             logger.error(f"获取快手视频信息失败: {e}")
             return None
 
+    @staticmethod
+    def _extract_photo(response_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        定位快手「视频节点」，兼容 TikHub 多端点的不同 schema（camelCase manifest 系）：
+
+          web/fetch_one_video_v2 → data.photo   （单数 dict，photo_id 入参）
+          web/fetch_one_video    → data[0]       （data 为 list，元素即视频节点，share_text 入参）
+
+        app/* 端点为另一套 snake_case schema（streamManifest/main_mv_urls），暂不在链内，
+        见 TODOS「快手 app 端点 schema 接入」。
+        """
+        if not isinstance(response_data, dict):
+            return None
+        data = response_data.get("data")
+        if isinstance(data, list):
+            node = data[0] if data else None
+        elif isinstance(data, dict):
+            node = data.get("photo") or (data if "manifest" in data else None)
+        else:
+            node = None
+        return node if isinstance(node, dict) and node else None
+
     def _parse_response(self, response_data: Dict[str, Any]) -> Optional[VideoInfo]:
         """
         解析快手API响应数据
@@ -58,7 +80,7 @@ class KuaishouService(BasePlatformService):
             Optional[VideoInfo]: 解析后的视频信息对象
         """
         try:
-            photo = self._safe_get(response_data, "data.photo")
+            photo = self._extract_photo(response_data)
             if not photo:
                 logger.error("快手响应数据中缺少photo字段")
                 return None
