@@ -6,7 +6,14 @@
 - Cobalt: 作为备用的视频下载服务
 """
 
-from .base import BaseProvider, ProviderError, VideoNotFoundError, DouyinTerminalError
+from .base import (
+    BaseProvider,
+    ProviderError,
+    VideoNotFoundError,
+    TerminalError,
+    DouyinTerminalError,
+    XhsTerminalError,
+)
 from .tikhub import TikHubProvider
 from .cobalt import CobaltProvider
 
@@ -14,7 +21,9 @@ __all__ = [
     "BaseProvider",
     "ProviderError",
     "VideoNotFoundError",
+    "TerminalError",
     "DouyinTerminalError",
+    "XhsTerminalError",
     "TikHubProvider",
     "CobaltProvider",
 ]

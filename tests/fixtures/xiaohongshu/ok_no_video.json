@@ -1,0 +1,17 @@
+{
+  "code": 200,
+  "data": {
+    "code": 0,
+    "success": true,
+    "data": [
+      {
+        "id": "68a54752000000001d002092",
+        "type": "video",
+        "title": "视频笔记但无可用流",
+        "desc": "stream 为空",
+        "user": {"nickname": "someone", "userid": "uid"},
+        "video_info_v2": {"media": {"stream": {"h264": []}}}
+      }
+    ]
+  }
+}

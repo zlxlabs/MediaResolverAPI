@@ -1,0 +1,7 @@
+{
+  "detail": {
+    "code": 400,
+    "message": "Request failed. Please retry.",
+    "message_zh": "请求失败，请重试。"
+  }
+}

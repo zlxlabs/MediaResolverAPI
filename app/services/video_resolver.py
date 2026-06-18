@@ -13,7 +13,7 @@ from .providers import (
     CobaltProvider,
     ProviderError,
     VideoNotFoundError,
-    DouyinTerminalError,
+    TerminalError,
 )
 from .adapters import TikHubAdapter, CobaltAdapter
 from .platforms.base import VideoInfo
@@ -81,7 +81,9 @@ class VideoResolver:
             # 其他平台优先使用 TikHub，失败后降级到 Cobalt
             "tiktok": [self.tikhub_provider, self.cobalt_provider],
             "instagram": [self.tikhub_provider, self.cobalt_provider],
-            "xiaohongshu": [self.tikhub_provider, self.cobalt_provider],
+            # 小红书：Cobalt 实测不支持(link.invalid)，移除无效兜底，走 tikhub 单 provider
+            # (tikhub 内部已有 app_v2 → web_v3 多级降级)
+            "xiaohongshu": [self.tikhub_provider],
             "youtube": [self.tikhub_provider, self.cobalt_provider],
 
             # 抖音和快手可能不被 Cobalt 支持，只使用 TikHub
@@ -219,9 +221,9 @@ class VideoResolver:
 
                 return video_info, provider_name
 
-            except DouyinTerminalError as e:
-                # 终态失败（私密/部分可见/不可恢复）：立即停止责任链，不再 fallback
-                # 即便 env 覆盖了 douyin 链加入了其它 provider 也不试（codex #5）
+            except TerminalError as e:
+                # 终态失败（抖音私密/部分可见、小红书图文无视频等）：立即停止责任链，不再 fallback
+                # 即便 env 覆盖了链加入了其它 provider 也不试（codex #5）
                 logger.info(
                     f"Terminal failure, stopping provider chain: {e} "
                     f"[platform={platform}, video_id={video_id}]"

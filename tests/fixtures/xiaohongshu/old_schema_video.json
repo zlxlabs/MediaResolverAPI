@@ -1,0 +1,29 @@
+{
+  "code": 200,
+  "data": {
+    "note_id": "68a54752000000001d002090",
+    "desc": "旧端点结构（已下线，保留兜底解析）",
+    "user": {"nickname": "fancyfix凡菲", "user_id": "645ce2f60000000012035cb1"},
+    "interact_info": {
+      "liked_count": "1.2万",
+      "collected_count": "345",
+      "comment_count": "10",
+      "share_count": "5"
+    },
+    "time": 1755652946000,
+    "video": {
+      "media": {
+        "stream": {
+          "h264": [
+            {
+              "master_url": "http://sns-v11.rednotecdn.com/stream/old_schema.mp4",
+              "weight": 1080,
+              "height": 1920,
+              "stream_desc": "720P"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

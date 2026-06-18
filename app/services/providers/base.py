@@ -19,13 +19,24 @@ class VideoNotFoundError(ProviderError):
     pass
 
 
-class DouyinTerminalError(VideoNotFoundError):
+class TerminalError(VideoNotFoundError):
     """
-    抖音终态失败：视频私密/部分可见/不可恢复，再降级也无意义。
+    终态失败基类：内容不可恢复（私密/删除/图文无视频等），再降级也无意义。
 
-    继承 VideoNotFoundError 以兼容现有捕获；VideoResolver 会单独识别此异常，
-    不再 fallback 到下一个 provider（见 video_resolver.py）。
+    继承 VideoNotFoundError 以兼容现有捕获；VideoResolver 单独识别此基类，
+    命中即停止责任链，不再 fallback 到下一个 provider（见 video_resolver.py）。
+    各平台的终态异常继承本类，统一被 `except TerminalError` 捕获。
     """
+    pass
+
+
+class DouyinTerminalError(TerminalError):
+    """抖音终态失败：视频私密/部分可见/不可恢复。"""
+    pass
+
+
+class XhsTerminalError(TerminalError):
+    """小红书终态失败：图文笔记（无视频）/笔记删除/私密。"""
     pass
 
 

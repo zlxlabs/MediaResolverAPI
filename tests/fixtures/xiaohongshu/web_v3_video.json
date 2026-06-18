@@ -1,0 +1,42 @@
+{
+  "code": 200,
+  "data": {
+    "ok": true,
+    "data": {
+      "items": [
+        {
+          "id": "68a54752000000001d002090",
+          "modelType": "note",
+          "noteCard": {
+            "type": "video",
+            "title": "手残党福音！百元DIY出万元艺术玻璃效果",
+            "desc": "妹们！最近用艺术玻璃膜改造家里 效果惊艳到爆炸",
+            "noteId": "68a54752000000001d002090",
+            "user": {"nickname": "fancyfix凡菲", "userId": "645ce2f60000000012035cb1"},
+            "interactInfo": {
+              "likedCount": "47",
+              "collectedCount": "10",
+              "commentCount": "5",
+              "shareCount": "3"
+            },
+            "time": 1755652946000,
+            "video": {
+              "media": {
+                "stream": {
+                  "h264": [
+                    {
+                      "masterUrl": "http://sns-v11.rednotecdn.com/stream/79/110/259/web_v3_259.mp4",
+                      "width": 1920,
+                      "height": 2560,
+                      "streamDesc": "720P"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

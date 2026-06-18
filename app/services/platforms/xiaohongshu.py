@@ -1,137 +1,143 @@
 """
 小红书平台解析服务
+
+取数由 TikHubProvider 的多级降级链负责（app_v2 → web_v3），本服务只提供
+schema 自适应解析器：一个 `_parse_response` 通吃三种响应结构。
+
+响应结构落点（详见 docs/xiaohongshu-fallback-design.md §2/§8）::
+
+    app_v2:  data.data[0].video_info_v2.media.stream.h264[].master_url   (snake)
+    web_v3:  data.data.items[0].noteCard.video.media.stream.h264[].masterUrl  (camel)
+    旧(死):  data.video.media.stream.h264[].master_url                   (snake, 保留兜底)
+
+字段命名 snake/camel 混杂，统一用 `_pick(d, *names)` 双名兼容。
 """
 
 from typing import Optional, Dict, Any
+
 from loguru import logger
-import urllib.parse
 
 from .base import BasePlatformService, VideoInfo
-from ...utils.http_client import HTTPClient
 
 
 class XiaohongshuService(BasePlatformService):
-    """
-    小红书平台服务类
-    """
+    """小红书平台服务类（仅解析；取数见 TikHubProvider._fetch_xiaohongshu）。"""
 
-    def __init__(self, api_key: str, api_base: str):
-        super().__init__(api_key, api_base)
-        self.endpoint = f"{api_base}/api/v1/xiaohongshu/web/get_note_info_v3"
-
-    async def get_video_info(self, video_id_or_url: str) -> Optional[VideoInfo]:
+    async def get_video_info(self, video_id: str) -> Optional[VideoInfo]:
         """
-        获取小红书视频信息
+        已废弃：小红书取数由 TikHubProvider 多级降级链负责，不再由本服务直接请求。
 
-        Args:
-            video_id_or_url: 小红书笔记ID或完整URL
+        保留以满足 BasePlatformService 抽象接口；调用方应走 provider 链。
+        """
+        raise NotImplementedError(
+            "小红书取数已迁移到 TikHubProvider._fetch_xiaohongshu（多级降级链）"
+        )
+
+    # ------------------------------------------------------------------
+    # schema 自适应：定位 note 节点 + 取字段
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _pick(d: Any, *keys: str, default: Any = None) -> Any:
+        """从 dict 取第一个存在且非 None 的键值（双名/多名兼容）。"""
+        if not isinstance(d, dict):
+            return default
+        for k in keys:
+            if d.get(k) is not None:
+                return d[k]
+        return default
+
+    @staticmethod
+    def extract_note(response_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        从 TikHub 响应中定位「笔记」节点（schema 自适应）。
 
         Returns:
-            Optional[VideoInfo]: 视频信息对象
+            Optional[Dict]: 笔记节点（noteCard / app_v2 item / 旧 data）；定位不到返回 None
         """
-        try:
-            # 如果传入的是完整URL，直接使用；否则报错
-            if video_id_or_url.startswith('http'):
-                share_url = video_id_or_url
-                # 检查URL是否包含必要的token参数
-                if 'xsec_token' not in share_url or 'xsec_source' not in share_url:
-                    logger.error(f"小红书URL缺少必要的token参数: {share_url}")
-                    raise Exception("小红书URL缺少必要的xsec_token和xsec_source参数，请使用完整的分享链接")
-            else:
-                # 如果只有video_id，直接报错
-                logger.error(f"小红书平台需要完整的URL（包含token），不支持仅使用video_id: {video_id_or_url}")
-                raise Exception("小红书平台需要完整的分享URL（包含xsec_token），不支持仅使用video_id")
-
-            async with HTTPClient() as client:
-                response = await client.get(
-                    self.endpoint,
-                    params={"share_text": share_url},
-                    headers={"Authorization": f"Bearer {self.api_key}"}
-                )
-
-                if response.status_code == 200:
-                    data = response.json()
-                    return self._parse_response(data)
-                else:
-                    logger.error(f"小红书API请求失败: {response.status_code} - {response.text}")
-                    return None
-
-        except Exception as e:
-            logger.error(f"获取小红书视频信息失败: {e}")
+        if not isinstance(response_data, dict):
+            return None
+        data = response_data.get("data")
+        if not isinstance(data, dict):
             return None
 
+        inner = data.get("data")
+        # web_v3: data.data.items[0].noteCard
+        if isinstance(inner, dict):
+            items = inner.get("items")
+            if isinstance(items, list) and items and isinstance(items[0], dict):
+                note_card = items[0].get("noteCard")
+                if isinstance(note_card, dict):
+                    return note_card
+        # app_v2: data.data 是列表
+        if isinstance(inner, list) and inner and isinstance(inner[0], dict):
+            return inner[0]
+        # 旧端点: data 自身即笔记节点
+        if data.get("note_id") or data.get("desc") or data.get("video"):
+            return data
+        return None
+
+    def _count(self, interact: Dict[str, Any], node: Dict[str, Any], *keys: str) -> int:
+        """从 interactInfo/interact_info 或 node 顶层取计数，解析文本为整数。"""
+        for src in (interact, node):
+            value = self._pick(src, *keys)
+            if value is not None:
+                return self._parse_count_text(value)
+        return 0
+
     def _parse_response(self, response_data: Dict[str, Any]) -> Optional[VideoInfo]:
-        """
-        解析小红书API响应数据
-
-        Args:
-            response_data: API响应数据
-
-        Returns:
-            Optional[VideoInfo]: 解析后的视频信息对象
-        """
+        """解析小红书 API 响应（三结构自适应）为 VideoInfo；无视频流返回 None。"""
         try:
-            data = self._safe_get(response_data, "data")
-            if not data:
-                logger.error("小红书响应数据中缺少data字段")
+            node = self.extract_note(response_data)
+            if not node:
+                logger.error("小红书响应数据中无法定位笔记节点")
                 return None
 
-            # 基础信息
-            video_id = self._safe_get(data, "note_id", "")
-            description = self._safe_get(data, "desc", "")
-
-            # 作者信息
-            user = self._safe_get(data, "user", {})
-            author_name = self._safe_get(user, "nickname", "")
-            author_id = self._safe_get(user, "user_id", "")
-
-            # 检查是否为视频类型
-            video_info = self._safe_get(data, "video")
-            if not video_info:
-                logger.error("该小红书笔记不是视频类型")
+            # 视频容器：web_v3/旧用 video，app_v2 用 video_info_v2
+            video_info = self._pick(node, "video", "video_info_v2")
+            if not isinstance(video_info, dict):
+                logger.info("该小红书笔记不是视频类型（无视频容器）")
                 return None
 
-            # 视频文件信息
-            media = self._safe_get(video_info, "media")
-            if not media:
-                logger.error("小红书响应数据中缺少视频媒体信息")
+            h264_streams = self._safe_get(video_info, "media.stream.h264")
+            if not isinstance(h264_streams, list) or not h264_streams:
+                logger.info("小红书响应数据中缺少 H264 视频流")
                 return None
 
-            stream = self._safe_get(media, "stream")
-            if not stream:
-                logger.error("小红书响应数据中缺少视频流信息")
+            h264 = h264_streams[0]
+            video_url = self._pick(h264, "masterUrl", "master_url", default="")
+            if not video_url:
+                logger.info("小红书 H264 流缺少 master_url")
                 return None
 
-            h264_streams = self._safe_get(stream, "h264")
-            if not h264_streams or not isinstance(h264_streams, list) or len(h264_streams) == 0:
-                logger.error("小红书响应数据中缺少H264视频流")
-                return None
+            width = self._to_int(self._pick(h264, "width", "weight", default=0))
+            height = self._to_int(self._pick(h264, "height", default=0))
+            quality = self._pick(h264, "streamDesc", "stream_desc", default="")
 
-            # 取第一个H264流
-            h264_stream = h264_streams[0]
-            video_url = self._safe_get(h264_stream, "master_url", "")
-            width = self._safe_get(h264_stream, "weight", 0)  # 注意：API文档中是"weight"而不是"width"
-            height = self._safe_get(h264_stream, "height", 0)
-            quality = self._safe_get(h264_stream, "stream_desc", "")
+            # 基础信息（双名兼容）
+            video_id = self._pick(node, "note_id", "noteId", "id", default="")
+            description = self._pick(node, "desc", default="")
 
-            # 统计信息
-            interact_info = self._safe_get(data, "interact_info", {})
-            like_count = self._parse_count_text(self._safe_get(interact_info, "liked_count"))
-            comment_count = self._parse_count_text(self._safe_get(interact_info, "comment_count"))
-            share_count = self._parse_count_text(self._safe_get(interact_info, "share_count"))
-            collect_count = self._parse_count_text(self._safe_get(interact_info, "collected_count"))
+            user = self._pick(node, "user", default={})
+            author_name = self._pick(user, "nickname", "name", default="")
+            author_id = self._pick(user, "userid", "userId", "user_id", "id", default="")
 
-            # 时间信息 (毫秒时间戳)
-            create_time_ms = self._safe_get(data, "time")
-            create_time = None
-            if create_time_ms:
-                # 使用父类的_parse_timestamp方法将时间戳转换为datetime对象
-                create_time = self._parse_timestamp(create_time_ms)
-                if not create_time:
-                    logger.warning(f"无法解析小红书创建时间: {create_time_ms}")
+            # 统计信息：app_v2 在 node 顶层；web_v3 在 interactInfo；旧在 interact_info
+            interact = self._pick(node, "interactInfo", "interact_info", default={})
+            like_count = self._count(interact, node, "likedCount", "liked_count")
+            collect_count = self._count(interact, node, "collectedCount", "collected_count")
+            comment_count = self._count(
+                interact, node, "commentCount", "comment_count", "comments_count"
+            )
+            share_count = self._count(
+                interact, node, "shareCount", "share_count", "shared_count"
+            )
 
-            # 小红书没有明确的标题字段，使用描述前50个字符作为标题
-            title = description[:50] + "..." if len(description) > 50 else description
+            create_time = self._parse_timestamp(self._pick(node, "time"))
+
+            title = self._pick(node, "title", default="") or (
+                description[:50] + "..." if len(description) > 50 else description
+            )
 
             return VideoInfo(
                 video_id=video_id,
@@ -144,59 +150,52 @@ class XiaohongshuService(BasePlatformService):
                 width=width,
                 height=height,
                 quality=quality,
-                view_count=0,  # 小红书API不提供观看次数
+                view_count=0,  # 小红书 API 不提供观看次数
                 like_count=like_count,
                 comment_count=comment_count,
                 share_count=share_count,
                 collect_count=collect_count,
                 create_time=create_time,
-                raw_data=response_data
+                raw_data=response_data,
             )
 
         except Exception as e:
             logger.error(f"解析小红书响应数据失败: {e}")
             return None
 
+    @staticmethod
+    def _to_int(value: Any) -> int:
+        try:
+            return int(value)
+        except (ValueError, TypeError):
+            return 0
+
     def _parse_count_text(self, count_text: Any) -> int:
         """
         解析小红书的文本类型计数
-        小红书的统计数据是文本类型，如"1.2万"、"345"、"10+"、"1千+"、"10k+"等
-
-        Args:
-            count_text: 文本类型的计数
-
-        Returns:
-            int: 解析后的数字
+        如"1.2万"、"345"、"10+"、"1千+"、"10k+"等，也兼容已是 int 的值。
         """
-        if not count_text:
+        if count_text is None or count_text == "":
             return 0
 
-        try:
-            count_str = str(count_text).strip().lower()  # 转为小写便于处理
+        if isinstance(count_text, (int, float)):
+            return int(count_text)
 
-            # 移除末尾的+号
+        try:
+            count_str = str(count_text).strip().lower()
+
             if count_str.endswith('+'):
                 count_str = count_str[:-1].strip()
 
-            # 处理中文数字单位
             if "万" in count_str:
-                # 提取数字部分
-                number_part = count_str.replace("万", "").strip()
-                return int(float(number_part) * 10000)
+                return int(float(count_str.replace("万", "").strip()) * 10000)
             elif "千" in count_str:
-                number_part = count_str.replace("千", "").strip()
-                return int(float(number_part) * 1000)
-            # 处理英文数字单位
+                return int(float(count_str.replace("千", "").strip()) * 1000)
             elif count_str.endswith('m'):
-                # m = million = 百万
-                number_part = count_str.replace("m", "").strip()
-                return int(float(number_part) * 1000000)
+                return int(float(count_str.replace("m", "").strip()) * 1000000)
             elif count_str.endswith('k'):
-                # k = thousand = 千
-                number_part = count_str.replace("k", "").strip()
-                return int(float(number_part) * 1000)
+                return int(float(count_str.replace("k", "").strip()) * 1000)
             else:
-                # 直接转换为整数
                 return int(float(count_str))
 
         except (ValueError, TypeError):

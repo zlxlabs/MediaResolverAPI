@@ -12,10 +12,20 @@ from typing import Dict, List, Optional, Tuple
 from loguru import logger
 import httpx
 
-from .base import BaseProvider, ProviderError, VideoNotFoundError, DouyinTerminalError
+import re
+import urllib.parse
+
+from .base import (
+    BaseProvider,
+    ProviderError,
+    VideoNotFoundError,
+    DouyinTerminalError,
+    XhsTerminalError,
+)
 from ...core.config import settings
 from ...utils.http_client import HTTPClient
 from ..platforms.douyin import DouyinService
+from ..platforms.xiaohongshu import XiaohongshuService
 
 
 class TikHubProvider(BaseProvider):
@@ -37,7 +47,9 @@ class TikHubProvider(BaseProvider):
         "tiktok": "/api/v1/tiktok/app/v3/fetch_one_video",
         "kuaishou": "/api/v1/kuaishou/web/fetch_one_video_v2",
         "youtube": "/api/v1/youtube/web/get_video_info",
-        "xiaohongshu": "/api/v1/xiaohongshu/web/get_note_info_v3",
+        # 旧端点 web/get_note_info_v3 已被 TikHub 下线(404)；小红书改走 XHS_CHAIN 多级降级
+        # （此处仅供 supports_platform 识别，实际取数见 _fetch_xiaohongshu）
+        "xiaohongshu": "/api/v1/xiaohongshu/app_v2/get_video_note_detail",
         # 旧端点 web_app/fetch_post_media_by_url 已被 TikHub 下线(404)，改用 v2
         "instagram": "/api/v1/instagram/v2/fetch_post_info",
     }
@@ -71,6 +83,47 @@ class TikHubProvider(BaseProvider):
     # 避免 HTTPClient 默认 max_retries=3 把耗时放大到 ~180s（codex #3）。
     DOUYIN_PER_ENDPOINT_TIMEOUT = 25
     DOUYIN_TOTAL_BUDGET = 50.0
+
+    # 小红书端点降级链：(名称, 路径, 入参模式)。串行尝试直到命中。
+    # app_v2 仅凭 note_id 即可、不依赖 xsec_token（更鲁棒）→ 首选；
+    # web_v3 需 note_id + xsec_token（token 缺失时跳过）→ 补强。
+    XHS_CHAIN: List[Tuple[str, str, str]] = [
+        ("app_v2", "/api/v1/xiaohongshu/app_v2/get_video_note_detail", "note_id"),
+        ("web_v3", "/api/v1/xiaohongshu/web_v3/fetch_note_detail", "note_id_token"),
+    ]
+    XHS_PER_ENDPOINT_TIMEOUT = 25
+    XHS_TOTAL_BUDGET = 50.0
+
+    @staticmethod
+    def _classify_xhs(response: Dict) -> str:
+        """
+        对小红书响应做三态分类。
+
+        Returns:
+            "terminal"  : 图文笔记/删除/私密等无视频终态，立即短路
+            "retryable" : 端点错误/空/无法定位笔记，试下一端点
+            "ok"        : 视频笔记，交由解析器进一步校验
+        """
+        if not isinstance(response, dict):
+            return "retryable"
+        node = XiaohongshuService.extract_note(response)
+        if not node:
+            return "retryable"
+        note_type = str(node.get("type") or "").lower()
+        # 有明确类型且非视频（小红书图文笔记 type 为 normal/multi 等）→ 终态
+        if note_type and note_type != "video":
+            return "terminal"
+        return "ok"
+
+    @staticmethod
+    def _extract_xsec_token(url: str) -> Optional[str]:
+        """从原始 URL 提取并解码 xsec_token（缺失返回 None）。"""
+        if not url:
+            return None
+        match = re.search(r"xsec_token=([^&]+)", url)
+        if not match:
+            return None
+        return urllib.parse.unquote(match.group(1))
 
     @staticmethod
     def _classify_douyin(response: Dict) -> str:
@@ -166,6 +219,10 @@ class TikHubProvider(BaseProvider):
             return await self._fetch_douyin(
                 video_id, original_url, use_hybrid=kwargs.get("use_hybrid", False)
             )
+
+        # 小红书走多级端点降级链（app_v2 → web_v3）
+        if platform == "xiaohongshu":
+            return await self._fetch_xiaohongshu(video_id, original_url)
 
         endpoint = self.PLATFORM_ENDPOINTS[platform]
         param_name = self.PLATFORM_PARAMS[platform]
@@ -353,6 +410,120 @@ class TikHubProvider(BaseProvider):
     def _douyin_has_playable(self, data: Dict) -> bool:
         """用 DouyinService 的 schema 自适应解析器校验是否能解析出无水印直链。"""
         info = DouyinService(self.api_key, self.api_base)._parse_response(data)
+        return bool(info and info.video_url)
+
+    async def _fetch_xiaohongshu(self, note_id: str, original_url: str) -> Dict:
+        """
+        小红书多级端点降级链：串行尝试，命中即返回；图文等终态立即短路；全失败抛错。
+
+        链序：app_v2(note_id) → web_v3(note_id + xsec_token)。
+        app_v2 不依赖 token 故首选；token 缺失时 web_v3 自动跳过。
+
+        Returns:
+            Dict: 命中端点的原始响应（交由 XiaohongshuService._parse_response 解析）
+
+        Raises:
+            XhsTerminalError: 图文笔记/删除/私密等终态，立即短路
+            VideoNotFoundError: 全链失败
+            ProviderError: 总预算超时或认证失败
+        """
+        token = self._extract_xsec_token(original_url)
+        # token 缺失时跳过需要 token 的端点（web_v3）
+        chain = [
+            (name, path, mode)
+            for name, path, mode in self.XHS_CHAIN
+            if mode != "note_id_token" or token
+        ]
+        attempts: List[Dict] = []
+
+        try:
+            async with asyncio.timeout(self.XHS_TOTAL_BUDGET):
+                for name, path, mode in chain:
+                    try:
+                        data = await self._call_xhs_endpoint(
+                            name, path, mode, note_id, token
+                        )
+                    except ProviderError as e:
+                        attempts.append({"endpoint": name, "decision": "http_error", "error": str(e)})
+                        self.log_warning(f"Xiaohongshu endpoint {name} http error: {e}")
+                        continue
+
+                    decision = self._classify_xhs(data)
+                    if decision == "terminal":
+                        self.log_info(
+                            "Xiaohongshu terminal response (image/unavailable), short-circuit",
+                            endpoint=name, note_id=note_id,
+                        )
+                        raise XhsTerminalError(
+                            f"Xiaohongshu note has no video (image/unavailable): {note_id}"
+                        )
+                    if decision == "retryable":
+                        attempts.append({"endpoint": name, "decision": "retryable"})
+                        continue
+
+                    # ok：解析校验，解析不出可播放直链也算可重试
+                    if self._xhs_has_playable(data):
+                        self.log_info(
+                            "Xiaohongshu endpoint hit", endpoint=name, note_id=note_id
+                        )
+                        return data
+                    attempts.append({"endpoint": name, "decision": "parse_failed"})
+                    self.log_warning(f"Xiaohongshu endpoint {name} ok but no playable url")
+        except asyncio.TimeoutError:
+            self.log_error(
+                f"Xiaohongshu chain timed out after {self.XHS_TOTAL_BUDGET}s",
+                note_id=note_id, attempts=attempts,
+            )
+            raise ProviderError(
+                f"Xiaohongshu endpoint chain timed out after {self.XHS_TOTAL_BUDGET}s "
+                f"[attempts={attempts}]"
+            )
+
+        raise VideoNotFoundError(
+            f"Xiaohongshu all endpoints failed for '{note_id}' [attempts={attempts}]"
+        )
+
+    async def _call_xhs_endpoint(
+        self, name: str, path: str, mode: str, note_id: str, token: Optional[str]
+    ) -> Dict:
+        """
+        调单个小红书端点。单端 max_retries=0（重试交给链本身，避免超时放大）。
+
+        catch httpx.HTTPStatusError 并尽量取出错误体交给分类器（与抖音一致）。
+        """
+        params: Dict[str, str] = {"note_id": note_id}
+        if mode == "note_id_token":
+            params["xsec_token"] = token or ""
+        url = f"{self.api_base}{path}"
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        try:
+            async with HTTPClient(
+                timeout=self.XHS_PER_ENDPOINT_TIMEOUT, max_retries=0
+            ) as client:
+                response = await client.get(url, params=params, headers=headers)
+                return response.json()
+        except httpx.HTTPStatusError as e:
+            resp = e.response
+            status = resp.status_code if resp is not None else None
+            if status == 401:
+                raise ProviderError("TikHub API authentication failed")
+            body = None
+            if resp is not None:
+                try:
+                    body = resp.json()
+                except Exception:
+                    body = None
+            if isinstance(body, dict):
+                return body  # 交给分类器判定 terminal/retryable
+            raise ProviderError(f"{name} HTTP {status}")
+        except ProviderError:
+            raise
+        except Exception as e:
+            raise ProviderError(f"{name} request failed: {e}")
+
+    def _xhs_has_playable(self, data: Dict) -> bool:
+        """用 XiaohongshuService 的 schema 自适应解析器校验是否能解析出无水印直链。"""
+        info = XiaohongshuService(self.api_key, self.api_base)._parse_response(data)
         return bool(info and info.video_url)
 
     def _validate_response(self, data: Dict, platform: str) -> bool:
