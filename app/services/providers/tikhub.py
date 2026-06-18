@@ -5,11 +5,7 @@ TikHub 视频信息提供者
 """
 
 import asyncio
-import json
-from datetime import datetime
-from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
-from loguru import logger
 import httpx
 
 import re
@@ -47,28 +43,12 @@ class TikHubProvider(BaseProvider):
     - instagram
     """
 
-    # 平台与 TikHub API 端点的映射
-    PLATFORM_ENDPOINTS = {
-        "douyin": "/api/v1/douyin/web/fetch_one_video",
-        "tiktok": "/api/v1/tiktok/app/v3/fetch_one_video",
-        "kuaishou": "/api/v1/kuaishou/web/fetch_one_video_v2",
-        "youtube": "/api/v1/youtube/web/get_video_info",
-        # 旧端点 web/get_note_info_v3 已被 TikHub 下线(404)；小红书改走 XHS_CHAIN 多级降级
-        # （此处仅供 supports_platform 识别，实际取数见 _fetch_xiaohongshu）
-        "xiaohongshu": "/api/v1/xiaohongshu/app_v2/get_video_note_detail",
-        # 旧端点 web_app/fetch_post_media_by_url 已被 TikHub 下线(404)，改用 v2
-        "instagram": "/api/v1/instagram/v2/fetch_post_info",
-    }
-
-    # 平台与视频ID参数名的映射
-    PLATFORM_PARAMS = {
-        "douyin": "aweme_id",
-        "tiktok": "aweme_id",
-        "kuaishou": "photo_id",
-        "youtube": "video_id",
-        "xiaohongshu": "share_text",  # 小红书使用完整URL
-        "instagram": "code_or_url",  # Instagram v2 接受 shortcode 或完整URL
-    }
+    # 支持的平台集合（supports_platform 的唯一真相来源）。
+    # 各平台的实际端点不再是单值，而是多级降级链（见 *_CHAIN 常量 + _fetch_<plat>），
+    # 原 PLATFORM_ENDPOINTS/PLATFORM_PARAMS 已随通用 GET 路径删除（评审 Issue 3）。
+    SUPPORTED_PLATFORMS = frozenset({
+        "douyin", "tiktok", "kuaishou", "youtube", "xiaohongshu", "instagram",
+    })
 
     # 抖音终态 reason（私密/部分可见）—— 再降级也拿不到，立即短路
     DOUYIN_TERMINAL_REASONS = {5, 10}
@@ -298,7 +278,7 @@ class TikHubProvider(BaseProvider):
         Returns:
             bool: 是否支持
         """
-        return platform.lower() in self.PLATFORM_ENDPOINTS
+        return platform.lower() in self.SUPPORTED_PLATFORMS
 
     async def fetch_video_info(
         self,
@@ -357,77 +337,9 @@ class TikHubProvider(BaseProvider):
         if platform == "youtube":
             return await self._fetch_youtube(video_id, original_url)
 
-        endpoint = self.PLATFORM_ENDPOINTS[platform]
-        param_name = self.PLATFORM_PARAMS[platform]
-        url = f"{self.api_base}{endpoint}"
-
-        # 小红书和Instagram需要传递完整URL，其他平台传递video_id
-        if platform in ["xiaohongshu", "instagram"]:
-            param_value = original_url
-        else:
-            param_value = video_id
-
-        self.log_info(
-            f"Fetching video info from TikHub",
-            platform=platform,
-            video_id=video_id,
-            endpoint=endpoint,
-            param_name=param_name,
-            param_value=param_value
-        )
-
-        try:
-            async with HTTPClient() as client:
-                response = await client.get(
-                    url,
-                    params={param_name: param_value},
-                    headers={"Authorization": f"Bearer {self.api_key}"},
-                    timeout=60.0  # 60秒超时
-                )
-
-                if response.status_code == 404:
-                    raise VideoNotFoundError(f"Video not found: {video_id}")
-                elif response.status_code == 401:
-                    raise ProviderError("TikHub API authentication failed")
-                elif response.status_code == 429:
-                    raise ProviderError("TikHub API rate limit exceeded")
-                elif response.status_code != 200:
-                    raise ProviderError(
-                        f"TikHub API returned error: {response.status_code} - {response.text}"
-                    )
-
-                data = response.json()
-
-                # 检查响应数据的有效性
-                if not self._validate_response(data, platform):
-                    self.log_error(
-                        f"Invalid video data returned from TikHub",
-                        platform=platform,
-                        video_id=video_id,
-                        response_keys=list(data.keys()) if isinstance(data, dict) else None,
-                        data_keys=list(data.get("data", {}).keys()) if isinstance(data, dict) and "data" in data else None
-                    )
-                    # Save failed response to logs folder for debugging
-                    self._save_failed_response(data, platform, video_id)
-                    raise VideoNotFoundError(f"Invalid video data returned from TikHub")
-
-                self.log_info(
-                    f"Successfully fetched video info from TikHub",
-                    platform=platform,
-                    video_id=video_id
-                )
-
-                return data
-
-        except (VideoNotFoundError, ProviderError):
-            raise
-        except Exception as e:
-            self.log_error(
-                f"Failed to fetch video info from TikHub: {e}",
-                platform=platform,
-                video_id=video_id
-            )
-            raise ProviderError(f"TikHub API request failed: {str(e)}")
+        # 全 6 平台均已走通用引擎多级降级链；到此说明 SUPPORTED_PLATFORMS 加了平台
+        # 却漏接 dispatch 分支 —— 显式报错而非静默返回 None（防隐藏路径）。
+        raise ProviderError(f"No fallback chain wired for platform '{platform}'")
 
     # ================= 通用多级降级引擎（抖音/小红书/快手/TikTok/IG/YT 共用） =================
     #
@@ -765,99 +677,6 @@ class TikHubProvider(BaseProvider):
         info = YouTubeService(self.api_key, self.api_base)._parse_response(data)
         return bool(info and info.video_url)
 
-    def _validate_response(self, data: Dict, platform: str) -> bool:
-        """
-        验证 TikHub API 响应数据的有效性
-
-        这里只做最基础的验证，确保响应包含 data 字段。
-        更详细的数据结构验证由各平台的 _parse_response 方法负责。
-
-        Args:
-            data: API 响应数据
-            platform: 平台名称
-
-        Returns:
-            bool: 数据是否有效
-        """
-        if not isinstance(data, dict):
-            return False
-
-        # 检查是否有 data 字段
-        if "data" not in data:
-            return False
-
-        response_data = data.get("data", {})
-
-        # 确保 data 字段不为空
-        if not response_data:
-            return False
-
-        # 根据平台检查关键字段（宽松验证，兼容多种格式）
-        if platform == "douyin" or platform == "tiktok":
-            # TikTok 兼容两种格式：data.aweme_detail.* 或 data.*
-            # 只要 data 存在且包含 aweme_detail 或 aweme_id 就认为有效
-            return "aweme_detail" in response_data or "aweme_id" in response_data
-        elif platform == "kuaishou":
-            return "photo" in response_data
-        elif platform == "youtube":
-            # YouTube API 返回的数据包含 title, channel 等字段
-            return "title" in response_data or "videoDetails" in response_data
-        elif platform == "xiaohongshu":
-            # 小红书新API返回的数据包含 user, video, desc 等字段
-            return "user" in response_data or "desc" in response_data
-        elif platform == "instagram":
-            # v2 fetch_post_info 返回: data.data.{is_video, video_url, code, ...}
-            # 兼容更早格式: data.data.medias / full_name，以及 data.is_video
-            inner_data = response_data.get("data", {})
-            return (
-                "video_url" in inner_data
-                or "is_video" in inner_data
-                or "code" in inner_data
-                or "medias" in inner_data
-                or "full_name" in inner_data
-                or "is_video" in response_data
-            )
-
-        return True
-
-    def _save_failed_response(self, data: Dict, platform: str, video_id: str) -> None:
-        """
-        Save failed TikHub response to logs folder for debugging.
-
-        Args:
-            data: The response data from TikHub API
-            platform: Platform name
-            video_id: Video ID
-        """
-        try:
-            # Get logs directory path
-            logs_dir = Path(settings.LOG_FILE_PATH)
-            if not logs_dir.is_absolute():
-                # Find project root (contains pyproject.toml)
-                current_file = Path(__file__)
-                project_root = current_file
-                while project_root.parent != project_root:
-                    if (project_root / "pyproject.toml").exists():
-                        break
-                    project_root = project_root.parent
-                if not (project_root / "pyproject.toml").exists():
-                    project_root = Path.cwd()
-                logs_dir = project_root / logs_dir
-
-            # Create tikhub_failures subdirectory
-            failures_dir = logs_dir / "tikhub_failures"
-            failures_dir.mkdir(parents=True, exist_ok=True)
-
-            # Generate filename with timestamp
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"{timestamp}_{platform}_{video_id}.json"
-            filepath = failures_dir / filename
-
-            # Save response data
-            with open(filepath, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-
-            logger.info(f"Failed TikHub response saved to {filepath}")
-
-        except Exception as e:
-            logger.warning(f"Failed to save TikHub response to file: {e}")
+    # 注：原 _validate_response / _save_failed_response（通用 GET 路径的响应校验与
+    # 失败落盘）已随全平台迁移到引擎而删除——有效性现由各链的 classify + has_playable
+    # 唯一判定（评审 Issue 3：消除两套有效性来源）。

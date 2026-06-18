@@ -38,15 +38,15 @@ def test_parse_v2_real_response(service):
     assert info.like_count == 972
 
 
-def test_validator_accepts_v2_structure():
-    """provider 的 _validate_response 必须放行 v2 (data.data.{is_video,video_url}) 结构。"""
-    provider = TikHubProvider.__new__(TikHubProvider)
-    assert provider._validate_response(load("v2_post_info"), "instagram") is True
-
-
-def test_instagram_endpoint_points_to_v2():
-    """回归防护：instagram 端点不能再指向已下线的 web_app 端点。"""
-    ep = TikHubProvider.PLATFORM_ENDPOINTS["instagram"]
-    assert ep == "/api/v1/instagram/v2/fetch_post_info"
-    assert "web_app/fetch_post_media_by_url" not in ep
-    assert TikHubProvider.PLATFORM_PARAMS["instagram"] == "code_or_url"
+def test_instagram_chain_uses_v2_not_dead_endpoint():
+    """
+    回归防护：instagram 多级链首端必须是 v2/fetch_post_info（code_or_url），
+    绝不能再指向已下线的 web_app 端点。原 _validate_response/PLATFORM_ENDPOINTS
+    校验已随通用 GET 路径删除，有效性现由 classify + has_playable 判定（评审 Issue 3）。
+    """
+    chain = TikHubProvider.INSTAGRAM_CHAIN
+    names = {n for n, _p, _param in chain}
+    paths = {p for _n, p, _param in chain}
+    assert ("v2", "/api/v1/instagram/v2/fetch_post_info", "code_or_url") in chain
+    assert not any("web_app/fetch_post_media_by_url" in p for p in paths)
+    assert "v1_by_url" in names  # 多级降级：v2 之外还有 v1 兜底
