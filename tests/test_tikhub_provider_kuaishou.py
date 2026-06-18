@@ -72,6 +72,30 @@ def test_parser_adaptive_data_list():
     assert info is not None and info.video_url.endswith("test_web_share.mp4")
 
 
+@pytest.mark.parametrize("fixture", ["web_v2_video", "web_share_video"])
+def test_parser_id_and_author_are_str_from_correct_fields(fixture):
+    """
+    生产 500 回归：真实响应 video id 在 photoId（非 id），userId 为 int、userEid 为字符串。
+    解析必须取对字段并 str 化，否则 int/None 流入 VideoInfoResponse(*: str) 触发 500。
+    """
+    info = KuaishouService("k", "b")._parse_response(load(fixture))
+    assert info is not None
+    assert info.video_id == "5222205432886801003"   # 来自 photoId，非 None
+    assert isinstance(info.video_id, str)
+    assert info.author_id == "3x78tdkxcz6zkk2"        # 来自 userEid（稳定字符串 id）
+    assert isinstance(info.author_id, str)
+
+
+def test_parsed_info_passes_response_model_validation():
+    """直接复现并守护生产故障：快手解析结果须能通过 VideoInfoResponse(pydantic) 校验。"""
+    from app.api.resolve import _build_response
+
+    info = KuaishouService("k", "b")._parse_response(load("web_v2_video"))
+    resp = _build_response(info)  # author_id/video_id 为 int/None 时此处会抛 ValidationError
+    assert resp.video_id == "5222205432886801003"
+    assert resp.author_id == "3x78tdkxcz6zkk2"
+
+
 # ----------------------------- 端点降级链 -----------------------------
 
 def _provider_with(monkeypatch, mapping):

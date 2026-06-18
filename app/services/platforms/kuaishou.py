@@ -86,13 +86,25 @@ class KuaishouService(BasePlatformService):
                 return None
 
             # 基础信息
-            video_id = self._safe_get(photo, "id", "")
+            # 实测真实响应：视频 id 在 photoId（非 id，id 常为 None）；userId 为 int、
+            # userEid 为稳定外部 id（与分享链 authorId 一致）。统一 str 化，避免 int/None
+            # 流入 VideoInfoResponse(author_id/video_id: str) 触发 500（生产实测踩中）。
+            video_id = str(
+                self._safe_get(photo, "photoId", "")
+                or self._safe_get(photo, "photo_id", "")
+                or self._safe_get(photo, "id", "")
+                or ""
+            )
             caption = self._safe_get(photo, "caption", "")
             description = caption  # 快手的caption就是描述
 
-            # 作者信息
+            # 作者信息（userEid 为稳定字符串 id，优先；userId 为 int 兜底并 str 化）
             user_name = self._safe_get(photo, "userName", "")
-            user_id = self._safe_get(photo, "userId", "")
+            user_id = str(
+                self._safe_get(photo, "userEid", "")
+                or self._safe_get(photo, "userId", "")
+                or ""
+            )
 
             # 视频文件信息
             manifest = self._safe_get(photo, "manifest")

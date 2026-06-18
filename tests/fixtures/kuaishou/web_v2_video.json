@@ -2,10 +2,11 @@
   "data": {
     "result": 1,
     "photo": {
-      "id": "3xh683uyhqbzan4",
+      "photoId": "5222205432886801003",
       "caption": "快手测试视频",
       "userName": "测试用户",
-      "userId": "3x78tdkxcz6zkk2",
+      "userId": 1537860739,
+      "userEid": "3x78tdkxcz6zkk2",
       "timestamp": 1744099200000,
       "likeCount": 123,
       "commentCount": 45,
