@@ -19,6 +19,7 @@ from .base import (
     BaseProvider,
     ProviderError,
     VideoNotFoundError,
+    TerminalError,
     DouyinTerminalError,
     XhsTerminalError,
     KuaishouTerminalError,
@@ -28,6 +29,7 @@ from ...utils.http_client import HTTPClient
 from ..platforms.douyin import DouyinService
 from ..platforms.xiaohongshu import XiaohongshuService
 from ..platforms.kuaishou import KuaishouService
+from ..platforms.tiktok import TikTokService
 
 
 class TikHubProvider(BaseProvider):
@@ -109,6 +111,19 @@ class TikHubProvider(BaseProvider):
     KUAISHOU_PER_ENDPOINT_TIMEOUT = 25
     KUAISHOU_TOTAL_BUDGET = 55.0
 
+    # TikTok 端点降级链：(名称, 路径, 入参名)。同源抖音 schema（data.aweme_detail），
+    # 三端同 schema 由 TikTokService 解析（保 play_addr_h264 优先，评审 Issue 7）。
+    # share_url(aweme_details 复数) / web(itemId) 为另一套 schema，暂不入链（见 TODOS）。
+    # TikTok 有 cobalt 兜底 → 分类器不出终态（_classify_tiktok），链走完落 cobalt。
+    TIKTOK_CHAIN: List[Tuple[str, str, str]] = [
+        ("app_v3", "/api/v1/tiktok/app/v3/fetch_one_video", "aweme_id"),
+        ("app_v3_v2", "/api/v1/tiktok/app/v3/fetch_one_video_v2", "aweme_id"),
+        ("app_v3_v3", "/api/v1/tiktok/app/v3/fetch_one_video_v3", "aweme_id"),
+    ]
+    # 长链（3 端点）单端降至 18s，总预算 60s（3×18=54<60，保证三端都能跑，Issue 4）。
+    TIKTOK_PER_ENDPOINT_TIMEOUT = 18
+    TIKTOK_TOTAL_BUDGET = 60.0
+
     @staticmethod
     def _classify_kuaishou(response: Dict) -> str:
         """
@@ -157,12 +172,18 @@ class TikHubProvider(BaseProvider):
         return urllib.parse.unquote(match.group(1))
 
     @staticmethod
-    def _classify_douyin(response: Dict) -> str:
+    def _classify_aweme(response: Dict, *, allow_terminal: bool) -> str:
         """
-        对抖音响应做三态分类（codex #9：扫整个 filter_list，不假设 index 0）。
+        抖音/TikTok 同源 envelope 三态分类（aweme_detail/aweme_id/filter_list）。
+        codex #9：扫整个 filter_list，不假设 index 0。
+
+        allow_terminal：
+          True  — 单源平台（抖音，无 cobalt）：命中终态 reason 立即短路。
+          False — 有 cobalt 兜底的平台（TikTok）：终态降级为 retryable，让链走完后
+                  落到 cobalt（评审 Issue 6：误判终态会让 cobalt 永远跑不到）。
 
         Returns:
-            "terminal"  : 私密/部分可见等终态，应立即短路不再试后续端点
+            "terminal"  : 仅 allow_terminal 时，私密/部分可见等终态
             "retryable" : 版权受限(reason=8)/空/异常 envelope，应试下一端点
             "ok"        : 含作品详情，交由解析器进一步校验
         """
@@ -177,7 +198,7 @@ class TikHubProvider(BaseProvider):
             reasons = {
                 f.get("reason") for f in filters if isinstance(f, dict)
             }
-            if reasons & TikHubProvider.DOUYIN_TERMINAL_REASONS:
+            if allow_terminal and (reasons & TikHubProvider.DOUYIN_TERMINAL_REASONS):
                 return "terminal"
             return "retryable"
 
@@ -187,6 +208,16 @@ class TikHubProvider(BaseProvider):
         if "aweme_id" in payload:
             return "ok"
         return "retryable"
+
+    @staticmethod
+    def _classify_douyin(response: Dict) -> str:
+        """抖音（tikhub 单源）：允许终态短路。"""
+        return TikHubProvider._classify_aweme(response, allow_terminal=True)
+
+    @staticmethod
+    def _classify_tiktok(response: Dict) -> str:
+        """TikTok（有 cobalt 兜底）：终态降级为 retryable，链走完落 cobalt（Issue 6）。"""
+        return TikHubProvider._classify_aweme(response, allow_terminal=False)
 
     def __init__(self):
         """初始化 TikHub 提供者"""
@@ -258,6 +289,10 @@ class TikHubProvider(BaseProvider):
         # 快手走多级端点降级链（web_v2 → web_share）
         if platform == "kuaishou":
             return await self._fetch_kuaishou(video_id, original_url)
+
+        # TikTok 走多级端点降级链（app/v3 → _v2 → _v3）
+        if platform == "tiktok":
+            return await self._fetch_tiktok(video_id, original_url)
 
         endpoint = self.PLATFORM_ENDPOINTS[platform]
         param_name = self.PLATFORM_PARAMS[platform]
@@ -570,6 +605,38 @@ class TikHubProvider(BaseProvider):
     def _kuaishou_has_playable(self, data: Dict) -> bool:
         """用 KuaishouService 的 schema 自适应解析器校验是否能解析出可播放直链。"""
         info = KuaishouService(self.api_key, self.api_base)._parse_response(data)
+        return bool(info and info.video_url)
+
+    async def _fetch_tiktok(self, video_id: str, original_url: str) -> Dict:
+        """
+        TikTok 多级降级（薄封装，骨架见 _run_chain）。
+
+        链：app/v3/fetch_one_video → _v2 → _v3，三端同 data.aweme_detail schema。
+        has_playable 用 TikTokService（保 play_addr_h264 优先，评审 Issue 7）；
+        classify 复用同源 aweme envelope 逻辑但不出终态（有 cobalt 兜底，Issue 6）。
+        terminal_exc 实际不会被触发（_classify_tiktok 永不返回 terminal）。
+        """
+        chain = list(self.TIKTOK_CHAIN)
+
+        def build_params(endpoint: Tuple) -> Dict:
+            _name, _path, param = endpoint
+            return {param: video_id}
+
+        return await self._run_chain(
+            chain=chain,
+            build_params=build_params,
+            classify=self._classify_tiktok,
+            has_playable=self._tiktok_has_playable,
+            terminal_exc=TerminalError,  # 占位：cobalt 兜底平台不出终态，不会被 raise
+            total_budget=self.TIKTOK_TOTAL_BUDGET,
+            per_timeout=self.TIKTOK_PER_ENDPOINT_TIMEOUT,
+            target=video_id or original_url,
+            label="TikTok",
+        )
+
+    def _tiktok_has_playable(self, data: Dict) -> bool:
+        """用 TikTokService（非 DouyinService）校验直链，保 play_addr_h264 优先（Issue 7）。"""
+        info = TikTokService(self.api_key, self.api_base)._parse_response(data)
         return bool(info and info.video_url)
 
     def _validate_response(self, data: Dict, platform: str) -> bool:
