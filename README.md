@@ -10,13 +10,15 @@
 | TikTok | ✅ | TikHub → Cobalt |
 | 快手 (Kuaishou) | ✅ | TikHub |
 | YouTube | ✅ | TikHub → Cobalt |
-| 小红书 (Xiaohongshu) | ✅ | TikHub → Cobalt |
+| 小红书 (Xiaohongshu) | ✅ | TikHub（多级端点降级） |
 | Instagram | ✅ | TikHub → Cobalt |
 | Pinterest | ✅ | Cobalt |
 
 > 含多个数据源的平台会按优先级依次尝试，前者失败自动降级到后者。
 >
 > **抖音多级端点降级**：在 TikHub 内部按 `web/fetch_one_video → web/fetch_one_video_v2 → app/v3/fetch_one_video_v3` 串行降级（覆盖同源抖动、跨源失效、版权受限）；私密/部分可见等终态立即短路；短链展开或 ID 提取失败时回退到 `hybrid/video_data` 入口。详见 [docs/douyin-fallback-design.md](docs/douyin-fallback-design.md)。
+>
+> **小红书多级端点降级**：在 TikHub 内部按 `app_v2/get_video_note_detail（仅 note_id）→ web_v3/fetch_note_detail（note_id + xsec_token）` 串行降级；`app_v2` 不依赖 token 故首选，token 缺失时跳过 `web_v3`；图文笔记/删除等终态立即短路。旧端点 `web/get_note_info_v3` 已被 TikHub 下线、Cobalt 不支持小红书，故为 TikHub 单源。详见 [docs/xiaohongshu-fallback-design.md](docs/xiaohongshu-fallback-design.md)。
 
 ---
 
@@ -188,7 +190,7 @@ curl http://localhost:8000/api/platforms \
     "pinterest": ["cobalt"],
     "tiktok": ["tikhub", "cobalt"],
     "instagram": ["tikhub", "cobalt"],
-    "xiaohongshu": ["tikhub", "cobalt"],
+    "xiaohongshu": ["tikhub"],
     "youtube": ["tikhub", "cobalt"],
     "douyin": ["tikhub"],
     "kuaishou": ["tikhub"]

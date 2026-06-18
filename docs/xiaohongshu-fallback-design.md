@@ -1,6 +1,6 @@
 # 小红书无水印解析 · 多级降级机制设计
 
-> 状态：**已过 `/plan-eng-review`（架构/代码质量/测试/性能四节）**，待实现
+> 状态：**已实现并上线**（TDD，26 个新单测 / 全量 97 passed；fordeal 生产实测原始链接解析成功，provider=tikhub、app_v2 命中）。已过 `/plan-eng-review`（架构/代码质量/测试/性能四节）。
 > 数据源：TikHub API（openapi.json 实测，2026-06）
 > 参照：[douyin-fallback-design.md](douyin-fallback-design.md) 的 provider 内闭环 + schema 自适应解析范式
 >
