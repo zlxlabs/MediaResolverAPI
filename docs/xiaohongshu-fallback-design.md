@@ -1,5 +1,10 @@
 # 小红书无水印解析 · 多级降级机制设计
 
+> **⚠️ 已迁移到通用引擎（2026-06）**：小红书专用 `_fetch_xiaohongshu`/`_call_xhs_endpoint` 链逻辑已抽取为
+> 配置驱动的**通用多级降级引擎**（`_run_chain` + `_call_endpoint`），小红书现为引擎的薄封装（链配置 +
+> `_classify_xhs` 分类器 + token 裁剪），**行为不变**（原测试全绿）。本文档的链序/token 语义/终态仍准确，
+> 仅实现位置变化。引擎设计与全平台链配置见 [generic-fallback-engine.md](generic-fallback-engine.md)。
+
 > 状态：**已实现并上线**（TDD，26 个新单测 / 全量 97 passed；fordeal 生产实测原始链接解析成功，provider=tikhub、app_v2 命中）。已过 `/plan-eng-review`（架构/代码质量/测试/性能四节）。
 > 数据源：TikHub API（openapi.json 实测，2026-06）
 > 参照：[douyin-fallback-design.md](douyin-fallback-design.md) 的 provider 内闭环 + schema 自适应解析范式

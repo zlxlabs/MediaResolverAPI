@@ -7,18 +7,23 @@
 | 平台 | 短链解析 | 数据源 |
 |------|---------|--------|
 | 抖音 (Douyin) | ✅ | TikHub（多级端点降级） |
-| TikTok | ✅ | TikHub → Cobalt |
-| 快手 (Kuaishou) | ✅ | TikHub |
-| YouTube | ✅ | TikHub → Cobalt |
+| TikTok | ✅ | TikHub（多级端点降级）→ Cobalt |
+| 快手 (Kuaishou) | ✅ | TikHub（多级端点降级） |
+| YouTube | ✅ | TikHub（多级端点降级）→ Cobalt |
 | 小红书 (Xiaohongshu) | ✅ | TikHub（多级端点降级） |
-| Instagram | ✅ | TikHub → Cobalt |
+| Instagram | ✅ | TikHub（多级端点降级）→ Cobalt |
 | Pinterest | ✅ | Cobalt |
 
 > 含多个数据源的平台会按优先级依次尝试，前者失败自动降级到后者。
 >
-> **抖音多级端点降级**：在 TikHub 内部按 `web/fetch_one_video → web/fetch_one_video_v2 → app/v3/fetch_one_video_v3` 串行降级（覆盖同源抖动、跨源失效、版权受限）；私密/部分可见等终态立即短路；短链展开或 ID 提取失败时回退到 `hybrid/video_data` 入口。详见 [docs/douyin-fallback-design.md](docs/douyin-fallback-design.md)。
+> **多级端点降级（通用引擎）**：六大平台均在 TikHub 内部按「同一 ID 串行打多个端点、命中即停、终态短路、总预算兜底」的统一引擎做多级降级，单端点被 TikHub 下线不再等于平台解析全挂。引擎设计与各平台链配置见 [docs/generic-fallback-engine.md](docs/generic-fallback-engine.md)。
 >
-> **小红书多级端点降级**：在 TikHub 内部按 `app_v2/get_video_note_detail（仅 note_id）→ web_v3/fetch_note_detail（note_id + xsec_token）` 串行降级；`app_v2` 不依赖 token 故首选，token 缺失时跳过 `web_v3`；图文笔记/删除等终态立即短路。旧端点 `web/get_note_info_v3` 已被 TikHub 下线、Cobalt 不支持小红书，故为 TikHub 单源。详见 [docs/xiaohongshu-fallback-design.md](docs/xiaohongshu-fallback-design.md)。
+> - **抖音**：`web/fetch_one_video → web/fetch_one_video_v2 → app/v3/fetch_one_video_v3`；私密/部分可见终态短路；短链展开或 ID 提取失败回退 `hybrid/video_data`。详见 [docs/douyin-fallback-design.md](docs/douyin-fallback-design.md)。
+> - **小红书**：`app_v2/get_video_note_detail（仅 note_id）→ web_v3/fetch_note_detail（note_id + xsec_token）`；token 缺失时跳过 `web_v3`；图文/删除终态短路。TikHub 单源。详见 [docs/xiaohongshu-fallback-design.md](docs/xiaohongshu-fallback-design.md)。
+> - **快手**：`web/fetch_one_video_v2（photo_id）→ web/fetch_one_video（share_text=url）`；解析器自适应 `data.photo` 与 `data[0]` 两种 schema。原为单源单端点、无 Cobalt 兜底，是唯一真单点故障，故优先消除。
+> - **TikTok**：`app/v3/fetch_one_video → _v2 → _v3`（同 `data.aweme_detail` schema）。有 Cobalt 兜底，故链内不判终态（误判会跳过 Cobalt），链走完落 Cobalt。
+> - **Instagram**：`v2/fetch_post_info（code_or_url）→ v1/fetch_post_by_url（post_url）`；非视频/轮播不判终态（子节点可能含视频），落 Cobalt。ID 提取失败时由路由层放行原始 url 兜底。
+> - **YouTube**：`web/get_video_info（预解析直链）→ web/get_video_info_v2（streamingData 合流）`；解析器自适应两套 schema。有 Cobalt 兜底。
 
 ---
 
