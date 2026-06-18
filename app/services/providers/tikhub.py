@@ -8,7 +8,7 @@ import asyncio
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 from loguru import logger
 import httpx
 
@@ -296,210 +296,120 @@ class TikHubProvider(BaseProvider):
             )
             raise ProviderError(f"TikHub API request failed: {str(e)}")
 
-    async def _fetch_douyin(
-        self, video_id: str, original_url: str, use_hybrid: bool = False
+    # ================= 通用多级降级引擎（抖音/小红书/快手/TikTok/IG/YT 共用） =================
+    #
+    #   取 token/参数 → build_chain(按条件裁剪) ──┐
+    #                                            ▼
+    #   ┌──────────────── _run_chain（asyncio.timeout 总预算兜底）────────────────┐
+    #   │  for endpoint in chain:                                                 │
+    #   │     data = _call_endpoint(name, path, build_params(endpoint))  # 单端    │
+    #   │              · max_retries=0（重试交给链，避免超时放大 codex #3）          │
+    #   │              · 4xx 取 body 交分类器（终态信息常藏 body codex #4）          │
+    #   │     decision = classify(data)                                           │
+    #   │        terminal  → raise terminal_exc        # 立即短路                   │
+    #   │        retryable → 记录, 下一端点                                         │
+    #   │        ok        → has_playable(data)?                                   │
+    #   │                       return data            # 命中即停                   │
+    #   │                       记 parse_failed, 下一端点                          │
+    #   └────────────────────────────────────────────────────────────────────────┘
+    #   超时 → ProviderError("timed out")   全链未命中 → VideoNotFoundError
+    #
+    # 各平台只配置差异：chain（端点表）/ build_params（入参构造）/ classify（三态分类器）
+    # / has_playable（解析校验）/ terminal_exc（终态异常类）。骨架在此唯一实现（DRY）。
+
+    async def _run_chain(
+        self,
+        *,
+        chain: List[Tuple],
+        build_params: Callable[[Tuple], Dict],
+        classify: Callable[[Dict], str],
+        has_playable: Callable[[Dict], bool],
+        terminal_exc: type,
+        total_budget: float,
+        per_timeout: float,
+        target: str,
+        label: str,
     ) -> Dict:
         """
-        抖音多级端点降级链：串行尝试，命中即返回；终态立即短路；全失败抛错。
+        通用多级端点降级引擎：串行尝试 chain，命中即返回；终态立即短路；全失败抛错。
 
         Args:
-            video_id: aweme_id（hybrid 模式下可为空）
-            original_url: 原始 url/分享文本（hybrid 模式使用）
-            use_hybrid: True 则只走 hybrid 入口兜底（由路由层在 id 提取失败时触发）
-
-        Returns:
-            Dict: 命中端点的原始响应（交由 adapter 用 schema 自适应解析器解析）
+            chain: 已按条件裁剪好的端点表，元素至少为 (name, path, ...)。
+            build_params: 端点元组 → TikHub query 参数 dict（含 id/url/token 等差异）。
+            classify: 响应 → "terminal" | "retryable" | "ok" 三态分类器。
+            has_playable: 响应 → 能否解析出无水印直链（ok 后的最终校验）。
+            terminal_exc: 该平台终态异常类（须为 TerminalError 子类，立即短路）。
+            total_budget / per_timeout: 整链总预算 / 单端超时（秒）。
+            target: 日志用标识（video_id / note_id / url）。
+            label: 日志用平台名（"Douyin"/"Xiaohongshu"/...）。
 
         Raises:
-            DouyinTerminalError: 私密/部分可见等终态，立即短路
-            VideoNotFoundError: 全链失败
-            ProviderError: 总预算超时或认证失败
+            terminal_exc: 内容终态不可恢复，立即短路。
+            VideoNotFoundError: 全链未命中。
+            ProviderError: 总预算超时或认证失败。
         """
-        chain = [self.DOUYIN_HYBRID] if use_hybrid else list(self.DOUYIN_CHAIN)
         attempts: List[Dict] = []
-        target = video_id or original_url
-
         try:
-            async with asyncio.timeout(self.DOUYIN_TOTAL_BUDGET):
-                for name, path, param in chain:
+            async with asyncio.timeout(total_budget):
+                for endpoint in chain:
+                    name, path = endpoint[0], endpoint[1]
                     try:
-                        data = await self._call_douyin_endpoint(
-                            name, path, param, video_id, original_url
+                        data = await self._call_endpoint(
+                            name, path, build_params(endpoint), per_timeout
                         )
-                    except DouyinTerminalError:
-                        raise
                     except ProviderError as e:
                         attempts.append({"endpoint": name, "decision": "http_error", "error": str(e)})
-                        self.log_warning(f"Douyin endpoint {name} http error: {e}")
+                        self.log_warning(f"{label} endpoint {name} http error: {e}")
                         continue
 
-                    decision = self._classify_douyin(data)
+                    decision = classify(data)
                     if decision == "terminal":
                         self.log_info(
-                            "Douyin terminal response, short-circuit",
+                            f"{label} terminal response, short-circuit",
                             endpoint=name, target=target,
                         )
-                        raise DouyinTerminalError(
-                            f"Douyin video unavailable (private/partial): {target}"
+                        raise terminal_exc(
+                            f"{label} content unavailable (terminal): {target}"
                         )
                     if decision == "retryable":
                         attempts.append({"endpoint": name, "decision": "retryable"})
                         continue
 
                     # ok：解析校验，解析不出可播放直链也算可重试（codex #10）
-                    if self._douyin_has_playable(data):
-                        self.log_info(
-                            "Douyin endpoint hit", endpoint=name, target=target
-                        )
+                    if has_playable(data):
+                        self.log_info(f"{label} endpoint hit", endpoint=name, target=target)
                         return data
                     attempts.append({"endpoint": name, "decision": "parse_failed"})
-                    self.log_warning(f"Douyin endpoint {name} ok but no playable url")
+                    self.log_warning(f"{label} endpoint {name} ok but no playable url")
         except asyncio.TimeoutError:
             self.log_error(
-                f"Douyin chain timed out after {self.DOUYIN_TOTAL_BUDGET}s",
+                f"{label} chain timed out after {total_budget}s",
                 target=target, attempts=attempts,
             )
             raise ProviderError(
-                f"Douyin endpoint chain timed out after {self.DOUYIN_TOTAL_BUDGET}s "
+                f"{label} endpoint chain timed out after {total_budget}s "
                 f"[attempts={attempts}]"
             )
 
         raise VideoNotFoundError(
-            f"Douyin all endpoints failed for '{target}' [attempts={attempts}]"
+            f"{label} all endpoints failed for '{target}' [attempts={attempts}]"
         )
 
-    async def _call_douyin_endpoint(
-        self, name: str, path: str, param: str, video_id: str, original_url: str
+    async def _call_endpoint(
+        self, name: str, path: str, params: Dict, per_timeout: float
     ) -> Dict:
         """
-        调单个抖音端点。单端 max_retries=0（重试交给链本身，避免超时放大）。
+        调单个 TikHub 端点（合并自原 _call_douyin_endpoint / _call_xhs_endpoint，仅差
+        参数构造，已上移到各平台的 build_params 回调）。
 
-        catch httpx.HTTPStatusError 并尽量取出错误体（codex #4）：终态/受限信息常藏在
-        4xx body 的 filter_list 里，取出来交给分类器，而非吞成不透明错误。
+        单端 max_retries=0（重试交给链本身，避免 HTTPClient 默认重试把超时放大）。
+        catch httpx.HTTPStatusError 并尽量取出错误体交给分类器（codex #4）：终态/受限
+        信息常藏在 4xx body 的 filter_list 里，取出来而非吞成不透明错误。
         """
-        url = f"{self.api_base}{path}"
-        param_value = original_url if param == "url" else video_id
-        headers = {"Authorization": f"Bearer {self.api_key}"}
-        try:
-            async with HTTPClient(
-                timeout=self.DOUYIN_PER_ENDPOINT_TIMEOUT, max_retries=0
-            ) as client:
-                response = await client.get(
-                    url, params={param: param_value}, headers=headers
-                )
-                return response.json()
-        except httpx.HTTPStatusError as e:
-            resp = e.response
-            status = resp.status_code if resp is not None else None
-            if status == 401:
-                raise ProviderError("TikHub API authentication failed")
-            body = None
-            if resp is not None:
-                try:
-                    body = resp.json()
-                except Exception:
-                    body = None
-            if isinstance(body, dict):
-                return body  # 交给分类器判定 terminal/retryable
-            raise ProviderError(f"{name} HTTP {status}")
-        except ProviderError:
-            raise
-        except Exception as e:
-            raise ProviderError(f"{name} request failed: {e}")
-
-    def _douyin_has_playable(self, data: Dict) -> bool:
-        """用 DouyinService 的 schema 自适应解析器校验是否能解析出无水印直链。"""
-        info = DouyinService(self.api_key, self.api_base)._parse_response(data)
-        return bool(info and info.video_url)
-
-    async def _fetch_xiaohongshu(self, note_id: str, original_url: str) -> Dict:
-        """
-        小红书多级端点降级链：串行尝试，命中即返回；图文等终态立即短路；全失败抛错。
-
-        链序：app_v2(note_id) → web_v3(note_id + xsec_token)。
-        app_v2 不依赖 token 故首选；token 缺失时 web_v3 自动跳过。
-
-        Returns:
-            Dict: 命中端点的原始响应（交由 XiaohongshuService._parse_response 解析）
-
-        Raises:
-            XhsTerminalError: 图文笔记/删除/私密等终态，立即短路
-            VideoNotFoundError: 全链失败
-            ProviderError: 总预算超时或认证失败
-        """
-        token = self._extract_xsec_token(original_url)
-        # token 缺失时跳过需要 token 的端点（web_v3）
-        chain = [
-            (name, path, mode)
-            for name, path, mode in self.XHS_CHAIN
-            if mode != "note_id_token" or token
-        ]
-        attempts: List[Dict] = []
-
-        try:
-            async with asyncio.timeout(self.XHS_TOTAL_BUDGET):
-                for name, path, mode in chain:
-                    try:
-                        data = await self._call_xhs_endpoint(
-                            name, path, mode, note_id, token
-                        )
-                    except ProviderError as e:
-                        attempts.append({"endpoint": name, "decision": "http_error", "error": str(e)})
-                        self.log_warning(f"Xiaohongshu endpoint {name} http error: {e}")
-                        continue
-
-                    decision = self._classify_xhs(data)
-                    if decision == "terminal":
-                        self.log_info(
-                            "Xiaohongshu terminal response (image/unavailable), short-circuit",
-                            endpoint=name, note_id=note_id,
-                        )
-                        raise XhsTerminalError(
-                            f"Xiaohongshu note has no video (image/unavailable): {note_id}"
-                        )
-                    if decision == "retryable":
-                        attempts.append({"endpoint": name, "decision": "retryable"})
-                        continue
-
-                    # ok：解析校验，解析不出可播放直链也算可重试
-                    if self._xhs_has_playable(data):
-                        self.log_info(
-                            "Xiaohongshu endpoint hit", endpoint=name, note_id=note_id
-                        )
-                        return data
-                    attempts.append({"endpoint": name, "decision": "parse_failed"})
-                    self.log_warning(f"Xiaohongshu endpoint {name} ok but no playable url")
-        except asyncio.TimeoutError:
-            self.log_error(
-                f"Xiaohongshu chain timed out after {self.XHS_TOTAL_BUDGET}s",
-                note_id=note_id, attempts=attempts,
-            )
-            raise ProviderError(
-                f"Xiaohongshu endpoint chain timed out after {self.XHS_TOTAL_BUDGET}s "
-                f"[attempts={attempts}]"
-            )
-
-        raise VideoNotFoundError(
-            f"Xiaohongshu all endpoints failed for '{note_id}' [attempts={attempts}]"
-        )
-
-    async def _call_xhs_endpoint(
-        self, name: str, path: str, mode: str, note_id: str, token: Optional[str]
-    ) -> Dict:
-        """
-        调单个小红书端点。单端 max_retries=0（重试交给链本身，避免超时放大）。
-
-        catch httpx.HTTPStatusError 并尽量取出错误体交给分类器（与抖音一致）。
-        """
-        params: Dict[str, str] = {"note_id": note_id}
-        if mode == "note_id_token":
-            params["xsec_token"] = token or ""
         url = f"{self.api_base}{path}"
         headers = {"Authorization": f"Bearer {self.api_key}"}
         try:
-            async with HTTPClient(
-                timeout=self.XHS_PER_ENDPOINT_TIMEOUT, max_retries=0
-            ) as client:
+            async with HTTPClient(timeout=per_timeout, max_retries=0) as client:
                 response = await client.get(url, params=params, headers=headers)
                 return response.json()
         except httpx.HTTPStatusError as e:
@@ -520,6 +430,75 @@ class TikHubProvider(BaseProvider):
             raise
         except Exception as e:
             raise ProviderError(f"{name} request failed: {e}")
+
+    async def _fetch_douyin(
+        self, video_id: str, original_url: str, use_hybrid: bool = False
+    ) -> Dict:
+        """
+        抖音多级降级（薄封装，骨架见 _run_chain）。
+
+        链：web v1 → web v2(同源备份) → app v3-v3(跨源, 解版权 reason=8)。
+        use_hybrid=True 时只走 hybrid 入口兜底（吃原始 url，由路由层在 id 提取失败时触发）。
+        抖音为 tikhub 单源平台，允许终态短路（DouyinTerminalError）。
+        """
+        chain = [self.DOUYIN_HYBRID] if use_hybrid else list(self.DOUYIN_CHAIN)
+
+        def build_params(endpoint: Tuple) -> Dict:
+            _name, _path, param = endpoint
+            # hybrid 端点入参为 url，其余端点为 aweme_id
+            return {param: original_url if param == "url" else video_id}
+
+        return await self._run_chain(
+            chain=chain,
+            build_params=build_params,
+            classify=self._classify_douyin,
+            has_playable=self._douyin_has_playable,
+            terminal_exc=DouyinTerminalError,
+            total_budget=self.DOUYIN_TOTAL_BUDGET,
+            per_timeout=self.DOUYIN_PER_ENDPOINT_TIMEOUT,
+            target=video_id or original_url,
+            label="Douyin",
+        )
+
+    def _douyin_has_playable(self, data: Dict) -> bool:
+        """用 DouyinService 的 schema 自适应解析器校验是否能解析出无水印直链。"""
+        info = DouyinService(self.api_key, self.api_base)._parse_response(data)
+        return bool(info and info.video_url)
+
+    async def _fetch_xiaohongshu(self, note_id: str, original_url: str) -> Dict:
+        """
+        小红书多级降级（薄封装，骨架见 _run_chain）。
+
+        链：app_v2(note_id, 不依赖 token, 首选) → web_v3(note_id + xsec_token)。
+        token 缺失时 web_v3 端点在链构造阶段被裁剪掉。
+        小红书为 tikhub 单源平台，允许终态短路（XhsTerminalError，图文/删除/私密）。
+        """
+        token = self._extract_xsec_token(original_url)
+        # token 缺失时跳过需要 token 的端点（web_v3）
+        chain = [
+            (name, path, mode)
+            for name, path, mode in self.XHS_CHAIN
+            if mode != "note_id_token" or token
+        ]
+
+        def build_params(endpoint: Tuple) -> Dict:
+            _name, _path, mode = endpoint
+            params: Dict[str, str] = {"note_id": note_id}
+            if mode == "note_id_token":
+                params["xsec_token"] = token or ""
+            return params
+
+        return await self._run_chain(
+            chain=chain,
+            build_params=build_params,
+            classify=self._classify_xhs,
+            has_playable=self._xhs_has_playable,
+            terminal_exc=XhsTerminalError,
+            total_budget=self.XHS_TOTAL_BUDGET,
+            per_timeout=self.XHS_PER_ENDPOINT_TIMEOUT,
+            target=note_id,
+            label="Xiaohongshu",
+        )
 
     def _xhs_has_playable(self, data: Dict) -> bool:
         """用 XiaohongshuService 的 schema 自适应解析器校验是否能解析出无水印直链。"""
