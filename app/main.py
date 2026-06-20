@@ -73,7 +73,9 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    # 本服务用 X-API-Key 头鉴权，不依赖 cookie/HTTP Basic，无需带凭据。
+    # 置 False 可让 allow_origins=["*"] 等通配符按规范正常生效（带凭据时会被弃用）。
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
