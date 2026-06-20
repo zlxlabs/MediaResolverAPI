@@ -14,6 +14,7 @@
 - Dockerfile 增加 `HEALTHCHECK` 健康探针与非 root 运行用户（uid 10001）。
 
 ### Changed
+- CORS `allow_credentials` 改为 `False`，修正与 `allow_origins=["*"]` 的无效组合；README 新增「跨域访问（CORS）」接入说明。
 - Dockerfile 依赖改为从 `pyproject.toml` 安装（单一来源），移除与 pyproject 重复的内联依赖列表。
 - `.env.example` 补齐缺失配置项：`TIKHUB_RATE_LIMIT`、`TIKTOK_FALLBACK_REGIONS`、`PROVIDER_PRIORITY_*`（8 平台）；`COBALT_API_BASE` 默认值与代码对齐（留空即禁用）。
 

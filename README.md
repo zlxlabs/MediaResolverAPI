@@ -71,6 +71,33 @@ X-API-Key: your-api-key
 
 ---
 
+### 跨域访问（CORS）
+
+服务已开启 CORS，**允许任意来源的浏览器跨域调用**：
+
+- `Access-Control-Allow-Origin: *`（不限来源）
+- 允许全部方法（`GET/POST/PUT/PATCH/DELETE/OPTIONS` 等）与全部请求头，含 `X-API-Key`
+- **不带凭据模式**（`Allow-Credentials: false`）：鉴权请把 API Key 放在 `X-API-Key` 请求头，**不要**依赖 cookie / HTTP Basic 等浏览器凭据——跨域携带凭据不被支持
+
+因此前端（含跨域单页应用）可直接 `fetch`/`axios` 调用，无需代理。示例：
+
+```javascript
+// 浏览器中从任意域名跨域调用
+const resp = await fetch("https://your-server:8000/api/resolve", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "X-API-Key": "your-api-key",
+  },
+  // 注意：不要设置 credentials: "include"，本服务为不带凭据模式
+  body: JSON.stringify({ url: "https://v.douyin.com/xxxxx/" }),
+});
+```
+
+> 服务端调用（Python `requests`、Node 后端、cURL 等）不经过浏览器 CORS，不受上述限制。
+
+---
+
 ### POST /api/resolve
 
 解析社交媒体视频 URL，返回无水印直链和视频元数据。
