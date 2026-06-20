@@ -13,6 +13,7 @@
 | 小红书 (Xiaohongshu) | ✅ | TikHub（多级端点降级） |
 | Instagram | ✅ | TikHub（多级端点降级）→ Cobalt |
 | Pinterest | ✅ | Cobalt |
+| Facebook | ✅ | Cobalt |
 
 > 含多个数据源的平台会按优先级依次尝试，前者失败自动降级到后者。
 >
@@ -131,7 +132,7 @@ curl -X POST http://localhost:8000/api/resolve \
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `success` | bool | 是否解析成功 |
-| `data.platform` | string | 平台标识：`douyin` `tiktok` `kuaishou` `youtube` `xiaohongshu` `instagram` `pinterest` |
+| `data.platform` | string | 平台标识：`douyin` `tiktok` `kuaishou` `youtube` `xiaohongshu` `instagram` `pinterest` `facebook` |
 | `data.video_id` | string | 平台视频 ID |
 | `data.title` | string | 视频标题 |
 | `data.description` | string | 视频描述原文 |
@@ -193,6 +194,7 @@ curl http://localhost:8000/api/platforms \
 {
   "platforms": {
     "pinterest": ["cobalt"],
+    "facebook": ["cobalt"],
     "tiktok": ["tikhub", "cobalt"],
     "instagram": ["tikhub", "cobalt"],
     "xiaohongshu": ["tikhub"],
@@ -213,6 +215,28 @@ curl http://localhost:8000/api/platforms \
 curl http://localhost:8000/health
 # {"status": "ok"}
 ```
+
+---
+
+## 运维仪表盘 API
+
+服务内置一组运维统计接口，前缀 `/api/dashboard`，**全部需要 `X-API-Key` 认证**。同时在 `/dashboard/` 提供一个基于这些接口的静态 Web 仪表盘页面。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/dashboard/stats/overview?period=7d` | 用量总览：请求数、成功/失败、缓存命中率、平均耗时、平台/数据源分布、按日计数。`period` 取值 `24h` `7d`（默认）`30d` |
+| GET | `/api/dashboard/stats/recent?limit=20` | 最近的解析请求列表。`limit` 范围 1–100，默认 20 |
+| GET | `/api/dashboard/stats/provider-health` | 各数据源健康度：调用数、成功率、平均耗时、状态（`healthy`/`degraded`/`down`/`unknown`） |
+| GET | `/api/dashboard/cache/stats` | 缓存统计：已缓存总数、过期数、平台分布 |
+| POST | `/api/dashboard/cache/clear-expired` | 清理已过期的缓存条目 |
+| DELETE | `/api/dashboard/cache/{platform}/{video_id}` | 删除指定缓存条目 |
+
+```bash
+curl "http://localhost:8000/api/dashboard/stats/overview?period=24h" \
+  -H "X-API-Key: your-api-key"
+```
+
+> Web 仪表盘地址：`http://localhost:8000/dashboard/`（默认每 30s 前端轮询刷新）。
 
 ---
 
