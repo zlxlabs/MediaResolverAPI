@@ -17,8 +17,12 @@ from loguru import logger
 from .core.config import settings
 from .core.database import init_db, SessionLocal
 from .core.logging import setup_logging
+from .observability import init_observability
 from .api.resolve import router as resolve_router
 from .api.dashboard import router as dashboard_router
+
+# Initialize observability (GlitchTip/Sentry) as early as possible. Fail-open.
+init_observability()
 
 
 def _cleanup_expired_data():
