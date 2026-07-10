@@ -1,0 +1,21 @@
+# Reusable organization gate. Keep this caller intentionally small: policy lives in zlxlabs/gate.
+name: CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  gate:
+    uses: zlxlabs/gate/.github/workflows/gate.yml@main
+    with:
+      tier: internal
+      runner: self
+      has_ui: false
+      design_doc: ""
+    secrets:
+      FEISHU_CI_WEBHOOK: ${{ secrets.FEISHU_CI_WEBHOOK }}

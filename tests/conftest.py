@@ -35,6 +35,15 @@ def setup_db():
     Base.metadata.drop_all(bind=_engine)
 
 
+@pytest.fixture(autouse=True)
+def test_tikhub_api_key():
+    """Keep mocked provider-chain tests independent of local credentials."""
+    original_key = settings.TIKHUB_API_KEY
+    settings.TIKHUB_API_KEY = "test-tikhub-api-key"
+    yield
+    settings.TIKHUB_API_KEY = original_key
+
+
 @pytest.fixture()
 def db(setup_db):
     """Provide a test database session."""
