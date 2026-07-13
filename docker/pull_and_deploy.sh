@@ -7,6 +7,10 @@ IMAGE_NAME="media-resolver-api"
 SERVICE_NAME="media-resolver"
 ACR_IMAGE="${ACR_REGISTRY}/${ACR_NAMESPACE}/${IMAGE_NAME}"
 : "${RELEASE_TAG:?RELEASE_TAG is required}"
+if ! [[ "${RELEASE_TAG}" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "[ERROR] RELEASE_TAG must be a full Git SHA" >&2
+  exit 1
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.deploy.yml"
