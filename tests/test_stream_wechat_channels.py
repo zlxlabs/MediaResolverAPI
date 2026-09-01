@@ -1,0 +1,434 @@
+"""WeChat Channels streaming decrypt endpoint — all network stubbed.
+
+Range × decrypt boundary (7), resume (2), retry cap, client disconnect,
+concurrency 429, memory bound, auth, TikHub 5xx JSON.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+
+import httpx
+import pytest
+from fastapi.testclient import TestClient
+from httpx import ASGITransport
+from loguru import logger as loguru_logger
+
+import app.api.stream as stream_mod
+from app.core.config import settings
+from app.core.database import get_db
+from app.main import app
+from app.services.providers.base import ProviderError
+from app.services.wechat_channels_crypto import KEYSTREAM_SIZE, xor_chunk
+
+OBJECT_ID = "14998022876670594427"
+FILE_SIZE = 600_000
+KEY_A = 55516695
+KEY_B = 12345678
+PLAIN = bytes.fromhex("000000206674797069736f6d") + bytes(
+    (i * 31 + 7) & 0xFF for i in range(FILE_SIZE - 12)
+)
+AUTH = {"X-API-Key": "test-key-123"}
+
+
+def _cipher(key) -> bytes:
+    return xor_chunk(PLAIN, key, 0)
+
+
+def _slice_plain(range_header: str | None) -> bytes:
+    start, end, _ = stream_mod.parse_byte_range(range_header, FILE_SIZE)
+    return PLAIN[start : end + 1]
+
+
+class FakeCdn:
+    def __init__(
+        self,
+        payload: bytes,
+        *,
+        status_code: int,
+        disconnect_after: int | None = None,
+        hold: asyncio.Event | None = None,
+    ) -> None:
+        self.payload = payload
+        self.status_code = status_code
+        self.disconnect_after = disconnect_after
+        self.hold = hold
+        self.aclose_called = False
+        self.aclose_count = 0
+
+    async def aiter_bytes(self, chunk_size: int = 65536):
+        if self.hold is not None:
+            await self.hold.wait()
+        sent = 0
+        data = self.payload
+        limit = self.disconnect_after
+        while sent < len(data):
+            if limit is not None and sent >= limit:
+                raise httpx.ReadError("injected upstream disconnect")
+            n = min(chunk_size, len(data) - sent)
+            if limit is not None:
+                n = min(n, limit - sent)
+                if n <= 0:
+                    raise httpx.ReadError("injected upstream disconnect")
+            yield data[sent : sent + n]
+            sent += n
+            if limit is not None and sent >= limit:
+                raise httpx.ReadError("injected upstream disconnect")
+
+    async def aclose(self) -> None:
+        self.aclose_called = True
+        self.aclose_count += 1
+
+
+@pytest.fixture(autouse=True)
+def _stream_harness(monkeypatch):
+    original_key = settings.API_KEY
+    original_chunk = settings.STREAM_CHUNK_SIZE
+    original_retries = settings.STREAM_RESUME_MAX_RETRIES
+    original_conc = settings.MAX_CONCURRENT_STREAMS
+    settings.API_KEY = "test-key-123"
+    settings.STREAM_CHUNK_SIZE = 65536
+    settings.STREAM_RESUME_MAX_RETRIES = 3
+    settings.MAX_CONCURRENT_STREAMS = 4
+    stream_mod.stream_limiter.reset()
+
+    opens: list[dict] = []
+    media_calls: list[str] = []
+    keys = [KEY_A, KEY_B]
+    disconnect_abs: list[int | None] = []
+    hold_event: dict[str, asyncio.Event | None] = {"e": None}
+
+    async def fake_fetch(object_id: str) -> dict:
+        media_calls.append(object_id)
+        idx = len(media_calls) - 1
+        key = keys[idx] if idx < len(keys) else keys[-1]
+        return {
+            "full_url": f"https://cdn.test/v{len(media_calls)}",
+            "decode_key": key,
+            "file_size": FILE_SIZE,
+        }
+
+    async def fake_open(url: str, range_header: str | None) -> FakeCdn:
+        nth = int(url.rsplit("v", 1)[-1])
+        key = keys[nth - 1] if nth - 1 < len(keys) else keys[-1]
+        cipher = _cipher(key)
+        if range_header:
+            start, end, _ = stream_mod.parse_byte_range(range_header, FILE_SIZE)
+            status = 206
+        else:
+            start, end = 0, FILE_SIZE - 1
+            status = 200
+        payload = cipher[start : end + 1]
+        abs_cut = disconnect_abs[len(opens)] if len(opens) < len(disconnect_abs) else None
+        rel = None if abs_cut is None else max(abs_cut - start, 0)
+        cdn = FakeCdn(
+            payload,
+            status_code=status,
+            disconnect_after=rel,
+            hold=hold_event["e"],
+        )
+        opens.append({"url": url, "range": range_header, "stream": cdn, "start": start})
+        return cdn
+
+    monkeypatch.setattr(stream_mod, "_fetch_media", fake_fetch)
+    monkeypatch.setattr(stream_mod, "open_cdn_stream", fake_open)
+    harness = {
+        "opens": opens,
+        "media_calls": media_calls,
+        "disconnect_abs": disconnect_abs,
+        "hold_event": hold_event,
+        "keys": keys,
+    }
+    yield harness
+    settings.API_KEY = original_key
+    settings.STREAM_CHUNK_SIZE = original_chunk
+    settings.STREAM_RESUME_MAX_RETRIES = original_retries
+    settings.MAX_CONCURRENT_STREAMS = original_conc
+    stream_mod.stream_limiter.reset()
+
+
+@pytest.fixture()
+def client(db):
+    def _override_get_db():
+        yield db
+
+    app.dependency_overrides[get_db] = _override_get_db
+    with TestClient(app, raise_server_exceptions=False) as c:
+        yield c
+    app.dependency_overrides.clear()
+
+
+def _get(client: TestClient, range_header: str | None = None, object_id: str = OBJECT_ID):
+    headers = dict(AUTH)
+    if range_header is not None:
+        headers["Range"] = range_header
+    return client.get(f"/api/stream/wechat_channels/{object_id}", headers=headers)
+
+
+RANGE_CASES = [
+    ("no_range", None),
+    ("bytes_0_open", "bytes=0-"),
+    ("bytes_encrypted_exact", "bytes=0-131071"),
+    ("bytes_cross_boundary", "bytes=0-131072"),
+    ("bytes_straddle", "bytes=131071-131073"),
+    ("bytes_plain_from_boundary", "bytes=131072-"),
+    ("bytes_plain_window", "bytes=200000-300000"),
+]
+
+
+@pytest.mark.parametrize("name,range_header", RANGE_CASES, ids=[c[0] for c in RANGE_CASES])
+def test_range_matches_full_download_slice(client, name, range_header):
+    expected = _slice_plain(range_header)
+    resp = _get(client, range_header)
+    assert resp.status_code in (200, 206)
+    assert resp.headers["content-type"].startswith("video/mp4")
+    assert resp.content == expected
+    if range_header is None:
+        assert resp.content[4:8] == b"ftyp"
+        assert resp.status_code == 200
+
+
+def test_missing_api_key_401(client):
+    resp = client.get(f"/api/stream/wechat_channels/{OBJECT_ID}")
+    assert resp.status_code == 401
+    assert "application/json" in resp.headers.get("content-type", "")
+
+
+def test_wrong_api_key_401(client):
+    resp = client.get(
+        f"/api/stream/wechat_channels/{OBJECT_ID}",
+        headers={"X-API-Key": "wrong-key"},
+    )
+    assert resp.status_code == 401
+    assert "application/json" in resp.headers.get("content-type", "")
+
+
+def test_tikhub_failure_returns_5xx_json(client, monkeypatch):
+    async def boom(object_id: str):
+        raise ProviderError("tikhub down")
+
+    monkeypatch.setattr(stream_mod, "_fetch_media", boom)
+    resp = _get(client)
+    assert resp.status_code == 502
+    body = resp.json()
+    assert "detail" in body
+    assert resp.headers["content-type"].startswith("application/json")
+
+
+@pytest.mark.parametrize("cut", [50_000, 500_000])
+def test_resume_matches_oneshot_and_range_starts_at_forwarded(client, _stream_harness, cut):
+    _stream_harness["disconnect_abs"].append(cut)
+    _stream_harness["disconnect_abs"].append(None)
+    resp = _get(client)
+    assert resp.status_code == 200
+    assert resp.content == PLAIN
+    assert len(_stream_harness["opens"]) == 2
+    assert len(_stream_harness["media_calls"]) == 2
+    second = _stream_harness["opens"][1]["range"]
+    assert second is not None
+    assert second.startswith("bytes=")
+    start_s = second.removeprefix("bytes=").split("-", 1)[0]
+    assert int(start_s) == cut
+
+
+def test_resume_retry_cap_stops_exactly_at_limit(client, _stream_harness):
+    settings.STREAM_RESUME_MAX_RETRIES = 3
+    _stream_harness["disconnect_abs"].clear()
+    for i in range(8):
+        _stream_harness["disconnect_abs"].append(i + 1)
+
+    errors: list[str] = []
+    hid = loguru_logger.add(lambda m: errors.append(str(m)), level="ERROR")
+    try:
+        resp = _get(client)
+    finally:
+        loguru_logger.remove(hid)
+
+    assert resp.content != PLAIN
+    resume_opens = len(_stream_harness["opens"]) - 1
+    assert resume_opens == settings.STREAM_RESUME_MAX_RETRIES
+    assert any("resume exhausted" in msg for msg in errors)
+
+
+@pytest.mark.asyncio
+async def test_client_disconnect_acloses_upstream(_stream_harness):
+    media = {
+        "full_url": "https://cdn.test/v1",
+        "decode_key": KEY_A,
+        "file_size": FILE_SIZE,
+    }
+    cdn = FakeCdn(_cipher(KEY_A), status_code=200)
+    agen = stream_mod._iter_decrypted(
+        object_id=OBJECT_ID,
+        first_media=media,
+        first_stream=cdn,
+        start=0,
+        end=FILE_SIZE - 1,
+        file_size=FILE_SIZE,
+    )
+    first = await agen.__anext__()
+    assert len(first) > 0
+    await agen.aclose()
+    assert cdn.aclose_called is True
+    assert cdn.aclose_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_concurrency_limit_429_and_release(db, _stream_harness):
+    settings.MAX_CONCURRENT_STREAMS = 2
+    stream_mod.stream_limiter.reset()
+    gate = asyncio.Event()
+    _stream_harness["hold_event"]["e"] = gate
+
+    def _override_get_db():
+        yield db
+
+    app.dependency_overrides[get_db] = _override_get_db
+    transport = ASGITransport(app=app)
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+
+            async def _download():
+                return await ac.get(
+                    f"/api/stream/wechat_channels/{OBJECT_ID}", headers=AUTH
+                )
+
+            t1 = asyncio.create_task(_download())
+            t2 = asyncio.create_task(_download())
+            for _ in range(50):
+                if stream_mod.stream_limiter.active >= 2:
+                    break
+                await asyncio.sleep(0.01)
+            assert stream_mod.stream_limiter.active == 2
+            overflow = await ac.get(
+                f"/api/stream/wechat_channels/{OBJECT_ID}", headers=AUTH
+            )
+            assert overflow.status_code == 429
+            assert overflow.headers["content-type"].startswith("application/json")
+            gate.set()
+            r1, r2 = await asyncio.gather(t1, t2)
+            assert r1.status_code == 200
+            assert r2.status_code == 200
+            assert r1.content == PLAIN
+            assert r2.content == PLAIN
+            after = await ac.get(
+                f"/api/stream/wechat_channels/{OBJECT_ID}", headers=AUTH
+            )
+            assert after.status_code == 200
+            assert after.content == PLAIN
+    finally:
+        gate.set()
+        app.dependency_overrides.clear()
+        stream_mod.stream_limiter.reset()
+
+
+def test_memory_constant_no_full_body_read(client, monkeypatch, _stream_harness):
+    src = Path(stream_mod.__file__).read_text(encoding="utf-8")
+    assert "aread(" not in src
+    assert ".content" not in src
+    assert "readall" not in src
+    assert "aiter_bytes" in src
+
+    settings.STREAM_CHUNK_SIZE = 1024
+    seen: list[int] = []
+    real_xor = stream_mod.xor_chunk
+
+    def tracking_xor(chunk, decode_key, absolute_offset):
+        seen.append(len(chunk))
+        return real_xor(chunk, decode_key, absolute_offset)
+
+    monkeypatch.setattr(stream_mod, "xor_chunk", tracking_xor)
+    resp = _get(client)
+    assert resp.status_code == 200
+    assert resp.content == PLAIN
+    assert seen
+    assert max(seen) <= settings.STREAM_CHUNK_SIZE
+    assert max(seen) < FILE_SIZE
+    assert sum(seen) == FILE_SIZE
+
+
+def test_each_request_fetches_media_fresh(client, _stream_harness):
+    _get(client)
+    _get(client)
+    assert _stream_harness["media_calls"] == [OBJECT_ID, OBJECT_ID]
+    assert len(_stream_harness["opens"]) == 2
+    assert _stream_harness["opens"][0]["url"] != _stream_harness["opens"][1]["url"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_wechat_channels_media_reads_fixture_and_is_uncached(monkeypatch):
+    import json
+    from app.services.providers.tikhub import TikHubProvider
+
+    payload = json.loads(
+        (Path(__file__).parent / "fixtures" / "wechat_channels" / "detail.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    calls: list[str] = []
+
+    async def fake_chain(self, video_id, original_url):
+        calls.append(video_id)
+        return payload
+
+    monkeypatch.setattr(TikHubProvider, "_fetch_wechat_channels", fake_chain)
+    provider = TikHubProvider()
+    a = await provider.fetch_wechat_channels_media(OBJECT_ID)
+    b = await provider.fetch_wechat_channels_media(OBJECT_ID)
+    assert calls == [OBJECT_ID, OBJECT_ID]
+    assert a["full_url"] == "REDACTED"
+    assert a["decode_key"] == "REDACTED"
+    assert a["file_size"] == 2450521066
+    assert a == b
+
+
+@pytest.mark.asyncio
+async def test_fetch_wechat_channels_media_retries_retryable_then_hits(monkeypatch):
+    import json
+    from app.services.providers.tikhub import TikHubProvider
+    from app.services.providers.base import VideoNotFoundError
+
+    payload = json.loads(
+        (Path(__file__).parent / "fixtures" / "wechat_channels" / "detail.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    n = {"i": 0}
+
+    async def flaky(self, video_id, original_url):
+        n["i"] += 1
+        if n["i"] < 3:
+            raise VideoNotFoundError("retryable envelope")
+        return payload
+
+    async def no_sleep(_delay):
+        return None
+
+    monkeypatch.setattr(TikHubProvider, "_fetch_wechat_channels", flaky)
+    monkeypatch.setattr("app.services.providers.tikhub.asyncio.sleep", no_sleep)
+    out = await TikHubProvider().fetch_wechat_channels_media(OBJECT_ID)
+    assert n["i"] == 3
+    assert out["file_size"] == 2450521066
+
+
+@pytest.mark.asyncio
+async def test_fetch_wechat_channels_media_retry_exhausted_raises(monkeypatch):
+    from app.services.providers.tikhub import TikHubProvider
+    from app.services.providers.base import VideoNotFoundError
+
+    n = {"i": 0}
+
+    async def always_miss(self, video_id, original_url):
+        n["i"] += 1
+        raise VideoNotFoundError("still missing")
+
+    async def no_sleep(_delay):
+        return None
+
+    monkeypatch.setattr(TikHubProvider, "_fetch_wechat_channels", always_miss)
+    monkeypatch.setattr("app.services.providers.tikhub.asyncio.sleep", no_sleep)
+    with pytest.raises(VideoNotFoundError):
+        await TikHubProvider().fetch_wechat_channels_media(OBJECT_ID)
+    assert n["i"] == 3
+

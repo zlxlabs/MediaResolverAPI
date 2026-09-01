@@ -20,6 +20,7 @@ from .core.logging import setup_logging
 from .observability import init_observability
 from .api.resolve import router as resolve_router
 from .api.dashboard import router as dashboard_router
+from .api.stream import router as stream_router
 
 # Initialize observability (GlitchTip/Sentry) as early as possible. Fail-open.
 init_observability()
@@ -87,6 +88,7 @@ app.add_middleware(
 # Routes
 app.include_router(resolve_router, prefix="/api", tags=["resolve"])
 app.include_router(dashboard_router, prefix="/api", tags=["dashboard"])
+app.include_router(stream_router, prefix="/api", tags=["stream"])
 
 # Static files for dashboard
 _static_dir = Path(__file__).parent / "static"
