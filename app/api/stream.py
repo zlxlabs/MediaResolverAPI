@@ -223,7 +223,6 @@ def _reconcile_cdn_offset(
     *,
     expected_offset: int,
     expected_end: int,
-    file_size: int,
 ) -> None:
     """Require CDN 206 metadata to match the locally requested byte range."""
     if stream.status_code != 206:
@@ -249,12 +248,8 @@ def _reconcile_cdn_offset(
             f"{declared_end}, expected {expected_end}"
         )
 
-    complete_length = match.group("complete_length")
-    if complete_length != "*" and int(complete_length) != file_size:
-        raise UpstreamDisconnected(
-            "CDN 206 response has complete length "
-            f"{complete_length}, expected {file_size}"
-        )
+    # Keep complete-length syntax validation, but do not compare it with TikHub
+    # file_size: measurements show they can differ several-fold; CDN is authoritative.
 
     content_length = stream.content_length
     if content_length is not None:
@@ -380,7 +375,6 @@ async def stream_wechat_channels(sph_code: str, request: Request):
                 first_stream,
                 expected_offset=start,
                 expected_end=end,
-                file_size=file_size,
             )
         except UpstreamDisconnected as exc:
             raise _json_http_error(502, str(exc)) from exc

@@ -388,7 +388,7 @@ def test_initial_range_end_mismatch_fails_before_streaming(
     assert _stream_harness["opens"][0]["stream"].aiter_calls == 0
 
 
-def test_initial_range_complete_length_mismatch_fails_before_streaming(
+def test_initial_range_complete_length_mismatch_is_allowed(
     client, _stream_harness, monkeypatch
 ):
     real_open = stream_mod.open_cdn_stream
@@ -401,10 +401,8 @@ def test_initial_range_complete_length_mismatch_fails_before_streaming(
     monkeypatch.setattr(stream_mod, "open_cdn_stream", return_wrong_total)
     response = _get(client, "bytes=100-200")
 
-    assert response.status_code == 502
-    assert response.headers["content-type"].startswith("application/json")
-    assert isinstance(response.json(), dict)
-    assert _stream_harness["opens"][0]["stream"].aiter_calls == 0
+    assert response.status_code == 206
+    assert response.content == _slice_plain("bytes=100-200")
 
 
 def test_initial_range_content_length_mismatch_fails_before_streaming(
