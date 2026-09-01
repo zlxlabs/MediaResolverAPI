@@ -182,15 +182,21 @@ def generate_keystream(decode_key: int | str) -> bytes:
     return bytes(out)
 
 
-def decrypt_head(encrypted_head: bytes, decode_key: str | int) -> bytes:
-    """对文件开头部分做 XOR 还原；只处理前 KEYSTREAM_SIZE 字节，超出部分原样返回。
-    入参允许短于 KEYSTREAM_SIZE（流式场景会分块喂进来）。"""
-    data = bytes(encrypted_head)
-    n = min(len(data), KEYSTREAM_SIZE)
-    if n == 0:
+def xor_chunk(chunk: bytes, decode_key: str | int, absolute_offset: int = 0) -> bytes:
+    """按本块在整个文件中的绝对偏移做 XOR。
+
+    ``absolute_offset`` 是 ``chunk[0]`` 的文件偏移，不是块序号。
+    文件偏移 ``>= KEYSTREAM_SIZE`` 的字节原样返回；整块都落在该区间时不生成密钥流、
+    不做异或。入参可短于或长于 ``KEYSTREAM_SIZE``（流式分块会跨过 128KB 边界）。
+    """
+    if absolute_offset < 0:
+        raise ValueError(f"absolute_offset must be >= 0, got {absolute_offset}")
+    data = bytes(chunk)
+    if not data or absolute_offset >= KEYSTREAM_SIZE:
         return data
     ks = generate_keystream(decode_key)
-    head = bytes(data[i] ^ ks[i] for i in range(n))
-    if len(data) <= KEYSTREAM_SIZE:
-        return head
-    return head + data[KEYSTREAM_SIZE:]
+    n_xor = min(len(data), KEYSTREAM_SIZE - absolute_offset)
+    out = bytearray(data)
+    for i in range(n_xor):
+        out[i] ^= ks[absolute_offset + i]
+    return bytes(out)

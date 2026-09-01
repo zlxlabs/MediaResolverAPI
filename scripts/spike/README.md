@@ -15,14 +15,17 @@
 
 - 约束 A：两把 key 的密钥流 XOR == 两段密文 XOR，全量 131072 字节。
 - 约束 B：解密后偏移 4 为 `ftyp`（本样本 box size 为 `0x20`，major brand `isom`）。
+- 约束 C：按 7000 字节分块（不整除 131072 也不整除 8）调用 `xor_chunk(..., absolute_offset=块首文件偏移)`，拼接结果与一次性整块解密逐字节相同。
 
 ## API
 
 ```python
-from wechat_keystream import KEYSTREAM_SIZE, generate_keystream, decrypt_head
+from wechat_keystream import KEYSTREAM_SIZE, generate_keystream, xor_chunk
+
+plain = xor_chunk(chunk, decode_key, absolute_offset=file_pos)
 ```
 
-不接线到 `app/`。XOR 只覆盖文件前 128KB，其余明文原样返回。
+不接线到 `app/`。XOR 只覆盖文件前 128KB：`absolute_offset` 是本块首字节的文件偏移；完全落在 `>= KEYSTREAM_SIZE` 的块原样返回。旧名 `decrypt_head` 已删除（它没有偏移参数，分块时会静默解错）。
 
 ## 来源
 
