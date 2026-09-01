@@ -36,11 +36,11 @@ risk-tier: internal
 
 其他平台的 `video_url` 是第三方 CDN 直链，客户端自己去拉。视频号不是这样。
 
-1. **源站 mp4 是加密的。** `POST /api/resolve` 返回的 `video_url` 指向**本服务**的流式端点 `/api/stream/wechat_channels/{object_id}`，而不是第三方 CDN。服务端边下边解密再转发，客户端拿到的是可直接播放的标准 mp4，**不需要客户端做任何解密**。
+1. **源站 mp4 是加密的。** `POST /api/resolve` 返回的 `video_url` 指向**本服务**的流式端点 `/api/stream/wechat_channels/{sph_code}`，而不是第三方 CDN。服务端边下边解密再转发，客户端拿到的是可直接播放的标准 mp4，**不需要客户端做任何解密**。
 2. **下载流量经过本服务。** 并发下载数受环境变量 `MAX_CONCURRENT_STREAMS` 限制（默认 4），超限返回 `429 Too many concurrent streams`。部署在反向代理后面时，需要确认代理对长连接、大响应体的超时与缓冲设置（流式转发，响应体可达完整视频大小）。
 3. **播放量拿不到。** `view_count` 恒为 `null`（TikHub 的 `read_count` 恒为 0，不是真实播放量），不要把它理解成「偶尔缺失」。其余统计数据（点赞 / 收藏 / 转发 / 评论）齐全。
 
-流式端点的路径、鉴权、Range 与状态码见下文 [GET /api/stream/wechat_channels/{object_id}](#get-apistreamwechat_channelsobject_id)。
+流式端点的路径、鉴权、Range 与状态码见下文 [GET /api/stream/wechat_channels/{sph_code}](#get-apistreamwechat_channelssph_code)。
 
 ---
 
@@ -251,14 +251,14 @@ curl http://localhost:8000/api/platforms \
 
 ---
 
-### GET /api/stream/wechat_channels/{object_id}
+### GET /api/stream/wechat_channels/{sph_code}
 
-拉取视频号的解密后 mp4。`object_id` 来自 `POST /api/resolve` 返回的 `data.video_id`（也已编码在 `data.video_url` 里）。源站文件加密，本服务边下边解密再转发；客户端按普通 mp4 处理即可。
+拉取视频号的解密后 mp4。`sph_code` 是视频号分享链接 `https://weixin.qq.com/sph/<sph_code>` 中的短码，由 `POST /api/resolve` 返回的 `data.video_url` 编码携带；`data.video_id` 仍是视频号对象 ID。源站文件加密，本服务边下边解密再转发；客户端按普通 mp4 处理即可。
 
 #### 请求
 
 ```bash
-curl http://localhost:8000/api/stream/wechat_channels/{object_id} \
+curl http://localhost:8000/api/stream/wechat_channels/AOzokRxWHz \
   -H "X-API-Key: your-api-key" \
   -H "Range: bytes=0-131071" \
   -o video-partial.mp4
@@ -270,7 +270,7 @@ curl http://localhost:8000/api/stream/wechat_channels/{object_id} \
 
 | 字段 | 位置 | 必填 | 说明 |
 |------|------|------|------|
-| `object_id` | 路径 | ✅ | 视频号对象 ID（即 `data.video_id`） |
+| `sph_code` | 路径 | ✅ | 视频号分享链接 `https://weixin.qq.com/sph/<sph_code>` 中的字母数字短码 |
 | `Range` | Header | - | 标准字节范围，如 `bytes=0-131071` 或 `bytes=0-`。省略则返回完整文件 |
 
 支持 `Range` 请求，可用于断点续传和播放器拖拽进度。响应带 `Accept-Ranges: bytes`。带 `Range` 时即使覆盖了整个文件也返回 206。

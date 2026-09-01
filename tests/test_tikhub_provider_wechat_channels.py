@@ -333,7 +333,7 @@ async def test_resolve_fallback_without_video_id(authed_client, monkeypatch):
         info = VideoInfo(
             video_id=OBJECT_ID, platform="wechat_channels", title="t",
             description="中文描述", author_name="a", author_id="a",
-            video_url=f"http://localhost:8000/api/stream/wechat_channels/{OBJECT_ID}",
+            video_url=f"http://localhost:8000/api/stream/wechat_channels/{SPH_CODE}",
             width=912, height=1920, provider="tikhub", view_count=None,
         )
         return info, "tikhub"
