@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import AsyncIterator, Optional, Protocol
 
 import httpx
@@ -34,6 +35,7 @@ _UPSTREAM_FAIL = (
 
 class CdnResponse(Protocol):
     status_code: int
+    content_range: Optional[str]
 
     def aiter_bytes(self, chunk_size: int = 65536) -> AsyncIterator[bytes]:
         ...
@@ -47,6 +49,7 @@ class _HttpxCdnStream:
         self._client = client
         self._response = response
         self.status_code = response.status_code
+        self.content_range = response.headers.get("Content-Range")
 
     def aiter_bytes(self, chunk_size: int = 65536) -> AsyncIterator[bytes]:
         return self._response.aiter_bytes(chunk_size)
@@ -186,6 +189,35 @@ def _json_http_error(status: int, message: str) -> HTTPException:
     return HTTPException(status_code=status, detail=message)
 
 
+_CONTENT_RANGE_PATTERN = re.compile(
+    r"^bytes\s+(?P<start>\d+)-(?P<end>\d+)/(?:\d+|\*)$",
+    re.IGNORECASE,
+)
+
+
+def _reconcile_cdn_offset(
+    stream: CdnResponse, *, expected_offset: int, range_requested: bool
+) -> None:
+    """Require a ranged CDN response to declare the locally expected start."""
+    if not range_requested or stream.status_code != 206:
+        return
+    content_range = stream.content_range
+    if not content_range:
+        raise UpstreamDisconnected("CDN 206 response missing Content-Range")
+    match = _CONTENT_RANGE_PATTERN.fullmatch(content_range.strip())
+    if match is None:
+        raise UpstreamDisconnected("CDN 206 response has malformed Content-Range")
+    declared_start = int(match.group("start"))
+    declared_end = int(match.group("end"))
+    if declared_end < declared_start:
+        raise UpstreamDisconnected("CDN 206 response has invalid Content-Range")
+    if declared_start != expected_offset:
+        raise UpstreamDisconnected(
+            "CDN 206 response starts at "
+            f"{declared_start}, expected {expected_offset}"
+        )
+
+
 async def _fetch_media(object_id: str) -> dict:
     provider = TikHubProvider()
     return await provider.fetch_wechat_channels_media(object_id)
@@ -199,6 +231,7 @@ async def _iter_decrypted(
     start: int,
     end: int,
     file_size: int,
+    first_range_requested: bool,
 ) -> AsyncIterator[bytes]:
     """Yield decrypted bytes from start..end inclusive, resuming on upstream drop.
 
@@ -237,6 +270,15 @@ async def _iter_decrypted(
                             offset,
                         )
                         raise UpstreamDisconnected("CDN ignored Range on resume")
+                    _reconcile_cdn_offset(
+                        stream, expected_offset=offset, range_requested=True
+                    )
+                else:
+                    _reconcile_cdn_offset(
+                        stream,
+                        expected_offset=offset,
+                        range_requested=first_range_requested,
+                    )
 
                 decode_key = media["decode_key"]
                 try:
@@ -379,6 +421,7 @@ async def stream_wechat_channels(object_id: str, request: Request):
                     start=start,
                     end=end,
                     file_size=file_size,
+                    first_range_requested=is_partial,
                 ):
                     yield chunk
             finally:

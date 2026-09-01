@@ -55,17 +55,21 @@ class FakeCdn:
         payload: bytes,
         *,
         status_code: int,
+        content_range: str | None = None,
         disconnect_after: int | None = None,
         hold: asyncio.Event | None = None,
     ) -> None:
         self.payload = payload
         self.status_code = status_code
+        self.content_range = content_range
         self.disconnect_after = disconnect_after
         self.hold = hold
         self.aclose_called = False
         self.aclose_count = 0
+        self.aiter_calls = 0
 
     async def aiter_bytes(self, chunk_size: int = 65536):
+        self.aiter_calls += 1
         if self.hold is not None:
             await self.hold.wait()
         sent = 0
@@ -133,6 +137,9 @@ def _stream_harness(monkeypatch):
         cdn = FakeCdn(
             payload,
             status_code=status,
+            content_range=(
+                f"bytes {start}-{end}/{FILE_SIZE}" if status == 206 else None
+            ),
             disconnect_after=rel,
             hold=hold_event["e"],
         )
@@ -322,6 +329,145 @@ def test_resume_ignored_range_failure_retries_and_matches_oneshot(
     assert open_calls == 3
 
 
+def test_initial_range_mismatch_retries_without_consuming_wrong_bytes(
+    client, _stream_harness, monkeypatch
+):
+    range_header = "bytes=100-200"
+    expected = _slice_plain(range_header)
+    real_open = stream_mod.open_cdn_stream
+    open_calls = 0
+
+    async def mismatch_once(url: str, requested_range: str | None):
+        nonlocal open_calls
+        open_calls += 1
+        response = await real_open(url, requested_range)
+        if open_calls == 1:
+            response.content_range = "bytes 0-100/600000"
+            response.payload = b"wrong bytes must not be consumed"
+        return response
+
+    monkeypatch.setattr(stream_mod, "open_cdn_stream", mismatch_once)
+    resp = _get(client, range_header)
+
+    assert resp.status_code == 206
+    assert resp.content == expected
+    assert open_calls == 2
+    assert _stream_harness["opens"][0]["stream"].aiter_calls == 0
+
+
+def test_initial_range_missing_content_range_retries_without_consuming_bytes(
+    client, _stream_harness, monkeypatch
+):
+    range_header = "bytes=100-200"
+    expected = _slice_plain(range_header)
+    real_open = stream_mod.open_cdn_stream
+    open_calls = 0
+
+    async def missing_once(url: str, requested_range: str | None):
+        nonlocal open_calls
+        open_calls += 1
+        response = await real_open(url, requested_range)
+        if open_calls == 1:
+            response.content_range = None
+            response.payload = b"missing range must not be consumed"
+        return response
+
+    monkeypatch.setattr(stream_mod, "open_cdn_stream", missing_once)
+    resp = _get(client, range_header)
+
+    assert resp.status_code == 206
+    assert resp.content == expected
+    assert open_calls == 2
+    assert _stream_harness["opens"][0]["stream"].aiter_calls == 0
+
+
+def test_initial_range_malformed_content_range_retries_without_consuming_bytes(
+    client, _stream_harness, monkeypatch
+):
+    range_header = "bytes=100-200"
+    expected = _slice_plain(range_header)
+    real_open = stream_mod.open_cdn_stream
+    open_calls = 0
+
+    async def malformed_once(url: str, requested_range: str | None):
+        nonlocal open_calls
+        open_calls += 1
+        response = await real_open(url, requested_range)
+        if open_calls == 1:
+            response.content_range = "bytes not-a-range"
+            response.payload = b"malformed range must not be consumed"
+        return response
+
+    monkeypatch.setattr(stream_mod, "open_cdn_stream", malformed_once)
+    resp = _get(client, range_header)
+
+    assert resp.status_code == 206
+    assert resp.content == expected
+    assert open_calls == 2
+    assert _stream_harness["opens"][0]["stream"].aiter_calls == 0
+
+
+def test_resume_range_mismatch_retries_without_consuming_wrong_bytes(
+    client, _stream_harness, monkeypatch
+):
+    expected = _get(client).content
+    _stream_harness["opens"].clear()
+    _stream_harness["media_calls"].clear()
+    _stream_harness["disconnect_abs"].extend([50_000, None])
+
+    real_open = stream_mod.open_cdn_stream
+    open_calls = 0
+
+    async def mismatch_resume_once(url: str, requested_range: str | None):
+        nonlocal open_calls
+        open_calls += 1
+        response = await real_open(url, requested_range)
+        if open_calls == 2:
+            response.content_range = "bytes 50001-550000/600000"
+            response.payload = b"wrong resume bytes must not be consumed"
+        return response
+
+    monkeypatch.setattr(stream_mod, "open_cdn_stream", mismatch_resume_once)
+    resp = _get(client)
+
+    assert resp.status_code == 200
+    assert resp.content == expected
+    assert open_calls == 3
+    assert _stream_harness["opens"][1]["stream"].aiter_calls == 0
+
+
+def test_resume_content_range_failures_exhaust_retry_cap(
+    client, _stream_harness, monkeypatch
+):
+    settings.STREAM_RESUME_MAX_RETRIES = 3
+    _stream_harness["disconnect_abs"].extend([50_000, None, None, None])
+    real_open = stream_mod.open_cdn_stream
+
+    async def always_mismatch(url: str, requested_range: str | None):
+        response = await real_open(url, requested_range)
+        if requested_range is not None:
+            start, end, _ = stream_mod.parse_byte_range(requested_range, FILE_SIZE)
+            response.content_range = f"bytes {start + 1}-{end + 1}/{FILE_SIZE}"
+        return response
+
+    monkeypatch.setattr(stream_mod, "open_cdn_stream", always_mismatch)
+    errors: list[str] = []
+    with TestClient(app) as raising_client:
+        hid = loguru_logger.add(lambda m: errors.append(str(m)), level="ERROR")
+        try:
+            with pytest.raises(stream_mod.UpstreamDisconnected):
+                _get(raising_client)
+        finally:
+            loguru_logger.remove(hid)
+
+    assert len(_stream_harness["opens"]) - 1 == settings.STREAM_RESUME_MAX_RETRIES
+    assert all(
+        entry["stream"].aiter_calls == 0
+        for entry in _stream_harness["opens"][1:]
+    )
+    assert any("resume exhausted" in msg for msg in errors)
+
+
 def test_resume_retry_cap_stops_exactly_at_limit(client, _stream_harness):
     settings.STREAM_RESUME_MAX_RETRIES = 3
     _stream_harness["disconnect_abs"].clear()
@@ -357,6 +503,7 @@ async def test_client_disconnect_acloses_upstream(_stream_harness):
         start=0,
         end=FILE_SIZE - 1,
         file_size=FILE_SIZE,
+        first_range_requested=False,
     )
     first = await agen.__anext__()
     assert len(first) > 0
@@ -417,7 +564,7 @@ async def test_concurrency_limit_429_and_release(db, _stream_harness):
 def test_memory_constant_no_full_body_read(client, monkeypatch, _stream_harness):
     src = Path(stream_mod.__file__).read_text(encoding="utf-8")
     assert "aread(" not in src
-    assert ".content" not in src
+    assert "response.content" not in src
     assert "readall" not in src
     assert "aiter_bytes" in src
 
