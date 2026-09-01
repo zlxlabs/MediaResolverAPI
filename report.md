@@ -458,3 +458,178 @@ $ git show --stat --format= HEAD
 ## 状态
 
 代码目标已按 CDN 权威完成，单元和静态验证通过；决定性真实环境端到端因上游 CDN 不响应开放 Range，按卡面判据标记为**实测未通过**，交主脑处理该上游行为与既有 5xx 契约的冲突。
++# 执行报告：客户端 Range × CDN 响应矩阵收口
+
+Dispatch-Id: dlg-20260901-145118-6db013
+Branch: card/MediaResolverAPI-20260901-13
+Base: 21c75a89a0bf8f58b6d225489a41885306fb6b7a
+阶段: repairing
+
+## 结论
+
+已在 app/api/stream.py 补齐 CDN 206 完整性和 CDN 416 状态映射，并在 tests/test_stream_wechat_channels.py 增加一个参数化测试覆盖 R0-R5 × C1-C8 的全部 48 格；每格都校验客户端实际正文，成功格校验解密后的完整字节，失败格校验 JSON、Content-Length 与未消费上游。README.md 已同步无 Range 短 206、无 Content-Length 的 200、以及 416 行为。
+
+本地验证通过：
+
+~~~
+/home/zlx/projects/work/MediaResolverAPI/.venv/bin/python -m py_compile app/api/stream.py tests/test_stream_wechat_channels.py
+/home/zlx/projects/work/MediaResolverAPI/.venv/bin/python -m pytest tests/ -q
+298 passed, 166 warnings in 3.42s
+~~~
+
+真实端到端的五种形态中，无 Range 请求返回 200 且 Content-Length 正确，但在 60 秒有界传输内只收到了 358612992/435768323 字节；按任务卡要求记为“实测未通过”，没有修改断言、重试或改实现迁就。
+
+## 矩阵约定
+
+测试文件中的矩阵使用 FILE_SIZE=L=600000；R3 为 bytes=0-99999，R4 为 bytes=200000-299999，R5 为 bytes=-100000。C3/C4 的成功 206 以 CDN 的合法 Content-Range 为实际区间；因此例如 R3×C3 会转发 CDN 声明的完整 0-L-1 区间。失败格的 Content-Length 是 JSON 响应正文的实际字节数，实际发出字节数同为该 JSON 正文长度；成功格的实际发出字节数是客户端收到的解密正文长度。
+
+R6 不与 CDN 轴组合：parse_byte_range 在出站请求前返回 416，三个畸形/多区间/非 bytes 用例均断言 CDN 未被调用。
+
+## 48 格矩阵
+
+| 客户端 × CDN | 对外状态码 | 对外 Content-Length | 对外 Content-Range | 实际发出字节数 |
+|---|---:|---:|---|---:|
+| R0 × C1 | 200 | 600000 | 不发送 | 600000 |
+| R0 × C2 | 200 | 不发送 | 不发送 | 600000 |
+| R0 × C3 | 200 | 600000 | 不发送 | 600000 |
+| R0 × C4 | 502 | 64（JSON） | 不发送 | 64（JSON） |
+| R0 × C5 | 502 | 53（JSON） | 不发送 | 53（JSON） |
+| R0 × C6 | 502 | 57（JSON） | 不发送 | 57（JSON） |
+| R0 × C7 | 416 | 29（JSON） | bytes */600000 | 29（JSON） |
+| R0 × C8 | 502 | 29（JSON） | 不发送 | 29（JSON） |
+| R1 × C1 | 206 | 600000 | bytes 0-599999/600000 | 600000 |
+| R1 × C2 | 502 | 70（JSON） | 不发送 | 70（JSON） |
+| R1 × C3 | 206 | 600000 | bytes 0-599999/600000 | 600000 |
+| R1 × C4 | 206 | 599999 | bytes 0-599998/600000 | 599999 |
+| R1 × C5 | 502 | 53（JSON） | 不发送 | 53（JSON） |
+| R1 × C6 | 502 | 57（JSON） | 不发送 | 57（JSON） |
+| R1 × C7 | 416 | 29（JSON） | bytes */600000 | 29（JSON） |
+| R1 × C8 | 502 | 29（JSON） | 不发送 | 29（JSON） |
+| R2 × C1 | 502 | 38（JSON） | 不发送 | 38（JSON） |
+| R2 × C2 | 502 | 38（JSON） | 不发送 | 38（JSON） |
+| R2 × C3 | 206 | 400000 | bytes 200000-599999/600000 | 400000 |
+| R2 × C4 | 206 | 399999 | bytes 200000-599998/600000 | 399999 |
+| R2 × C5 | 502 | 63（JSON） | 不发送 | 63（JSON） |
+| R2 × C6 | 502 | 57（JSON） | 不发送 | 57（JSON） |
+| R2 × C7 | 416 | 29（JSON） | bytes */600000 | 29（JSON） |
+| R2 × C8 | 502 | 29（JSON） | 不发送 | 29（JSON） |
+| R3 × C1 | 206 | 100000 | bytes 0-99999/600000 | 100000 |
+| R3 × C2 | 206 | 不发送 | bytes 0-99999/* | 100000 |
+| R3 × C3 | 206 | 600000 | bytes 0-599999/600000 | 600000 |
+| R3 × C4 | 206 | 100000 | bytes 0-99999/600000 | 100000 |
+| R3 × C5 | 502 | 53（JSON） | 不发送 | 53（JSON） |
+| R3 × C6 | 502 | 57（JSON） | 不发送 | 57（JSON） |
+| R3 × C7 | 416 | 29（JSON） | bytes */600000 | 29（JSON） |
+| R3 × C8 | 502 | 29（JSON） | 不发送 | 29（JSON） |
+| R4 × C1 | 502 | 38（JSON） | 不发送 | 38（JSON） |
+| R4 × C2 | 502 | 38（JSON） | 不发送 | 38（JSON） |
+| R4 × C3 | 206 | 400000 | bytes 200000-599999/600000 | 400000 |
+| R4 × C4 | 206 | 100000 | bytes 200000-299999/600000 | 100000 |
+| R4 × C5 | 502 | 63（JSON） | 不发送 | 63（JSON） |
+| R4 × C6 | 502 | 57（JSON） | 不发送 | 57（JSON） |
+| R4 × C7 | 416 | 29（JSON） | bytes */600000 | 29（JSON） |
+| R4 × C8 | 502 | 29（JSON） | 不发送 | 29（JSON） |
+| R5 × C1 | 502 | 38（JSON） | 不发送 | 38（JSON） |
+| R5 × C2 | 502 | 38（JSON） | 不发送 | 38（JSON） |
+| R5 × C3 | 206 | 100000 | bytes 500000-599999/600000 | 100000 |
+| R5 × C4 | 206 | 99999 | bytes 500000-599998/600000 | 99999 |
+| R5 × C5 | 502 | 63（JSON） | 不发送 | 63（JSON） |
+| R5 × C6 | 502 | 57（JSON） | 不发送 | 57（JSON） |
+| R5 × C7 | 416 | 29（JSON） | bytes */600000 | 29（JSON） |
+| R5 × C8 | 502 | 29（JSON） | 不发送 | 29（JSON） |
+
+矩阵测试实际统计：
+
+~~~
+/home/zlx/projects/work/MediaResolverAPI/.venv/bin/python -m pytest tests/test_stream_wechat_channels.py -q -k 'matrix or malformed_range'
+51 passed, 42 deselected, 52 warnings in 1.54s
+~~~
+
+## 实现与不变式落点
+
+- INV-1：app/api/stream.py:430-445 只在已知长度时声明 Content-Length；206 metadata 的 Content-Length 在 app/api/stream.py:235-245 对账；矩阵测试逐格比较响应头长度与客户端实际正文长度。
+- INV-2：app/api/stream.py:399-404 要求无 Range 的 206 具备数字 complete-length 且 declared_end == complete_length - 1；R0×C4 测试断言 502、JSON 且 aiter_calls == 0。无 Range 的 206 完整格输出 200 和总长 L。
+- INV-3：app/api/stream.py:436-445 原样使用已校验的 CDN 206 Content-Range，或为 200 响应按实际可知的区间构造；矩阵逐格断言 Content-Range。
+- INV-4：app/api/stream.py:291-302 继续以 absolute offset 调用 xor_chunk；密文由测试中的 generate_keystream 逐字节异或构造，未使用 xor_chunk 生成密文；矩阵以及现有跨 131072 边界用例断言实际明文。
+- INV-5：C5/C6/C7/C8 和 R0×C4 的响应形态错误在 StreamingResponse 创建前转换为 JSON/416；对应矩阵格均断言上游 aiter_calls == 0。既有客户端断开/中途上游断开契约未改动，仍由现有 test_upstream_disconnect_terminates_response_with_error 覆盖。
+
+## 三项红验
+
+1. R0×C4 失败判定注入：
+   - 注入行：app/api/stream.py 第 399 行，sed 输出为
+     if False and not is_partial:
+   - 测试：test_client_range_cdn_response_matrix[R0xC4]
+   - 统计：1 failed, 92 deselected, 2 warnings；实际状态码 200，期望 502。
+   - 已恢复为 if not is_partial:。
+
+2. 416 透传注入：
+   - 注入行：app/api/stream.py 第 368 行，sed 输出为
+     if first_stream.status_code == 416 and False:
+   - 测试：test_client_range_cdn_response_matrix[R0xC7]
+   - 统计：1 failed, 92 deselected, 2 warnings；实际状态码 502，期望 416。
+   - 已恢复为 if first_stream.status_code == 416:。
+
+3. R3×C1 截断注入：
+   - 注入行：app/api/stream.py 第 296 行，sed 输出为
+     if False and end is not None:
+   - 测试：test_client_range_cdn_response_matrix[R3xC1]
+   - 统计：1 failed, 92 deselected, 2 warnings；响应正文不等于 100000 字节目标。
+   - 已恢复为 if end is not None:。
+
+## 真实端到端实测
+
+服务命令：
+
+~~~
+/home/zlx/projects/work/MediaResolverAPI/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8010
+~~~
+
+API key 由 grep '^API_KEY=' .env 单键读取，未打印值。POST 得到 data.video_url，长度 59。五个 GET 均显式使用独立 -o 文件，产物目录为 /tmp/wechat-e2e-dlg-20260901-145118-rEfY51。
+
+| 形态 | HTTP | 落盘字节 | 头部/判定 |
+|---|---:|---:|---|
+| bytes=0-131071 | 206 | 131072 | Content-Length=131072，Content-Range=bytes 0-131071/435768323，偏移 4..8 为 ftyp |
+| bytes=0- | 206 | 116457472 | Content-Length=435768323，Range 头正确；20 秒超时中止，允许作为有界截断 |
+| 无 Range | 200 | 358612992 | Content-Length=435768323；60 秒超时中止，未收完整文件，实测未通过 |
+| bytes=200000-300000 | 206 | 100001 | Content-Length=100001，Content-Range=bytes 200000-300000/435768323 |
+| bytes=200000- | 206 | 116588544 | Content-Length=435568323，Content-Range=bytes 200000-435768322/435768323，起点正确 |
+
+字节交叉校验：
+
+~~~
+A_eq_B_prefix=True
+D_eq_B_slice=True
+E_overlap_bytes=116257472 E_eq_B_overlap=True
+B_cross_boundary_eq_C=True
+A_len_ok=True D_len_ok=True ftyp_ok=True
+full_C_header=435768323
+~~~
+
+无 Range 响应体前缀同样为合法 mp4 头，body[4:8] == b'ftyp'；失败原因是传输超时导致落盘文件短于其声明长度，不是 5xx 或头部矩阵错误。端到端按要求在此停止，未重试。
+
+## 提交证据
+
+代码/测试提交：
+
+~~~
+$ git log --oneline -1
+6a88228 fix: close wechat stream range response matrix
+
+$ git show --stat --format= HEAD
+ app/api/stream.py                    |  54 +++++++++--
+ tests/test_stream_wechat_channels.py | 167 +++++++++++++++++++++++++++++++++++
+ 2 files changed, 215 insertions(+), 6 deletions(-)
+~~~
+
+README 提交：
+
+~~~
+$ git log --oneline -1
+79a1794 docs: document range response matrix edge cases
+
+$ git show --stat --format= HEAD
+ README.md | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+~~~
+
+本报告写入前工作树在 79a1794 后无代码/文档未提交改动；报告本身随后单独提交。
