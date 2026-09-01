@@ -39,6 +39,7 @@ risk-tier: internal
 1. **源站 mp4 是加密的。** `POST /api/resolve` 返回的 `video_url` 指向**本服务**的流式端点 `/api/stream/wechat_channels/{sph_code}`，而不是第三方 CDN。服务端边下边解密再转发，客户端拿到的是可直接播放的标准 mp4，**不需要客户端做任何解密**。
 2. **下载流量经过本服务。** 并发下载数受环境变量 `MAX_CONCURRENT_STREAMS` 限制（默认 4），超限返回 `429 Too many concurrent streams`。部署在反向代理后面时，需要确认代理对长连接、大响应体的超时与缓冲设置（流式转发，响应体可达完整视频大小）。
 3. **播放量拿不到。** `view_count` 恒为 `null`（TikHub 的 `read_count` 恒为 0，不是真实播放量），不要把它理解成「偶尔缺失」。其余统计数据（点赞 / 收藏 / 转发 / 评论）齐全。
+4. **`video_url` 必须带 `X-API-Key` 才能访问。** 其他平台的 `video_url` 是第三方 CDN 直链，拿到即可直接下载或喂给播放器，无需任何认证。视频号的 `video_url` 指向本服务，因此请求时必须带 `X-API-Key`，否则返回 401。不要把这个 URL 直接丢给播放器或下载器——它们默认不会加这个请求头，播放/下载会失败。若服务端未配置 `API_KEY`（开发模式）则不校验，本地未设密钥时可以不带。
 
 流式端点的路径、鉴权、Range 与状态码见下文 [GET /api/stream/wechat_channels/{sph_code}](#get-apistreamwechat_channelssph_code)。
 
@@ -52,6 +53,21 @@ risk-tier: internal
 cp .env.example .env
 # 编辑 .env，填入 API_KEY、TIKHUB_API_KEY 等配置
 ```
+
+环境变量（默认值以 `app/core/config.py` 为准；完整清单见 `.env.example`）：
+
+| 变量 | 作用 | 默认值 | 什么时候必须设 |
+|------|------|--------|----------------|
+| `API_KEY` | 服务自身的接入密钥。所有 `/api/*` 接口（含视频号的 `video_url`）用 `X-API-Key` 校验 | 空字符串 `""`（不校验，开发模式） | 对公网或非可信客户端提供服务时必须设；留空则任何人都能调接口 |
+| `TIKHUB_API_KEY` | TikHub 数据源密钥，解析各平台元数据时使用 | 空字符串 `""` | 要解析视频（含视频号）时必须设，否则上游请求失败 |
+| `TIKHUB_API_BASE` | TikHub API 基址 | `https://api.tikhub.io` | 一般不用改；只用自建/代理 TikHub 时才设 |
+| `PUBLIC_BASE_URL` | 对外公开基址，决定 `POST /api/resolve` 返回的 `data.video_url` 前缀。显式配置了就用它，没配置就用当前请求的 `Host`（`request.base_url`）推导 | 空字符串 `""` | **反向代理后面且代理未透传正确 Host 时必须设置**，否则 `video_url` 会变成内网地址（如 `http://127.0.0.1:8000/api/stream/...`），下游拿到无法使用 |
+| `MAX_CONCURRENT_STREAMS` | 视频号流式下载的**每进程**并发上限，超限返回 429，不会排队 | `4` | 一般不用改；单进程扛不住并发、或要用 `uvicorn --workers N` / 多副本时需按进程数自行核算（此项不是全局限制） |
+| `STREAM_CHUNK_SIZE` | 流式转发的分块大小（字节） | `65536` | 一般不用改；要调整转发缓冲时才设 |
+| `COBALT_API_BASE` | Cobalt 自建服务地址，作为部分平台的兜底数据源 | 空字符串 `""`（未配置则 Cobalt 不可用） | 需要 Cobalt 兜底时必须设为实际服务地址；视频号无 Cobalt 兜底，不设不影响视频号 |
+| `HTTP_TIMEOUT_SECONDS` | 服务访问上游 HTTP 的超时（秒） | `30` | 一般不用改；上游较慢需要放宽超时时才设 |
+| `TRANSLATION_ENABLED` | 是否翻译视频描述（影响响应里的 `translated_description`） | `True` | 不需要翻译时设为 `false`；为 True 且请求 `translate=true` 时还需配置 `OPENAI_API_KEY` |
+| `OPENAI_API_KEY` | 翻译用的 OpenAI 兼容接口密钥 | 空字符串 `""` | 需要翻译描述时必须设；留空则即使 `TRANSLATION_ENABLED=True` 也不会翻译 |
 
 ### 2. 启动服务
 
@@ -354,6 +370,24 @@ if data["success"]:
     print(data["data"]["video_url"])
 ```
 
+视频号是唯一需要两步的平台：先 `POST /api/resolve` 拿到 `video_url`，再带 `X-API-Key` 请求该 URL 下载 mp4。不要把 `video_url` 直接丢给播放器。
+
+```python
+import requests
+
+headers = {"X-API-Key": "your-api-key"}
+resp = requests.post(
+    "http://localhost:8000/api/resolve",
+    headers=headers,
+    json={"url": "https://weixin.qq.com/sph/xxxxx"},
+)
+data = resp.json()
+if data["success"]:
+    video = requests.get(data["data"]["video_url"], headers=headers)
+    with open("wechat-channels.mp4", "wb") as f:
+        f.write(video.content)
+```
+
 ### JavaScript / Node.js
 
 ```javascript
@@ -371,6 +405,31 @@ if (data.success) {
 }
 ```
 
+视频号两步（Node 18+ 内置 `fetch`，写入文件用标准库 `node:fs/promises`，无额外依赖）。不要把 `video_url` 直接丢给播放器。
+
+```javascript
+import { writeFile } from "node:fs/promises";
+
+const resp = await fetch("http://localhost:8000/api/resolve", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "X-API-Key": "your-api-key",
+  },
+  body: JSON.stringify({ url: "https://weixin.qq.com/sph/xxxxx" }),
+});
+const data = await resp.json();
+if (data.success) {
+  const videoResp = await fetch(data.data.video_url, {
+    headers: { "X-API-Key": "your-api-key" },
+  });
+  await writeFile(
+    "wechat-channels.mp4",
+    Buffer.from(await videoResp.arrayBuffer()),
+  );
+}
+```
+
 ### cURL
 
 ```bash
@@ -378,4 +437,19 @@ curl -X POST http://localhost:8000/api/resolve \
   -H "Content-Type: application/json" \
   -H "X-API-Key: your-api-key" \
   -d '{"url": "https://v.douyin.com/xxxxx/"}'
+```
+
+视频号两步：先解析拿到 `data.video_url`，再带 `X-API-Key` 请求该 URL 下载。不要把这个 URL 直接丢给播放器。
+
+```bash
+# 第一步：解析
+curl -sS -X POST http://localhost:8000/api/resolve \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-api-key" \
+  -d '{"url": "https://weixin.qq.com/sph/xxxxx"}'
+
+# 第二步：把上一步返回的 data.video_url 整段贴进引号（必须带 X-API-Key）
+curl -L "<data.video_url>" \
+  -H "X-API-Key: your-api-key" \
+  -o wechat-channels.mp4
 ```
