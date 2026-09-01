@@ -23,10 +23,11 @@ from ..services.translation.openai import TranslationService
 router = APIRouter(dependencies=[Depends(verify_api_key)])
 
 # 平台已识别但 video_id 提取失败时，可凭原始 url 兜底的平台集合：
-# 其降级链含吃 url 的端点（kuaishou web_share=share_text / instagram v2 code_or_url + v1 post_url），
-# 故无需 video_id 也能解析；不在此集合的平台（tiktok/youtube/xiaohongshu）仍按 400 处理。
+# 其降级链含吃 url 的端点（kuaishou web_share=share_text / instagram v2 code_or_url + v1 post_url /
+# wechat_channels fetch_video_detail share_url），故无需 video_id 也能解析；不在此集合的平台
+# （tiktok/youtube/xiaohongshu）仍按 400 处理。
 # 抖音另由 use_hybrid 兜底，不在此列。（评审 Issue 5）
-URL_FALLBACK_PLATFORMS = frozenset({"kuaishou", "instagram"})
+URL_FALLBACK_PLATFORMS = frozenset({"kuaishou", "instagram", "wechat_channels"})
 
 # Shared service instances
 _video_resolver: Optional[VideoResolver] = None
@@ -102,7 +103,8 @@ async def resolve_url(
     """
     Resolve a social media URL into a direct download link with metadata.
 
-    Supports: Douyin, TikTok, Kuaishou, YouTube, Xiaohongshu, Instagram, Pinterest.
+    Supports: Douyin, TikTok, Kuaishou, YouTube, Xiaohongshu, Instagram, Pinterest,
+    Facebook, WeChat Channels.
     """
     original_url = request.url.strip()
     logger.info(f"Resolve request: {original_url}")

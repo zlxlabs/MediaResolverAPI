@@ -89,6 +89,7 @@ class VideoResolver:
             # 抖音和快手可能不被 Cobalt 支持，只使用 TikHub
             "douyin": [self.tikhub_provider],
             "kuaishou": [self.tikhub_provider],
+            "wechat_channels": [self.tikhub_provider],
         }
 
         # 从配置文件读取自定义优先级并覆盖默认配置
@@ -101,6 +102,7 @@ class VideoResolver:
             "facebook": settings.PROVIDER_PRIORITY_FACEBOOK,
             "douyin": settings.PROVIDER_PRIORITY_DOUYIN,
             "kuaishou": settings.PROVIDER_PRIORITY_KUAISHOU,
+            "wechat_channels": settings.PROVIDER_PRIORITY_WECHAT_CHANNELS,
         }
 
         for platform, priority_config in platform_config_map.items():

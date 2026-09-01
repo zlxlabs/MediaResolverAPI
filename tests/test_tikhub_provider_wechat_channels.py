@@ -82,6 +82,8 @@ def test_parse_response_redacts_credentials_in_raw_data():
     assert media["url_token"] == "REDACTED"
     assert media["full_url"] == "REDACTED"
     assert media["decode_key"] == "REDACTED"
+    assert media["cover_url"] == "REDACTED"
+    assert media["cover_url_token"] == "REDACTED"
     dumped = json.dumps(info.to_dict())
     assert "decode_key" in dumped  # 键还在，值必须是占位
     assert media["decode_key"] == "REDACTED"
@@ -106,3 +108,211 @@ def test_parse_response_none_without_media_or_non_video():
     assert WechatChannelsService("k", "b")._parse_response(load("image_note")) is None
     missing_media = {"data": {"id": OBJECT_ID, "object_type": 0, "title": "x"}}
     assert WechatChannelsService("k", "b")._parse_response(missing_media) is None
+
+
+# ----------------------------- 分类器 -----------------------------
+
+def test_classify_ok_for_video():
+    assert TikHubProvider._classify_wechat_channels(load("detail")) == "ok"
+
+
+@pytest.mark.parametrize("payload", [
+    load("empty"),
+    load("image_note"),
+    {},
+    {"data": None},
+    "not-a-dict",
+])
+def test_classify_retryable(payload):
+    assert TikHubProvider._classify_wechat_channels(payload) == "retryable"
+
+
+def test_classify_never_terminal():
+    assert TikHubProvider._classify_wechat_channels(load("empty")) != "terminal"
+    assert TikHubProvider._classify_wechat_channels(load("image_note")) != "terminal"
+    assert TikHubProvider._classify_wechat_channels(load("detail")) != "terminal"
+
+
+# ----------------------------- has_playable 同源 -----------------------------
+
+def test_has_playable_uses_parse_response(monkeypatch):
+    """has_playable 必须走 WechatChannelsService._parse_response，禁止另写一套判断。"""
+    calls = []
+    original = WechatChannelsService._parse_response
+
+    def wrapped(self, data):
+        calls.append(data)
+        return original(self, data)
+
+    monkeypatch.setattr(WechatChannelsService, "_parse_response", wrapped)
+    provider = TikHubProvider()
+    assert provider._wechat_channels_has_playable(load("detail")) is True
+    assert provider._wechat_channels_has_playable(load("empty")) is False
+    assert provider._wechat_channels_has_playable(load("image_note")) is False
+    missing_media = {"data": {"id": OBJECT_ID, "object_type": 0, "title": "x"}}
+    assert provider._wechat_channels_has_playable(missing_media) is False
+    assert len(calls) == 4
+
+
+def test_missing_media_is_ok_then_not_playable():
+    """缺 media：extract_data 仍能定位节点（classify=ok），解析失败 → has_playable False。"""
+    missing_media = {"data": {"id": OBJECT_ID, "object_type": 0, "title": "x"}}
+    assert TikHubProvider._classify_wechat_channels(missing_media) == "ok"
+    assert TikHubProvider()._wechat_channels_has_playable(missing_media) is False
+
+
+# ----------------------------- 端点链 -----------------------------
+
+def _provider_with(monkeypatch, mapping):
+    provider = TikHubProvider()
+    calls = []
+
+    async def fake_call(self, name, path, params, per_timeout):
+        calls.append({"name": name, "path": path, "params": params})
+        resp = mapping[name]
+        if isinstance(resp, Exception):
+            raise resp
+        return resp
+
+    monkeypatch.setattr(TikHubProvider, "_call_endpoint", fake_call)
+    return provider, calls
+
+
+async def test_chain_hit_returns_detail(monkeypatch):
+    provider, calls = _provider_with(monkeypatch, {"fetch_video_detail": load("detail")})
+    data = await provider.fetch_video_info("wechat_channels", OBJECT_ID, SHARE_URL)
+    assert data == load("detail")
+    assert [c["name"] for c in calls] == ["fetch_video_detail"]
+    assert calls[0]["path"] == "/api/v1/wechat_channels/v2/fetch_video_detail"
+
+
+async def test_chain_empty_raises_not_found_not_terminal(monkeypatch):
+    provider, calls = _provider_with(monkeypatch, {"fetch_video_detail": load("empty")})
+    with pytest.raises(VideoNotFoundError) as ei:
+        await provider.fetch_video_info("wechat_channels", OBJECT_ID, SHARE_URL)
+    assert not isinstance(ei.value, TerminalError)
+    assert [c["name"] for c in calls] == ["fetch_video_detail"]
+
+
+async def test_chain_image_note_raises_not_found_not_terminal(monkeypatch):
+    provider, calls = _provider_with(monkeypatch, {"fetch_video_detail": load("image_note")})
+    with pytest.raises(VideoNotFoundError) as ei:
+        await provider.fetch_video_info("wechat_channels", OBJECT_ID, SHARE_URL)
+    assert not isinstance(ei.value, TerminalError)
+    assert calls
+
+
+async def test_chain_missing_media_raises_not_found(monkeypatch):
+    missing_media = {"data": {"id": OBJECT_ID, "object_type": 0, "title": "x"}}
+    provider, _calls = _provider_with(monkeypatch, {"fetch_video_detail": missing_media})
+    with pytest.raises(VideoNotFoundError) as ei:
+        await provider.fetch_video_info("wechat_channels", OBJECT_ID, SHARE_URL)
+    assert not isinstance(ei.value, TerminalError)
+
+
+async def test_chain_http_error_then_not_found(monkeypatch):
+    provider, calls = _provider_with(
+        monkeypatch, {"fetch_video_detail": ProviderError("boom")}
+    )
+    with pytest.raises(VideoNotFoundError):
+        await provider.fetch_video_info("wechat_channels", OBJECT_ID, SHARE_URL)
+    assert [c["name"] for c in calls] == ["fetch_video_detail"]
+
+
+async def test_unsupported_platform_still_raises(monkeypatch):
+    """新增分支不得破坏未接链平台的防呆 raise。"""
+    provider = TikHubProvider()
+    with pytest.raises(ProviderError, match="not supported"):
+        await provider.fetch_video_info("not_a_platform", "id", "http://x")
+
+
+# ----------------- 逐字段 param 构造（防静默 422） -----------------
+
+async def test_build_params_with_object_id(monkeypatch):
+    provider = TikHubProvider()
+    seen = {}
+
+    async def capture(self, name, path, params, per_timeout):
+        seen[name] = params
+        return load("empty")
+
+    monkeypatch.setattr(TikHubProvider, "_call_endpoint", capture)
+    with pytest.raises(VideoNotFoundError):
+        await provider.fetch_video_info("wechat_channels", OBJECT_ID, SHARE_URL)
+
+    assert seen["fetch_video_detail"] == {"object_id": OBJECT_ID, "raw": False}
+    assert seen["fetch_video_detail"]["raw"] is False
+
+
+async def test_build_params_with_share_url_only(monkeypatch):
+    provider = TikHubProvider()
+    seen = {}
+
+    async def capture(self, name, path, params, per_timeout):
+        seen[name] = params
+        return load("empty")
+
+    monkeypatch.setattr(TikHubProvider, "_call_endpoint", capture)
+    with pytest.raises(VideoNotFoundError):
+        await provider.fetch_video_info("wechat_channels", "", SHARE_URL)
+
+    assert seen["fetch_video_detail"] == {"share_url": SHARE_URL, "raw": False}
+    assert "object_id" not in seen["fetch_video_detail"]
+    assert seen["fetch_video_detail"]["raw"] is False
+
+
+async def test_chain_total_budget_timeout(monkeypatch):
+    provider = TikHubProvider()
+    monkeypatch.setattr(TikHubProvider, "WECHAT_CHANNELS_TOTAL_BUDGET", 0.05)
+
+    async def slow_call(self, name, path, params, per_timeout):
+        await asyncio.sleep(1)
+        return load("detail")
+
+    monkeypatch.setattr(TikHubProvider, "_call_endpoint", slow_call)
+    with pytest.raises(ProviderError, match="timed out"):
+        await provider.fetch_video_info("wechat_channels", OBJECT_ID, SHARE_URL)
+
+
+async def test_adapter_and_platforms_endpoint(authed_client, monkeypatch):
+    """GET /api/platforms 含 wechat_channels: [tikhub]；adapter 能产出 VideoInfo。"""
+    from app.services.adapters.tikhub_adapter import TikHubAdapter
+
+    info = TikHubAdapter("k", "b").adapt(load("detail"), "wechat_channels", OBJECT_ID)
+    assert info is not None
+    assert info.provider == "tikhub"
+    assert info.video_id == OBJECT_ID
+    assert info.view_count is None
+
+    resp = authed_client.get("/api/platforms")
+    assert resp.status_code == 200
+    platforms = resp.json()["platforms"]
+    assert platforms["wechat_channels"] == ["tikhub"]
+
+
+async def test_resolve_fallback_without_video_id(authed_client, monkeypatch):
+    """sph 短链 parse 出平台但无 id：路由放行，链用 share_url 兜底后回填 object_id。"""
+    import app.api.resolve as resolve_mod
+    from app.services.platforms.base import VideoInfo
+    from app.services.video_resolver import VideoResolver
+
+    async def fake_resolve(self, platform, video_id, original_url, force_refresh=False, use_hybrid=False):
+        assert platform == "wechat_channels"
+        assert video_id == ""
+        assert original_url == SHARE_URL
+        info = VideoInfo(
+            video_id=OBJECT_ID, platform="wechat_channels", title="t",
+            description="中文描述", author_name="a", author_id="a",
+            video_url=f"http://localhost:8000/api/stream/wechat_channels/{OBJECT_ID}",
+            width=912, height=1920, provider="tikhub", view_count=None,
+        )
+        return info, "tikhub"
+
+    monkeypatch.setattr(VideoResolver, "resolve", fake_resolve)
+    # 清掉路由层单例，确保用到带 wechat_channels 链的实例
+    resolve_mod._video_resolver = None
+    resp = authed_client.post("/api/resolve", json={"url": SHARE_URL, "translate": False})
+    assert resp.status_code == 200 and resp.json()["success"]
+    assert resp.json()["data"]["video_id"] == OBJECT_ID
+    assert resp.json()["data"]["platform"] == "wechat_channels"
+    assert resp.json()["data"]["view_count"] is None

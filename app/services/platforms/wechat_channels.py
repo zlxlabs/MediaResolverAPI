@@ -21,6 +21,8 @@ _REDACT_KEYS = frozenset({
     "full_url",
     "url_token",
     "url",
+    "cover_url",
+    "cover_url_token",
     "request_id",
     "cache_url",
     "debug_info",
