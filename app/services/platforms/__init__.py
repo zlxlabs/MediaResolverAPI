@@ -11,6 +11,7 @@ from .kuaishou import KuaishouService
 from .instagram import InstagramService
 from .pinterest import PinterestService
 from .facebook import FacebookService
+from .wechat_channels import WechatChannelsService
 
 __all__ = [
     "VideoInfo",
@@ -23,4 +24,5 @@ __all__ = [
     "InstagramService",
     "PinterestService",
     "FacebookService",
+    "WechatChannelsService",
 ]

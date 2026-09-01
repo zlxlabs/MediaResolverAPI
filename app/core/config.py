@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     DEBUG: bool = False
     HOST: str = "0.0.0.0"
     PORT: int = 8000
+    # 对外稳定基址，用于拼接不带 token 的 video_url（如视频号 /api/stream/...）
+    PUBLIC_BASE_URL: str = "http://localhost:8000"
 
     # Database
     DATABASE_URL: str = "sqlite:///./data/media_resolver.db"
@@ -95,6 +97,7 @@ class Settings(BaseSettings):
     PROVIDER_PRIORITY_FACEBOOK: str = ""
     PROVIDER_PRIORITY_DOUYIN: str = ""
     PROVIDER_PRIORITY_KUAISHOU: str = ""
+    PROVIDER_PRIORITY_WECHAT_CHANNELS: str = ""
 
     model_config = {
         "env_file": ".env",
