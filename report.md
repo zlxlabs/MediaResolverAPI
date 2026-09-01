@@ -250,3 +250,211 @@ $ git show --stat --format= HEAD
 - `25dd978 fix: derive wechat stream path from sph share code`
 - `8608070 fix: validate wechat stream share codes`
 - `1451f79 docs: document wechat stream short code`
+# 本卡执行报告：以 CDN 响应作为视频文件大小事实源
+
+Dispatch-Id：`dlg-20260901-140945-bb4e71`
+Branch：`card/MediaResolverAPI-20260901-14`
+Base：`5df01b0ec3f24824aa156c46cdaf981f742f09a2`
+阶段：repairing
+
+## 结论
+
+代码修复、测试轴、红验、全量回归和编译检查均完成并提交。实现已不再使用 TikHub 的 `media.file_size` 推导 Range 终点、响应长度或 Content-Range；测试夹具明确模拟 TikHub 元数据大小 `2450521066` 与 CDN 实际大小 `600000` 的偏差。
+
+决定性真实环境实测**未通过**：`Range: bytes=0-` 原样转发后，实际 CDN 返回 HTTP 200 而不是 206，服务按既有契约返回 502 `CDN ignored Range request`。按任务卡要求，观察到该失败后停止后续端到端形态，不修改断言迁就。
+
+## 实现落点
+
+- `app/api/stream.py`
+  - `parse_byte_range` 只校验单个 Range 语法并提取客户端显式起点，不接收或使用文件大小。
+  - 客户端带 Range 时把请求头原样传给 CDN，不再调用按 `file_size` 补终点的 `_range_header_for`。
+  - CDN 206 的 `Content-Range` 作为真实起止区间；保留语法、`last >= first`、显式请求起点和区间长度/Content-Length 对账。
+  - 移除 CDN 声明终点与本地 `expected_end` 的比较；CDN 返回更短终点时按 CDN 区间解密和响应。
+  - 无 Range 的 CDN 200 以 CDN `Content-Length` 设置解密终点和对外长度；CDN 没有长度时不声明 `Content-Length`，流到上游结束。
+  - 对外 `Content-Range` 和 `Content-Length` 均由 CDN 响应推导；保留上游异常在响应头发出前转为 5xx JSON、取消释放、429、客户端断开、解密偏移和短码校验。
+- `tests/test_stream_wechat_channels.py`
+  - 测试元数据大小固定为 `2450521066`，CDN 模拟实际大小为 `600000`。
+  - 覆盖无 Range、`bytes=0-`、`bytes=N-`、闭区间、CDN 截短闭区间、起点错位、缺失/畸形 Content-Range、长度对账和无 CDN 长度。
+  - 密文仍由 `generate_keystream` 直接异或构造，没有用 `xor_chunk` 生成。
+- `README.md`
+  - 说明 Range 原样转发 CDN，开放范围和超出末尾时以 CDN 实际终点为准，并修正 416 说明。
+
+## 对账维度改动前后对照
+
+| 对账维度 | 改动前 | 改动后 | 原因 |
+|---|---|---|---|
+| Range 解析/转发 | 用 TikHub `file_size` 计算并补齐终点，再发给 CDN | 只做语法解析；原始 Range 原样发给 CDN | 本地没有 CDN 真实总长，不能预先补终点 |
+| `Content-Range` 语法 | 保留 | 保留 | 仍需拒绝缺失或畸形 CDN 元数据 |
+| `last-byte-pos >= first-byte-pos` | 保留 | 保留 | 区间自身合法性不依赖 TikHub 大小 |
+| `first-byte-pos ==` 请求起点 | 保留 | 保留；显式起点继续对账；无 Range 按隐含起点 0 对账；suffix 起点未知时不伪造本地起点 | 起点来自客户端，是仍可信的本地量 |
+| CDN 终点 == 本地 `expected_end` | 要求相等 | 移除 | `expected_end` 由不可信 `file_size` 推导；CDN 可合法返回更短终点 |
+| CDN `complete_length == file_size` | 上一版已移除 | 继续移除 | TikHub 总长与 CDN 总长可相差数倍 |
+| 声明区间长度 == CDN `Content-Length` | 有长度时保留 | 有长度时保留；无长度时不声明对外长度 | 有 CDN 长度就对账，没有就不能凭本地量补写 |
+| 对外 `Content-Length` | 用 `end - start + 1`，间接受 `file_size` 影响 | 直接采用 CDN `Content-Length`；缺失则省略 | CDN 是实际传输大小的权威 |
+| 对外 `Content-Range` | 用本地 `start/end/file_size` 重构 | 透传已验证的 CDN `Content-Range` | 响应区间和总长必须来自 CDN |
+
+## 改完后 `file_size` 的使用点审计
+
+- `app/api/stream.py`：无残留使用点。流式范围计算、解密边界、响应长度、响应 Content-Range 和对账均不读取该字段。
+- `app/services/providers/tikhub.py`：仍在既有元数据提供层读取、校验并返回 `file_size`，作为 TikHub 元数据展示字段；本卡禁止修改该目录，且该值不再进入流式路由的任何对外承诺。
+- `tests/test_stream_wechat_channels.py`：保留 provider 元数据测试对 `2450521066` 的断言，并用同一差异构造证明流式端点不使用它；测试夹具中的 `file_size` 仅模拟元数据输入。
+- 未新增配置、缓存或跨请求状态，未改其他平台。
+
+## 测试与编译
+
+定向流式测试：
+
+```
+/home/zlx/projects/work/MediaResolverAPI/.venv/bin/python -m pytest tests/test_stream_wechat_channels.py -q
+39 passed, 33 warnings in 1.11s
+```
+
+全量测试：
+
+```
+/home/zlx/projects/work/MediaResolverAPI/.venv/bin/python -m pytest tests/ -q
+244 passed, 112 warnings in 2.63s
+```
+
+编译：
+
+```
+/home/zlx/projects/work/MediaResolverAPI/.venv/bin/python -m py_compile app/api/stream.py tests/test_stream_wechat_channels.py
+```
+
+通过；`git diff --check` 通过。
+
+## 红验
+
+### 1. 错误恢复为 TikHub `file_size` 推导
+
+临时注入的两行：
+
+```python
+end = int(media["file_size"]) - 1  # RED INJECTION: derive endpoint from TikHub
+content_length = int(media["file_size"])  # RED INJECTION: derive length from TikHub
+```
+
+执行：
+
+```
+/home/zlx/projects/work/MediaResolverAPI/.venv/bin/python -m pytest -q \
+  'tests/test_stream_wechat_channels.py::test_range_matches_full_download_slice[no_range]' \
+  'tests/test_stream_wechat_channels.py::test_range_matches_full_download_slice[bytes_0_open]'
+```
+
+失败测试：
+
+- `test_range_matches_full_download_slice[no_range]`
+- `test_range_matches_full_download_slice[bytes_0_open]`
+
+统计行：
+
+```
+2 failed, 3 warnings in 0.21s
+```
+
+两项均因 CDN 实际流在 600000 字节结束，而临时注入把终点/长度推到 TikHub 的 2450521066，断言正文不一致。注入随后已恢复。
+
+### 2. 起点对账改为放行
+
+临时注入行：
+
+```python
+if expected_offset is not None and declared_start == expected_offset:  # RED INJECTION: disable start mismatch rejection
+```
+
+执行：
+
+```
+/home/zlx/projects/work/MediaResolverAPI/.venv/bin/python -m pytest -q \
+  tests/test_stream_wechat_channels.py::test_initial_range_mismatch_fails_before_streaming
+```
+
+失败测试：
+
+- `test_initial_range_mismatch_fails_before_streaming`
+
+统计行：
+
+```
+1 failed, 2 warnings in 0.11s
+```
+
+错误注入时错位 CDN 区间被放行并返回 206，而测试要求响应头发出前返回 502。注入随后已恢复为：
+
+```python
+if expected_offset is not None and declared_start != expected_offset:
+```
+
+## 真实环境端到端
+
+服务命令：
+
+```
+/home/zlx/projects/work/MediaResolverAPI/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+API key 从 `.env` 使用单键 `grep '^API_KEY='` 读取，仅记录长度 43，未打印值。所有 curl 均显式使用 `-o`，产物目录：
+
+```
+/tmp/wechat-e2e-dlg-20260901-140945-bb4e71.Wx7gsF/
+```
+
+解析阶段：
+
+```
+health_http=200
+resolve_http=200
+resolve_success=True
+resolve_platform=wechat_channels
+stream_path=/api/stream/wechat_channels/AOzokRxWHz
+```
+
+已完成的第一种形态：
+
+- 请求：`Range: bytes=0-131071`
+- 服务响应：HTTP 206
+- 文件：恰好 131072 字节
+- `Content-Range: bytes 0-131071/435768323`
+- `Content-Length: 131072`
+- 偏移 4..8：`ftyp`
+- 结论：通过；其中 CDN 实际完整长度为 435768323，已证明不是 TikHub 的 2450521066。
+
+未通过的第二种形态：
+
+- 请求：`Range: bytes=0-`
+- Range 已原样转发给 CDN
+- 服务响应：HTTP 502
+- 响应体文件大小：38 字节
+- 响应体前缀：`b'{"detail":"CDN ignored Range request"}'`
+- CDN 对该 Range 返回 HTTP 200，未提供 206 Content-Range；服务按既有“CDN 未按 Range 返回则 5xx JSON”契约在响应体发出前拦截。
+- 结论：**实测未通过**。
+
+按任务卡“任一形态未通过即记录并停下”执行，后两种形态不作为通过项：
+
+- 无 Range：已启动过请求，服务观察到 HTTP 200，响应头中的 CDN `Content-Length: 435768323` 已写入；因批处理在第二种形态失败后终止，下载仅落盘 182190080 字节，不计作完整通过。
+- `Range: bytes=200000-300000`：未发起。
+- 未修改断言或文档去掩盖上述实测失败，服务已停止。
+
+## Git
+
+代码与测试提交后、写本报告前的实际输出：
+
+```
+$ git log --oneline -1
+a63fd4b fix: derive wechat stream ranges from CDN
+
+$ git show --stat --format= HEAD
+ README.md                            |   4 +-
+ app/api/stream.py                    | 119 +++++++++++++++++------------------
+ tests/test_stream_wechat_channels.py |  75 +++++++++++++++++++---
+ 3 files changed, 124 insertions(+), 74 deletions(-)
+```
+
+实现提交：`a63fd4bbe9a13d3557cca03b83e8f49b5e8e0990`。
+报告写入后将另有报告提交；上述 Git 证据对应实际代码/测试/README 提交。
+
+## 状态
+
+代码目标已按 CDN 权威完成，单元和静态验证通过；决定性真实环境端到端因上游 CDN 不响应开放 Range，按卡面判据标记为**实测未通过**，交主脑处理该上游行为与既有 5xx 契约的冲突。
