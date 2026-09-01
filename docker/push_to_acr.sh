@@ -28,7 +28,12 @@ if [ -n "$(git -C "${PROJECT_ROOT}" status --porcelain)" ]; then
 fi
 [[ "${RELEASE_TAG}" =~ ^[0-9a-f]{40}$ ]]
 
+# --provenance/--sbom 必须关闭：Docker 29 + buildx 默认附加 attestation，会产生
+# application/vnd.oci.empty.v1+json descriptor，阿里云 ACR 个人版不支持该 manifest
+# 类型，推送在所有 layer 上传完成后才失败（"unknown manifest class"）。
 docker build \
+  --provenance=false \
+  --sbom=false \
   --build-arg "GIT_SHA=${RELEASE_TAG}" \
   -t "${IMAGE_NAME}:latest" \
   -f "${PROJECT_ROOT}/docker/Dockerfile" \
