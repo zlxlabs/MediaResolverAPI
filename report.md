@@ -1,111 +1,122 @@
-# 修复报告：video_url 不再静默拼 localhost
+# 修复报告：微信视频号流式解密下载端点
 
-- **Dispatch-Id**：dlg-20260901-095348-f33ca3
-- **分支**：`card/MediaResolverAPI-20260901-03`
-- **root_cause_group**：可用性依赖一个新增的、既有部署必然缺失的配置项，且缺失时走默认值而非报错，失败形态为静默返回不可用地址。
-- **introduced_by_commit**：`2984924`
-- **结论**：解析层只存相对路径 `/api/stream/wechat_channels/{id}`；API 层用 `PUBLIC_BASE_URL`（非空）或 `request.base_url` 补成绝对地址。空配置不再吐 localhost。全量 194 passed。本卡 diff +164/-17。
+- **Dispatch-Id**：dlg-20260901-100729-1be955
+- **分支**：`card/MediaResolverAPI-20260901-04`
+- **HEAD**：`cda33c7 feat: add wechat channels streaming decrypt endpoint`
+- **结论**：`GET /api/stream/wechat_channels/{object_id}` 已落地。每次请求先向 TikHub 取当次配套的 (CDN 链接, decode_key)，成功后才开始 `StreamingResponse`；前 131072 字节边拉边 XOR，其余透传。客户端拿到的是可播 mp4。全量 220 passed。探活最终 `206` + 128KiB + 偏移 4..8 为 `ftyp`。
 
-## 现场
+## 现场（pickup）
 
-工作树沿用本会话 `card/MediaResolverAPI-20260901-03`，开工 HEAD 即卡面 Base `fdd81f8`。无交接单。同 dispatch id 的 unit 是本派发现场。
+工作树 `MediaResolverAPI-20260901-04`，开工 HEAD 即卡面 Base `55a6313`。本工作区无交接单。同 dispatch id 的 systemd unit 是本派发现场，未当作他人占用。
 
-## 改了什么
+- 存活探针不可用（`archive_orphan_debts.py`：`current session id missing`），改跑 `unaccepted_cards.py --all-repos`：跨仓汇总 6 仓 14 条。无法区分有主/无主，不拿总数冒充无主数。要处理请另开对话，不要在本次接手里顺手补账。
+- 本仓 open issue：#8（快手/Instagram by_url，与本卡无关）。
+- 已合并：#7 元数据解析层、#6 密钥流 spike。open PR #9 是设计文档分支 `feat/sph-design`。
+- 默认分支是 `origin/master`（无 `origin/main`）。
+- AGENTS.md / CLAUDE.md 在本工作树不存在（`wc` 合计 0）。
 
-1. `WechatChannelsService._parse_response`：`video_url = f"/api/stream/wechat_channels/{video_id}"`，不再读 `PUBLIC_BASE_URL`。
-2. `app/api/resolve.py`：注入 FastAPI `Request`（参数名 `http_request`，避开 body 的 `request`）。`_build_response` 对以 `/` 开头的 `video_url` 补全；`http(s)://` 开头的第三方地址原样返回，无平台名判断。
-3. `PUBLIC_BASE_URL` 默认值改为 `""`。`.env.example` 注释：留空即按请求 Host 推导，仅反代未透传正确 Host 时才需要设置。
-4. P2：`_REDACT_KEYS` 只补 `cover_img_url`，现有脱敏测试加断言。
+## 搬迁策略
 
-## `request.base_url` 在本仓部署形态下成不成立
+选 **spike 薄转发**，不保留两份独立副本。
 
-**成立，没有改回配置项方案。** 证据：
+理由：算法已被两组真实样本全量验证，两份副本会在下次改 LRU / 偏移时漂移。`scripts/spike/wechat_keystream.py` 把仓根插入 `sys.path` 后 `from app.services.wechat_channels_crypto import KEYSTREAM_SIZE, generate_keystream, xor_chunk`。`verify_keystream.py` 与 `README.md` 未改。
 
-- `docker/docker-compose.yml` / `docker-compose.deploy.yml` 只有 `8100:8000` / `8206:8000` 端口直映，仓库内无 nginx/caddy/traefik。
-- `app/main.py` 无 `ProxyHeadersMiddleware`，全仓无 `X-Forwarded-*` 处理。
-- uvicorn 直接对外时，调用方的 `Host` 就是 `request.base_url`（例如 `http://host:8206`），这正是调用方能访问的地址。
-
-若将来前面加反代且不透传 Host，推导会变成容器内网地址——那时才需要设 `PUBLIC_BASE_URL`。这是 `.env.example` 里那句注释要覆盖的场景，不是现在的形态。
-
-## 四格验收
-
-| # | 结果 |
-|---|---|
-| 1 空配置 + Host `example.com:9000` | `http://example.com:9000/api/stream/wechat_channels/{id}` |
-| 2 `PUBLIC_BASE_URL=https://media.example.org` | 显式配置优先，不用请求 Host |
-| 3 缓存命中换 Host | 第二次是 `b.example.com`，不含 `a.example.com` |
-| 4 抖音绝对 CDN URL | 与写入值完全一致，补全逻辑未碰到 |
-
-第 3 格要走到现有「已知 video_id 才查缓存」分支：sph 短链 `parse_url` 生产路径拿不到 object_id，本来就不会查缓存。测试里把 `parse_url` 桩成返回 object_id，这样走的是真实 `get_cached_video` → `_build_response` 代码，没有另造缓存机制。未改 `resolve.py` 的缓存查找条件。
-
-## 红验（第 3 格）
-
-注入行（随后改回）：
-
-```python
-video_url = f"http://injected-host.invalid/api/stream/wechat_channels/{video_id}"
-```
-
-命令（无管道，退出码来自 pytest 本身）：
+离线验证（本机 `/tmp/sph-spike/` 样本仍在）实际输出：
 
 ```
-/home/zlx/projects/work/MediaResolverAPI/.venv/bin/python -m pytest \
-  tests/test_resolve_wechat_channels_url.py::test_cache_hit_uses_current_request_host_not_cached_host -q --tb=short
+constraint_A: 131072/131072 bytes match
+sample1_plain[:16] 000000206674797069736f6d00000200
+sample2_plain[:16] 000000206674797069736f6d00000200
+constraint_B: sample1[4:8]==ftyp and sample2[4:8]==ftyp
+constraint_C: 131072/131072 bytes match (chunked, 7000B)
+EXIT:0
 ```
 
-实际输出（节选）：
+已知向量（硬编码进 `tests/test_wechat_channels_crypto.py`，不依赖 `/tmp`）：
+`decode_key=55516695` 密钥流前 12 字节 `7769d98df51778766238a697`，与明文头 `000000206674797069736f6d` 异或可还原 `ftyp isom`。
 
-```
-F
-E   AssertionError: assert False
-E    +  where False = ...startswith('http://a.example.com/api/stream/wechat_channels/')
-E    +    where ... = 'http://injected-host.invalid/api/stream/wechat_channels/14998022876670594427'.startswith
-FAILED ...test_cache_hit_uses_current_request_host_not_cached_host
-1 failed ...
-PYTEST_EXIT:1
-```
+## 行为
 
-注入生效判据：失败信息里的 URL 正是注入的 `injected-host.invalid`，不是请求 Host。绝对 URL 不以 `/` 开头，API 层不改写，所以第一次响应就已经钉死假 host——这就是「缓存里带 host」的同一缺陷。确认变红后已改回相对路径。改回后再跑该测试通过。
+1. **无状态**：每次请求（含续传）都现调 `fetch_wechat_channels_media`；不缓存 (链接, key)。允许按 decode_key LRU 缓存密钥流。
+2. **先取后流**：TikHub / 首次 CDN 打开失败时响应头未发出，返回 JSON 5xx/429。`VideoNotFoundError` 与 `ProviderError` 一律 502 JSON（卡面要求 TikHub 失败是 5xx，不是残缺字节流）。
+3. **Range**：客户端 Range 按明文绝对偏移，CDN Range 相同。无 Range → 200；有 Range（含 `bytes=0-`）→ 206 + `Content-Range`。
+4. **续传**：上游短读/传输错误时，以已转发绝对偏移 N 重新取 detail，带 `Range: bytes=N-…`。超过 `STREAM_RESUME_MAX_RETRIES` 打 ERROR 并让生成器抛错（此时不能改状态码）。
+5. **客户端断开**：async generator `aclose` / `CancelledError` 不续传，finally 里 `aclose` 上游。
+6. **并发**：非阻塞信号量，超限 429 JSON，不排队拖到超时。下载结束（含异常）释放名额。
+7. **TikHub object_id 瞬态**：实测 `{"object_id", "raw": false}` 多数成功，但偶发 `data` 变成微信错误包（无 `object_type`），单端点链记 retryable 后立刻 `VideoNotFoundError`。新方法内对该瞬态最多再试 2 次并打 WARNING，耗尽仍抛给端点转 502。不静默当成功。既有 `_fetch_wechat_channels` 签名/行为未改。
+
+## 卡面期望值里需要显式提出的点
+
+提出不算抗命。均按卡面实现，没有调宽断言。
+
+1. **Range 第 7 格**：卡面是 `bytes=200000-300000`（闭区间 100001 字节），设计不变式 2 写的是 `200000-`（开到文件尾）。语义都是「完全在明文区」。实现与测试跟卡面闭区间。
+2. **`bytes=0-` vs 不带 Range**：体逐字节相同；状态码按 RFC 分别是 206 与 200。测试比的是体，不是状态码。
+3. **续传上限之后**：响应头已发出，只能截断连接。调用方靠 `Content-Length` 对不上 / 连接提前关知道出事。ERROR 日志给运维。没有改成空 yield 或假装成功。
+4. **客户端断开**：调用方自己取消的，WARNING + 关上游。若只关本地生成器、不 `aclose` CDN，才是静默漏连接。
+5. **429**：JSON 错误体，不把第 N+1 路塞进队列慢慢耗。
+6. **探活第一次/第二次 502**：不是端点把 TikHub 失败流成残缺 mp4；是 object_id 查询当时返回 retryable 信封，JSON 502。第三次同 URL 得到 206 + `ftyp`。见下方探活。这不是断言被调宽，是上游瞬态；代码侧加了有日志的重试。
 
 ## 验证
 
 ```
 /home/zlx/projects/work/MediaResolverAPI/.venv/bin/python -m py_compile \
-  app/core/config.py app/services/platforms/wechat_channels.py app/api/resolve.py \
-  tests/test_tikhub_provider_wechat_channels.py tests/test_resolve_wechat_channels_url.py
+  app/services/wechat_channels_crypto.py app/api/stream.py app/main.py \
+  app/core/config.py app/services/providers/tikhub.py \
+  tests/test_stream_wechat_channels.py tests/test_wechat_channels_crypto.py
 COMPILE_EXIT:0
 
 /home/zlx/projects/work/MediaResolverAPI/.venv/bin/python -m pytest tests/ -q
-194 passed, 80 warnings in 1.42s
+220 passed, 95 warnings in 2.22s
 PYTEST_EXIT:0
 ```
+
+时序窄范围连续 5 轮（resume 两格 + 并发 429）：每轮 exit 0，`FIVE_X_FAIL=0`。
+
+## 探活
+
+本地 `python -m uvicorn app.main:app --host 127.0.0.1 --port 8000`（venv 里 `uvicorn` 脚本 shebang 指向已不存在的旧路径，改用 `python -m uvicorn`）。
+
+对 `https://weixin.qq.com/sph/AOzokRxWHz`：
+
+| 步 | 结果（不回显响应体 / 不打印 .env） |
+|---|---|
+| `POST /api/resolve` | HTTP 200，`success=True`，`video_id=14998022876670594427`，`video_url=http://127.0.0.1:8000/api/stream/wechat_channels/14998022876670594427` |
+| `curl -r 0-131071 -o <file>` 第 1、2 次 | HTTP 502，148 字节 JSON，`detail` 为 WechatChannels all endpoints failed / retryable（TikHub 当时返回无 object_type 的信封） |
+| 同命令第 3 次 | HTTP **206**，**131072** 字节，MIME `video/mp4`，`head_hex8=0000002066747970`，`ftyp_ok=True` |
+
+curl 均显式 `-o` 文件。TikHub 按次计费，本探活含 resolve + 若干次 stream 侧 detail。
+
+## 不变式自检
+
+| 不变式 | 代码 | 锁死测试 |
+|---|---|---|
+| 2 解密边界 | `xor_chunk` + stream 按绝对偏移 | Range 7 格，体与「整文件再切片」逐字节相同 |
+| 7 上游断流可续 | `_iter_decrypted` 重取 media + Range 起点=已转发绝对偏移 | `test_resume_matches_oneshot…` 50000 / 500000；上限格 `resume_opens == STREAM_RESUME_MAX_RETRIES` + ERROR |
+| 8 客户端断开关上游 | generator finally / aclose | `test_client_disconnect_acloses_upstream` |
+| 9 并发上限 | `StreamLimiter.try_acquire` 非阻塞 | 占满后 429，释放后 200 |
+| 1 配套性 | 每次 `_fetch_media`，续传再取 | `test_each_request_fetches_media_fresh`；resume 格 `media_calls==2` |
+| 4 内存恒定 | 只用 `aiter_bytes`，源码禁止 `aread` / `.content` / `readall` | `test_memory_constant_no_full_body_read` 峰值块 ≤ `STREAM_CHUNK_SIZE` |
 
 ## git
 
 ```
-$ git log --oneline -1
-358ee97 fix: assemble wechat_channels video_url at request time
+cda33c7 feat: add wechat channels streaming decrypt endpoint
 ```
 
+`git show --stat --format= HEAD`：
+
 ```
-$ git show --stat --format= HEAD
-commit 358ee97016f56e862f38346c8ee982c0b7a55f38
-Author:     zj1123581321 <zj1123581321@users.noreply.github.com>
-AuthorDate: Tue Sep 1 17:59:56 2026 +0800
-
-    fix: assemble wechat_channels video_url at request time
-
-    Store a host-free relative path in VideoInfo/cache and absolutize in the
-    API layer from PUBLIC_BASE_URL or the request Host, so missing config no
-    longer silently returns localhost.
-
- .env.example                                  |   5 +-
- app/api/resolve.py                            |  32 +++++--
- app/core/config.py                            |   4 +-
- app/services/platforms/wechat_channels.py     |   7 +-
- tests/test_resolve_wechat_channels_url.py     | 124 ++++++++++++++++++++++++++
- tests/test_tikhub_provider_wechat_channels.py |   9 +-
- 6 files changed, 164 insertions(+), 17 deletions(-)
+ app/api/stream.py                    | 388 +++++++++++++++++++++++++++++++
+ app/main.py                          |   2 +
+ tests/test_stream_wechat_channels.py | 434 +++++++++++++++++++++++++++++++++++
+ 3 files changed, 824 insertions(+)
 ```
 
-未 push。未改 url_parser / tikhub provider / resolver / adapters / scripts / docs / README / `.env`。
+本卡另外两笔（同一分支）：
+
+- `60db2af` feat: move wechat channels keystream into the production module
+- `d71729c` feat: add wechat channels media fetch and stream settings
+
+相对 Base `55a6313` 的 `git diff --numstat`：+1187 / -193，合计 1380（target 1100 / hard 2000，超目标未超硬顶）。主要体积在 stream 实现与 Range/续传/429 测试，没有另造基线文件。
+
+未 push（卡面要求提交到分配分支，未要求开 PR / 推远程）。
