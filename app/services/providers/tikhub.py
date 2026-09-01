@@ -748,6 +748,70 @@ class TikHubProvider(BaseProvider):
         info = WechatChannelsService(self.api_key, self.api_base)._parse_response(data)
         return bool(info and info.video_url)
 
+    async def fetch_wechat_channels_media(self, object_id: str) -> dict:
+        """取当次配套的 media 信息。返回至少含 full_url / decode_key / file_size。
+
+        每次调用都走一次新的 TikHub detail 请求，不缓存返回值。
+        (full_url, decode_key) 必须成对使用，跨次混用必然解密失败。
+
+        object_id 查询偶发返回微信错误包（无 object_type），单端点链会记 retryable
+        后立刻 VideoNotFoundError。这里对这一瞬态做有限次重试并打 WARNING，
+        耗尽后仍把错误抛给调用方（端点转 5xx JSON），不静默当成功。
+        """
+        if not object_id:
+            raise VideoNotFoundError("wechat_channels object_id is empty")
+        data = None
+        last_exc: Optional[BaseException] = None
+        attempts = 3
+        for attempt in range(1, attempts + 1):
+            try:
+                data = await self._fetch_wechat_channels(object_id, "")
+                break
+            except VideoNotFoundError as exc:
+                last_exc = exc
+                if attempt >= attempts:
+                    raise
+                self.log_warning(
+                    "wechat_channels media lookup retryable, retrying",
+                    object_id=object_id,
+                    attempt=attempt,
+                    max_attempts=attempts,
+                    error=str(exc),
+                )
+                await asyncio.sleep(0.3)
+        if data is None:
+            raise last_exc if last_exc else VideoNotFoundError(
+                f"wechat_channels media missing for object_id={object_id}"
+            )
+        node = data.get("data") if isinstance(data, dict) else None
+        media = node.get("media") if isinstance(node, dict) else None
+        if not isinstance(media, dict):
+            raise ProviderError(
+                f"wechat_channels media missing for object_id={object_id}"
+            )
+        full_url = media.get("full_url")
+        decode_key = media.get("decode_key")
+        file_size = media.get("file_size")
+        if not full_url or decode_key in (None, ""):
+            raise ProviderError(
+                f"wechat_channels media incomplete for object_id={object_id}"
+            )
+        try:
+            size = int(file_size)
+        except (TypeError, ValueError) as exc:
+            raise ProviderError(
+                f"wechat_channels file_size missing for object_id={object_id}"
+            ) from exc
+        if size < 0:
+            raise ProviderError(
+                f"wechat_channels file_size invalid for object_id={object_id}"
+            )
+        return {
+            "full_url": str(full_url),
+            "decode_key": decode_key,
+            "file_size": size,
+        }
+
     # 注：原 _validate_response / _save_failed_response（通用 GET 路径的响应校验与
     # 失败落盘）已随全平台迁移到引擎而删除——有效性现由各链的 classify + has_playable
     # 唯一判定（评审 Issue 3：消除两套有效性来源）。
