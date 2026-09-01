@@ -7,7 +7,7 @@ Core API for resolving social media URLs into direct download links.
 import time
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from loguru import logger
 from sqlalchemy.orm import Session
@@ -98,6 +98,7 @@ class ResolveResponse(BaseModel):
 @router.post("/resolve", response_model=ResolveResponse)
 async def resolve_url(
     request: ResolveRequest,
+    http_request: Request,
     db: Session = Depends(get_db),
 ):
     """
@@ -181,7 +182,9 @@ async def resolve_url(
                 return ResolveResponse(
                     success=True,
                     data=_build_response(
-                        cached_info, cached_translation
+                        cached_info,
+                        cached_translation,
+                        public_origin=_public_origin(http_request),
                     ),
                 )
 
@@ -219,7 +222,11 @@ async def resolve_url(
         log_data["success"] = True
         return ResolveResponse(
             success=True,
-            data=_build_response(video_info, translated_desc),
+            data=_build_response(
+                video_info,
+                translated_desc,
+                public_origin=_public_origin(http_request),
+            ),
         )
 
     except HTTPException:
@@ -252,7 +259,22 @@ async def resolve_url(
             logger.warning(f"Failed to write usage log: {log_err}")
 
 
-def _build_response(video_info, translated_desc=None) -> VideoInfoResponse:
+def _public_origin(http_request: Request) -> str:
+    """显式 PUBLIC_BASE_URL 优先；未配置则用当前请求的 Host。"""
+    configured = (settings.PUBLIC_BASE_URL or "").strip()
+    if configured:
+        return configured.rstrip("/")
+    return str(http_request.base_url).rstrip("/")
+
+
+def _absolutize_video_url(video_url: str, public_origin: str) -> str:
+    """只补全以 / 开头的相对路径；第三方绝对 URL 原样返回。"""
+    if not video_url.startswith("/") or not public_origin:
+        return video_url
+    return f"{public_origin.rstrip('/')}{video_url}"
+
+
+def _build_response(video_info, translated_desc=None, public_origin: str = "") -> VideoInfoResponse:
     """Build VideoInfoResponse from VideoInfo object."""
     return VideoInfoResponse(
         platform=video_info.platform,
@@ -262,7 +284,7 @@ def _build_response(video_info, translated_desc=None) -> VideoInfoResponse:
         translated_description=translated_desc,
         author_name=video_info.author_name,
         author_id=video_info.author_id,
-        video_url=video_info.video_url,
+        video_url=_absolutize_video_url(video_info.video_url, public_origin),
         width=video_info.width,
         height=video_info.height,
         duration=video_info.duration,

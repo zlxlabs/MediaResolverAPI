@@ -4,6 +4,7 @@
 取数由 TikHubProvider 的单端点链负责（POST fetch_video_detail），
 本服务只提供 $.data 定位与 VideoInfo 映射。video_url 拼成本服务稳定端点，
 不回传 TikHub 带时效的 media.full_url / url_token / decode_key。
+video_url 只填相对路径，host 由 API 层按请求补全，避免缓存钉死旧域名。
 """
 
 from copy import deepcopy
@@ -12,7 +13,6 @@ from typing import Any, Dict, Optional
 from loguru import logger
 
 from .base import BasePlatformService, VideoInfo
-from ...core.config import settings
 
 
 # 凭据类字段：不得进入 API 响应，raw_data 落缓存前也一律替换。
@@ -23,6 +23,7 @@ _REDACT_KEYS = frozenset({
     "url",
     "cover_url",
     "cover_url_token",
+    "cover_img_url",
     "request_id",
     "cache_url",
     "debug_info",
@@ -101,8 +102,8 @@ class WechatChannelsService(BasePlatformService):
             read_count = self._parse_count(node.get("read_count"))
             view_count = None if not read_count else read_count
 
-            public_base = (settings.PUBLIC_BASE_URL or "http://localhost:8000").rstrip("/")
-            video_url = f"{public_base}/api/stream/wechat_channels/{video_id}"
+            # 相对路径：缓存里不含 host。绝对地址由 API 层按请求补全。
+            video_url = f"/api/stream/wechat_channels/{video_id}"
 
             return VideoInfo(
                 video_id=video_id,

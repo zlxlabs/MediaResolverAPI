@@ -13,7 +13,6 @@ from pathlib import Path
 import pytest
 
 from app.api.resolve import _build_response
-from app.core.config import settings
 from app.services.platforms.wechat_channels import WechatChannelsService
 from app.services.providers.base import ProviderError, TerminalError, VideoNotFoundError
 from app.services.providers.tikhub import TikHubProvider
@@ -65,13 +64,12 @@ def test_parse_response_maps_sample_fields():
     assert info.height == 1920
     assert info.create_time is not None
     assert int(info.create_time.timestamp()) == 1787903651
-    expected_url = (
-        f"{settings.PUBLIC_BASE_URL.rstrip('/')}/api/stream/wechat_channels/{OBJECT_ID}"
-    )
+    expected_url = f"/api/stream/wechat_channels/{OBJECT_ID}"
     assert info.video_url == expected_url
-    # 同一 object_id 两次解析必须得到完全相同的 video_url（缓存安全）
+    # 同一 object_id 两次解析必须得到完全相同的相对路径（缓存安全：不含 host）
     again = WechatChannelsService("k", "b")._parse_response(load("detail"))
     assert again is not None and again.video_url == info.video_url
+    assert "://" not in info.video_url
 
 
 def test_parse_response_redacts_credentials_in_raw_data():
@@ -84,6 +82,7 @@ def test_parse_response_redacts_credentials_in_raw_data():
     assert media["decode_key"] == "REDACTED"
     assert media["cover_url"] == "REDACTED"
     assert media["cover_url_token"] == "REDACTED"
+    assert info.raw_data["data"]["cover_img_url"] == "REDACTED"
     dumped = json.dumps(info.to_dict())
     assert "decode_key" in dumped  # 键还在，值必须是占位
     assert media["decode_key"] == "REDACTED"
