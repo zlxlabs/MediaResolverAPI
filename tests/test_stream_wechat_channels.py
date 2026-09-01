@@ -286,12 +286,12 @@ def _matrix_expected(range_id: str, response_id: str) -> dict:
         return {"status": 502, "content_length": None, "content_range": None}
     if response_id == "C4" and range_id == "R0":
         return {"status": 502, "content_length": None, "content_range": None}
+    if response_id == "C2" and range_id == "R0":
+        return {"status": 502, "content_length": None, "content_range": None}
     if response_id == "C2" and range_id in {"R1", "R2", "R4", "R5"}:
         return {"status": 502, "content_length": None, "content_range": None}
     if response_id == "C1" and range_id in {"R2", "R4", "R5"}:
         return {"status": 502, "content_length": None, "content_range": None}
-    if response_id == "C2" and range_id == "R0":
-        return {"status": 200, "content_length": None, "content_range": None, "start": 0, "end": FILE_SIZE - 1}
     if response_id == "C2" and range_id == "R3":
         return {"status": 206, "content_length": None, "content_range": "bytes 0-99999/*", "start": 0, "end": 99999}
     if response_id == "C1":
@@ -757,7 +757,7 @@ def test_no_range_206_start_zero_reconciles_before_streaming(
     assert response.content == PLAIN
 
 
-def test_no_range_without_cdn_content_length_uses_chunked_streaming(
+def test_no_range_without_cdn_content_length_fails_before_streaming(
     client, _stream_harness, monkeypatch
 ):
     real_open = stream_mod.open_cdn_stream
@@ -770,9 +770,55 @@ def test_no_range_without_cdn_content_length_uses_chunked_streaming(
     monkeypatch.setattr(stream_mod, "open_cdn_stream", return_without_length)
     response = _get(client)
 
-    assert response.status_code == 200
+    assert response.status_code == 502
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json()["detail"] == (
+        "CDN 200 response missing Content-Length for complete file"
+    )
+    assert _stream_harness["opens"][0]["stream"].aiter_calls == 0
+
+
+def test_bounded_range_accepts_cdn_full_response_without_content_length(
+    client, _stream_harness, monkeypatch
+):
+    real_open = stream_mod.open_cdn_stream
+
+    async def return_full_response(url: str, requested_range: str | None):
+        response = await real_open(url, requested_range)
+        response.status_code = 200
+        response.content_range = None
+        response.content_length = None
+        response.payload = _cipher(KEY_A)
+        return response
+
+    monkeypatch.setattr(stream_mod, "open_cdn_stream", return_full_response)
+    response = _get(client, "bytes=0-100")
+
+    assert response.status_code == 206
+    assert response.content == PLAIN[:101]
     assert "content-length" not in response.headers
-    assert response.content == PLAIN
+    assert response.headers["content-range"] == "bytes 0-100/*"
+
+
+def test_bounded_range_cdn_full_response_early_end_raises(
+    client, _stream_harness, monkeypatch
+):
+    real_open = stream_mod.open_cdn_stream
+
+    async def return_early_response(url: str, requested_range: str | None):
+        response = await real_open(url, requested_range)
+        response.status_code = 200
+        response.content_range = None
+        response.content_length = None
+        response.payload = _cipher(KEY_A)[:50]
+        return response
+
+    monkeypatch.setattr(stream_mod, "open_cdn_stream", return_early_response)
+    with TestClient(app) as raising_client:
+        with pytest.raises(stream_mod.UpstreamDisconnected):
+            _get(raising_client, "bytes=0-100")
+
+    assert _stream_harness["opens"][0]["stream"].aclose_called is True
 
 
 def test_no_range_206_nonzero_start_fails_before_streaming(

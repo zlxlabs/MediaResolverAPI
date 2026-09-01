@@ -280,7 +280,7 @@ curl http://localhost:8000/api/stream/wechat_channels/AOzokRxWHz \
 - `Content-Type: video/mp4`
 - 无 `Range`：HTTP 200，正文为完整解密后的 mp4
 - 有 `Range`：HTTP 206，带 `Content-Range: bytes start-end/total`
-- CDN 返回 200 且没有 `Content-Length` 时不声明该响应头并使用分块传输；`bytes=0-` 因无法构造完整 `Content-Range` 而返回 502。
+- CDN 返回 200 且没有 `Content-Length` 时，只有客户端给出明确终点的 `Range` 请求可以不声明该响应头并使用分块传输；无 `Range` 或开放范围因无法验证完整性而在响应头发出前返回 502。
 
 #### 失败响应 / HTTP 状态码
 
@@ -290,8 +290,8 @@ curl http://localhost:8000/api/stream/wechat_channels/AOzokRxWHz \
 | 206 | 部分内容（带 `Range`） |
 | 401 | API Key 无效或缺失 |
 | 416 | `Range` 格式错误，或 CDN 返回 416；若 CDN 提供合法的 `Content-Range: bytes */L` 则透传 |
-| 429 | 并发流超过 `MAX_CONCURRENT_STREAMS`（默认 4），不会排队 |
-| 502 | 上游 TikHub / CDN 失败、解密密钥无效、CDN 未按 Range 返回，或无 Range 收到不完整的 206 |
+| 429 | 每进程内并发流超过 `MAX_CONCURRENT_STREAMS`（默认 4），不会排队；默认 Docker 单 worker 单副本时限制成立，使用 `uvicorn --workers N` 或多副本时不是全局限制 |
+| 502 | 响应头发出前的上游 TikHub / CDN 失败、解密密钥无效、CDN 未按 Range 返回，或无 Range 收到不完整的 206；响应头发出后的上游断流/解密异常表现为连接中断或正文长度不足 |
 
 ---
 

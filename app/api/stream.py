@@ -417,6 +417,10 @@ async def stream_wechat_channels(sph_code: str, request: Request):
                         if end is None
                         else min(end, cdn_content_length - 1)
                     )
+                elif not is_partial and end is None:
+                    raise UpstreamDisconnected(
+                        "CDN 200 response missing Content-Length for complete file"
+                    )
             if is_partial and first_stream.status_code == 200:
                 if requested_start != 0:
                     raise UpstreamDisconnected("CDN ignored Range request")
