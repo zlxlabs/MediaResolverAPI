@@ -204,13 +204,14 @@ _CONTENT_RANGE_PATTERN = re.compile(
     r"^bytes\s+(?P<start>\d+)-(?P<end>\d+)/(?P<complete_length>\d+|\*)$",
     re.IGNORECASE,
 )
+_UNSATISFIABLE_RANGE_PATTERN = re.compile(r"^bytes\s+\*/\d+$", re.IGNORECASE)
 
 
 def _reconcile_cdn_offset(
     stream: CdnResponse,
     *,
     expected_offset: Optional[int],
-) -> tuple[int, int]:
+) -> tuple[int, int, Optional[int]]:
     """Validate CDN 206 metadata and return its authoritative range."""
     content_range = stream.content_range
     if not content_range:
@@ -242,7 +243,11 @@ def _reconcile_cdn_offset(
                 "CDN 206 response has Content-Length "
                 f"{declared_length}, expected {expected_length}"
             )
-    return declared_start, declared_end
+    return (
+        declared_start,
+        declared_end,
+        None if complete_length == "*" else int(complete_length),
+    )
 
 
 def _cdn_content_length(stream: CdnResponse) -> Optional[int]:
@@ -354,9 +359,24 @@ async def stream_wechat_channels(sph_code: str, request: Request):
 
         range_h = request.headers.get("range")
         requested_start, requested_end, is_partial = parse_byte_range(range_h)
+        requested_suffix = None
+        if is_partial and requested_start is None and range_h is not None:
+            requested_suffix = int(range_h.split("=", 1)[1].strip().split("-", 1)[1])
         first_stream = await open_cdn_stream(
             media["full_url"], range_h if is_partial else None
         )
+        if first_stream.status_code == 416:
+            headers = {}
+            content_range = first_stream.content_range
+            if content_range and _UNSATISFIABLE_RANGE_PATTERN.fullmatch(
+                content_range.strip()
+            ):
+                headers["Content-Range"] = content_range.strip()
+            raise HTTPException(
+                status_code=416,
+                detail="CDN returned 416",
+                headers=headers or None,
+            )
         if first_stream.status_code not in (200, 206):
             status = first_stream.status_code
             raise _json_http_error(502, f"CDN returned {status}")
@@ -365,10 +385,23 @@ async def stream_wechat_channels(sph_code: str, request: Request):
         try:
             cdn_content_length = _cdn_content_length(first_stream)
             if first_stream.status_code == 206:
-                start, end = _reconcile_cdn_offset(
+                start, end, complete_length = _reconcile_cdn_offset(
                     first_stream,
                     expected_offset=requested_start,
                 )
+                if requested_suffix is not None and complete_length is not None:
+                    expected_suffix_start = max(complete_length - requested_suffix, 0)
+                    if start != expected_suffix_start:
+                        raise UpstreamDisconnected(
+                            "CDN 206 response starts at "
+                            f"{start}, expected {expected_suffix_start}"
+                        )
+                if not is_partial:
+                    if complete_length is None or end != complete_length - 1:
+                        raise UpstreamDisconnected(
+                            "CDN 206 response does not contain the complete file"
+                        )
+                    cdn_content_length = complete_length
             else:
                 start = 0
                 end = requested_end
@@ -379,11 +412,17 @@ async def stream_wechat_channels(sph_code: str, request: Request):
                         else min(end, cdn_content_length - 1)
                     )
             if is_partial and first_stream.status_code == 200:
-                if cdn_content_length is None or end is None:
+                if requested_start != 0:
+                    raise UpstreamDisconnected("CDN ignored Range request")
+                if cdn_content_length is None and end is None:
                     raise UpstreamDisconnected(
                         "CDN 200 response missing Content-Length for Range request"
                     )
-                content_length = end - start + 1
+                content_length = (
+                    None
+                    if cdn_content_length is None
+                    else end - start + 1
+                )
             else:
                 content_length = cdn_content_length
         except UpstreamDisconnected as exc:
@@ -398,8 +437,11 @@ async def stream_wechat_channels(sph_code: str, request: Request):
             if first_stream.status_code == 206:
                 headers["Content-Range"] = first_stream.content_range.strip()
             else:
+                complete_length = (
+                    "*" if cdn_content_length is None else str(cdn_content_length)
+                )
                 headers["Content-Range"] = (
-                    f"bytes {start}-{end}/{cdn_content_length}"
+                    f"bytes {start}-{end}/{complete_length}"
                 )
         status_code = 206 if is_partial else 200
 

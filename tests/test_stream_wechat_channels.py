@@ -238,6 +238,173 @@ def test_range_matches_full_download_slice(client, _stream_harness, name, range_
         assert resp.headers["content-length"] == str(expected_end - start + 1)
 
 
+MATRIX_CLIENTS = {
+    "R0": (None, 0, None),
+    "R1": ("bytes=0-", 0, None),
+    "R2": ("bytes=200000-", 200000, None),
+    "R3": ("bytes=0-99999", 0, 99999),
+    "R4": ("bytes=200000-299999", 200000, 299999),
+    "R5": ("bytes=-100000", None, None),
+}
+
+
+MATRIX_RESPONSE_FORMS = ["C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8"]
+
+
+def _matrix_cdn_range(range_id: str, response_id: str) -> tuple[int, int] | None:
+    starts = {
+        "R0": 0,
+        "R1": 0,
+        "R2": 200000,
+        "R3": 0,
+        "R4": 200000,
+        "R5": FILE_SIZE - 100000,
+    }
+    if response_id == "C6":
+        return None
+    start = starts[range_id]
+    if response_id == "C5":
+        start += 1
+    if response_id == "C4":
+        end = {
+            "R0": FILE_SIZE - 2,
+            "R1": FILE_SIZE - 2,
+            "R2": FILE_SIZE - 2,
+            "R3": 99999,
+            "R4": 299999,
+            "R5": FILE_SIZE - 2,
+        }[range_id]
+    else:
+        end = FILE_SIZE - 1
+    return start, end
+
+
+def _matrix_expected(range_id: str, response_id: str) -> dict:
+    if response_id == "C7":
+        return {"status": 416, "content_length": None, "content_range": "bytes */600000"}
+    if response_id in {"C5", "C6", "C8"}:
+        return {"status": 502, "content_length": None, "content_range": None}
+    if response_id == "C4" and range_id == "R0":
+        return {"status": 502, "content_length": None, "content_range": None}
+    if response_id == "C2" and range_id in {"R1", "R2", "R4", "R5"}:
+        return {"status": 502, "content_length": None, "content_range": None}
+    if response_id == "C1" and range_id in {"R2", "R4", "R5"}:
+        return {"status": 502, "content_length": None, "content_range": None}
+    if response_id == "C2" and range_id == "R0":
+        return {"status": 200, "content_length": None, "content_range": None, "start": 0, "end": FILE_SIZE - 1}
+    if response_id == "C2" and range_id == "R3":
+        return {"status": 206, "content_length": None, "content_range": "bytes 0-99999/*", "start": 0, "end": 99999}
+    if response_id == "C1":
+        _, requested_start, requested_end = MATRIX_CLIENTS[range_id]
+        start = 0
+        end = FILE_SIZE - 1 if requested_end is None else min(requested_end, FILE_SIZE - 1)
+        return {
+            "status": 200 if range_id == "R0" else 206,
+            "content_length": FILE_SIZE if range_id == "R0" else end - start + 1,
+            "content_range": None if range_id == "R0" else f"bytes {start}-{end}/{FILE_SIZE}",
+            "start": start,
+            "end": end,
+        }
+    start, end = _matrix_cdn_range(range_id, response_id)
+    return {
+        "status": 200 if range_id == "R0" else 206,
+        "content_length": end - start + 1 if range_id != "R0" else FILE_SIZE,
+        "content_range": None if range_id == "R0" else f"bytes {start}-{end}/{FILE_SIZE}",
+        "start": start,
+        "end": end,
+    }
+
+
+@pytest.mark.parametrize(
+    "range_id, response_id",
+    [(range_id, response_id) for range_id in MATRIX_CLIENTS for response_id in MATRIX_RESPONSE_FORMS],
+    ids=[f"{range_id}x{response_id}" for range_id in MATRIX_CLIENTS for response_id in MATRIX_RESPONSE_FORMS],
+)
+def test_client_range_cdn_response_matrix(
+    client, _stream_harness, monkeypatch, range_id, response_id
+):
+    range_header = MATRIX_CLIENTS[range_id][0]
+    expected = _matrix_expected(range_id, response_id)
+    cipher = _cipher(KEY_A)
+
+    async def matrix_open(url: str, requested_range: str | None):
+        assert requested_range == range_header
+        if response_id == "C1":
+            cdn = FakeCdn(
+                cipher,
+                status_code=200,
+                content_length=str(FILE_SIZE),
+            )
+        elif response_id == "C2":
+            cdn = FakeCdn(cipher, status_code=200)
+        elif response_id in {"C3", "C4", "C5"}:
+            start, end = _matrix_cdn_range(range_id, response_id)
+            cdn = FakeCdn(
+                cipher[start : end + 1],
+                status_code=206,
+                content_range=f"bytes {start}-{end}/{FILE_SIZE}",
+                content_length=str(end - start + 1),
+            )
+        elif response_id == "C6":
+            cdn = FakeCdn(
+                b"malformed response must not be consumed",
+                status_code=206,
+                content_range="bytes malformed",
+            )
+        elif response_id == "C7":
+            cdn = FakeCdn(
+                b"416 response must not be consumed",
+                status_code=416,
+                content_range=f"bytes */{FILE_SIZE}",
+                content_length="0",
+            )
+        else:
+            cdn = FakeCdn(b"upstream error must not be consumed", status_code=500)
+        _stream_harness["opens"].append({"url": url, "range": requested_range, "stream": cdn})
+        return cdn
+
+    monkeypatch.setattr(stream_mod, "open_cdn_stream", matrix_open)
+    response = _get(client, range_header)
+
+    assert response.status_code == expected["status"]
+    if expected["status"] in {200, 206}:
+        assert response.headers["content-type"].startswith("video/mp4")
+        assert response.content == PLAIN[expected["start"] : expected["end"] + 1]
+        assert len(response.content) == expected["end"] - expected["start"] + 1
+        if expected["content_length"] is None:
+            assert "content-length" not in response.headers
+        else:
+            assert response.headers["content-length"] == str(expected["content_length"])
+        if expected["content_range"] is None:
+            assert "content-range" not in response.headers
+        else:
+            assert response.headers["content-range"] == expected["content_range"]
+    else:
+        assert response.headers["content-type"].startswith("application/json")
+        assert int(response.headers["content-length"]) == len(response.content)
+        if expected["content_range"] is None:
+            assert "content-range" not in response.headers
+        else:
+            assert response.headers["content-range"] == expected["content_range"]
+        assert _stream_harness["opens"][0]["stream"].aiter_calls == 0
+
+
+@pytest.mark.parametrize(
+    "range_header",
+    ["items=0-1", "bytes=0-1,2-3", "bytes=bad-1"],
+    ids=["non-bytes", "multiple", "malformed"],
+)
+def test_malformed_range_rejected_before_cdn_request(
+    client, _stream_harness, range_header
+):
+    response = _get(client, range_header)
+
+    assert response.status_code == 416
+    assert response.headers["content-type"].startswith("application/json")
+    assert int(response.headers["content-length"]) == len(response.content)
+    assert _stream_harness["opens"] == []
+
+
 @pytest.mark.parametrize(
     "range_header, expected_end",
     [("bytes=0-", FILE_SIZE - 1), ("bytes=0-131071", 131071)],
