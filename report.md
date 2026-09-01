@@ -1,135 +1,116 @@
-# 预响应取消资源释放修复报告
+# 微信视频号文档收尾与端到端验收
 
-## 1. 取消点枚举与处置
+Dispatch-Id：`dlg-20260901-125501-0dc5e2`（续 `dlg-20260901-123818-e4c7aa`，上一轮 SIGTERM / exit 143，零提交）
+Executor：cursor / cursor-grok-4.6-high
+Branch：`card/MediaResolverAPI-20260901-10`
+Base：`b6fa3b8703ef044b140acd187956bb22ffc80ecc`
 
-枚举方法：读取 `stream_wechat_channels` 从依赖解析到创建 `StreamingResponse` 的调用路径，并读取该路径上的本地辅助函数；把每个显式 `await` 和 `async with` 的隐式进入/退出等待都列为候选点。端点表的主范围止于 `StreamingResponse` 返回、响应头可以发送之前；响应体迭代属于 headers 之后，单独由现有 `_iter_decrypted` 的 `finally` 负责。按任务要求，`_open_cdn_stream_httpx` 内部的每个显式 `await` 也逐项列出。
+## 结论
 
-| await 点 | 位置 | 此处取消时配额是否释放 | 上游连接是否释放 | 处置 |
-| --- | --- | --- | --- | --- |
-| `async with self._lock_for_loop()` 的隐式进入/退出等待 | `StreamLimiter.slot`，`app/api/stream.py:121` | 是 | 否，尚未打开上游 | 获取、计数和释放位于同一个 `@asynccontextmanager` 的 `try...finally`；锁等待取消时尚未增加计数，增加后取消由外层 `finally` 释放 |
-| `async with stream_limiter.slot()` 的隐式进入/退出等待 | `_stream_slot`，`app/api/stream.py:276` | 是 | 否，尚未打开上游 | FastAPI 请求作用域的生成器依赖持有该 context manager，结构上覆盖端点调用和响应体生命周期；新增取消测试锁死 |
-| `await provider.fetch_wechat_channels_media(object_id)` | `_fetch_media`，`app/api/stream.py:272` | 是 | 否，尚未打开上游 | 外层请求作用域依赖的 `finally` 覆盖 TikHub 等待；`test_pre_response_cancel_during_media_releases_slot` |
-| `media = await _fetch_media(object_id)` | `stream_wechat_channels`，`app/api/stream.py:352` | 是 | 否，尚未打开上游 | 同上；取消异常是 `BaseException` 路径，不依赖 `except Exception` |
-| `response = await client.send(request, stream=True)` | `_open_cdn_stream_httpx`，`app/api/stream.py:90` | 是 | 是 | client 所有权在返回 `_HttpxCdnStream` 前由 `try...finally` 持有；发送取消时 `finally` 调用 `client.aclose()`；`test_pre_response_cancel_during_cdn_open_closes_client` |
-| `first_stream = await open_cdn_stream(media["full_url"], range_h)` | `stream_wechat_channels`，`app/api/stream.py:368` | 是 | 是（真实 opener） | 配额由请求依赖释放；打开阶段的部分资源由 `_open_cdn_stream_httpx` 自己的 `finally` 释放，端点只有在 await 成功返回后才获得 `first_stream` 所有权 |
-| `await client.aclose()` | `_open_cdn_stream_httpx` 的清理 `finally`，`app/api/stream.py:96` | 是 | 是 | 这是取消路径上的结构性清理点，不再由 `except Exception` 触发；未发生响应对象所有权转移时 client 必须关闭 |
-| `await first_stream.aclose()` | `stream_wechat_channels` 的预响应 `finally`，`app/api/stream.py:415` | 是 | 是 | 只要 opener 已返回流，端点在任何异常/取消/校验失败下都进入该 `finally`；配额由同一请求作用域依赖负责 |
-| `await self._response.aclose()` | `_HttpxCdnStream.aclose`，`app/api/stream.py:62` | 是 | 是 | 端点清理调用该方法；其内部另有 `finally` 保证 client 关闭 |
-| `await self._client.aclose()` | `_HttpxCdnStream.aclose` 的内部 `finally`，`app/api/stream.py:64` | 是 | 是 | response 关闭异常或取消时仍进入 client 清理结构；客户端断开测试继续锁死该行为 |
-| `await self.release()` | `StreamLimiter.slot` 的 `finally`，`app/api/stream.py:131` | 是 | 不适用 | 该点位于响应体结束或客户端断开后的请求作用域退出，不属于响应头前窗口；仍由获取同一个 slot 的 context manager 成对负责，已有并发/客户端断开测试覆盖 |
+文档已按卡面写入并先提交。HTTP 端到端对 `POST /api/resolve`、`GET /api/platforms`、抖音回归均通过。**流式 Range 路径实测与预期不符**：三次 `Range: bytes=0-131071` 均 HTTP 502，不是 206 / 131072 / `ftyp`。未改 `app/**`。
 
-账本结论：预响应取消发生在 TikHub 等待时，只有配额尚未归还；发生在 CDN 建连时，配额由请求依赖归还、client 由 opener 的 `finally` 关闭；发生在已返回流的预响应校验或异常路径时，端点 `finally` 关闭该流。所有“是”均有上述结构性理由或对应测试。
+## 文档落点
 
-## 2. 根因与实现
+- `README.md` 第 5 行：`risk-tier: internal`（简介下、代码块外，可 grep，与 `.github/workflows/gate.yml` 的 `tier: internal` 一致）
+- 平台表增加微信视频号 / 短链解析 ✅ / TikHub
+- 降级链说明增加 `wechat_channels` 单源单端点、链内不判终态
+- 新节 **「视频号的下载方式与它和其他平台的差别」**（平台表后、快速开始前）
+- `data.platform` 枚举、`video_url` / `view_count` 字段说明、`GET /api/platforms` 示例补 `"wechat_channels": ["tikhub"]`
+- 新接口节 **GET /api/stream/wechat_channels/{object_id}**（`/api/platforms` 之后）
+- `docs/generic-fallback-engine.md` 链配置总表与超时表各加一行（单端 25 / 总预算 30）
+- `CHANGELOG.md` `[Unreleased] Added` 一条
 
-根因是原端点把配额释放拆成响应体内部的 `finally` 和最外层 `except Exception` 两条路径。响应头发送前在 `_fetch_media` 或 `open_cdn_stream` 等待期间取消时，`asyncio.CancelledError` 不进入 `except Exception`，因此配额静默累积。原 `_open_cdn_stream_httpx` 也只在 `except Exception` 中关闭发送阶段的 client，取消会绕过关闭。
+`docs/generic-fallback-engine.md` 第 5 节 `URL_FALLBACK_PLATFORMS` 仍只写 kuaishou/instagram，代码已含 `wechat_channels`。本卡只要求补两张表，未改该节，交给主脑。
 
-实现：
+## 回归
 
-- 在现有 `StreamLimiter` 上增加标准 `@asynccontextmanager slot()`，获取和释放在同一个 `try...finally` 中。
-- 通过请求作用域的 FastAPI 生成器依赖 `_stream_slot` 持有 slot，覆盖端点预处理、响应头和响应体；429 仍在获取失败时返回原 JSON 语义。
-- 端点改为预响应 `finally` 关闭仍由端点持有的 `first_stream`，成功转交给响应体后由 `_iter_decrypted` 继续管理。
-- `_open_cdn_stream_httpx` 在返回流前用 `try...finally` 持有 client；成功构造并转交流后清空本地所有权，取消发送时关闭 client。
-- 未改解密、对账、Range、416、429 或服务端续传行为；未改允许范围外文件。
-
-## 3. 新增回归测试
-
-- `test_pre_response_cancel_during_media_releases_slot`：TikHub media 等待期间取消，断言请求结束后 `active == 0`。
-- `test_pre_response_cancel_during_cdn_open_closes_client`：CDN client 的 `send` 等待期间取消，断言 `active == 0` 且已发送请求的 fake client 已关闭。
-- `test_repeated_pre_response_cancels_do_not_exhaust_slots`：连续 `MAX_CONCURRENT_STREAMS + 1` 次预响应取消，随后正常请求返回 200 且正文完整，直接验证没有配额累积泄漏。
-
-## 4. 反向红验
-
-两次注入均在验证后恢复，未进入提交。
-
-### 只在 `except Exception` 中手工释放
-
-临时把 `app/api/stream.py:129` 的结构改为：
-
-```python
-except Exception:
-    if acquired:
-        await self.release()
 ```
-
-运行：
-
-```text
-FAILED tests/test_stream_wechat_channels.py::test_pre_response_cancel_during_media_releases_slot
-FAILED tests/test_stream_wechat_channels.py::test_pre_response_cancel_during_cdn_open_closes_client
-FAILED tests/test_stream_wechat_channels.py::test_repeated_pre_response_cancels_do_not_exhaust_slots
-3 failed, 31 deselected, 1 warning in 0.11s
-```
-
-三个测试均在 `assert stream_mod.stream_limiter.active == 0` 处失败，证明 `CancelledError` 绕过手工 `except Exception` 释放。
-
-### 完全移除释放
-
-临时把 `app/api/stream.py:131` 的释放改为：
-
-```python
-finally:
-    pass
-```
-
-运行：
-
-```text
-FAILED tests/test_stream_wechat_channels.py::test_pre_response_cancel_during_media_releases_slot
-FAILED tests/test_stream_wechat_channels.py::test_pre_response_cancel_during_cdn_open_closes_client
-FAILED tests/test_stream_wechat_channels.py::test_repeated_pre_response_cancels_do_not_exhaust_slots
-3 failed, 31 deselected, 1 warning in 0.11s
-```
-
-同样三个测试均在 `active == 0` 断言处失败，排除了“释放恰好由别处兜住”的假阳性。注入已恢复为：
-
-```python
-finally:
-    if acquired:
-        await self.release()
-```
-
-## 5. 验证
-
-```text
 /home/zlx/projects/work/MediaResolverAPI/.venv/bin/python -m pytest tests/ -q
-235 passed, 107 warnings in 2.44s
+235 passed, 107 warnings in 2.37s
 ```
 
-```text
-/home/zlx/projects/work/MediaResolverAPI/.venv/bin/python -m py_compile app/api/stream.py tests/test_stream_wechat_channels.py
-通过
+## 端到端实测
+
+服务：`/home/zlx/projects/work/MediaResolverAPI/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000`
+凭据：`.env` 单键 grep，`API_KEY` 长度 43、`TIKHUB_API_KEY` 长度 60。所有 `curl` 均 `-o` 文件。产物目录 `/tmp/wechat-e2e-dlg-20260901-125501-0dc5e2/`。
+
+### 1. POST /api/resolve（视频号）— 通过
+
+`curl -o resolve.json` body `{"url":"https://weixin.qq.com/sph/AOzokRxWHz","translate":false}`，HTTP 200。
+
+| 断言 | 实测 |
+|------|------|
+| success true | true |
+| platform `wechat_channels` | `wechat_channels` |
+| author_name 晓辉博士 | 晓辉博士 |
+| view_count null | null |
+| video_url 含 `/api/stream/wechat_channels/` | `http://127.0.0.1:8000/api/stream/wechat_channels/14998022876670594427` |
+
+其余：title「对谈张笑宇：AI重塑组织与生活方式」，like 42 / comment 8 / share 171 / collect 61，provider tikhub。日志：`sph` 短链无 object_id，走 by_url 链命中。
+
+### 2. GET Range bytes=0-131071 — **实测与预期不符**
+
+预期：HTTP 206、恰好 131072 字节、偏移 4..8 为 `ftyp`。
+实测三次（间隔 2s，每次内部 media 查找已 3 次 retry）：
+
+| 次 | HTTP | 字节 | detail（已打码） |
+|----|------|------|------------------|
+| 1 | 502 | 148 | `WechatChannels all endpoints failed for '[TOKEN]' [attempts=[{'endpoint': 'fetch_video_detail', 'decision': 'retryable'}]]` |
+| 2 | 502 | 148 | 同上 |
+| 3 | 502 | 148 | 同上 |
+
+服务日志每次两次 `wechat_channels media lookup retryable, retrying` 后 502。流式端点按 object_id 重查 TikHub，与 resolve 用 share_url 命中不是同一条取数路径。代码注释写明 object_id 查询会偶发微信错误包，重试 3 次仍失败。
+
+**上一轮 SIGTERM 前同一样本的额外证据**（未提交，但产物仍在 `/tmp/wechat-e2e-dlg-20260901-123818-e4c7aa/`）：media 查找一旦成功，Range 仍 502，detail 为 `CDN 206 response has complete length 435768323, expected 2450521066`。即 TikHub `file_size`（2450521066）与 CDN `Content-Range` 总长（435768323）对不上，`_reconcile_cdn_offset` 拒绝转发。本轮三次都卡在更早的 object_id 查找，没有再次打到这条。
+
+未改实现、未改文档去迁就。建议主脑拆卡：object_id 查找失败率、以及 file_size 与 CDN 完整长度不一致。此两条 **不是** issue #11（500 逃逸 / 重复构造 httpx）。
+
+### 3. 不带 Range 的 GET，取前约 2MB — 部分通过
+
+`curl -o full-prefix.mp4`，约 2MB 后 SIGTERM。HTTP 200，`Content-Type: video/mp4`，`Accept-Ranges: bytes`，**`Content-Length: 2450521066`**（与 TikHub file_size 相同）。落盘 3670016 字节。
+
+文件头 12 字节：`00 00 00 20 66 74 79 70 69 73 6f 6d`（isom，符合卡面备用断言）。
+本机有 ffprobe：2MB 前缀与 3.6MB 截断均 `Invalid data found when processing input`（moov 未完整落入前缀）。
+
+上一轮未及中断、CDN 实际发完的 435768323 字节文件（恰为上面 complete length）：
+
+```
+ffprobe rc=0 format=mov,mp4,m4a,3gp,3g2,mj2 duration=7352.213
+streams: h264 + aac
 ```
 
-取消/并发窄测连续 5 轮均为：
+解密转发本身能产出可识别 mp4。`Content-Length` 写成 2450521066 而 CDN 体约 415.6MiB，也属 **实测与预期不符**（文档写无 Range 返回完整文件；客户端会按错误长度等待）。
 
-```text
-5 passed, 29 deselected
+### 4. GET /api/platforms — 通过
+
+HTTP 200，含 `"wechat_channels": ["tikhub"]`。九个平台键齐全。
+
+### 5. 抖音回归 — 通过
+
+README 示例 `https://v.douyin.com/xxxxx/` 是占位符。改用 fixture 样本 `https://v.douyin.com/-Q8et5ToUhs/`。
+HTTP 200，success true，platform `douyin`，provider tikhub，author「程优秀🔆」，`video_url` 主机 `v5-dy-ov-experiment.zjcdn.com`，**不是**本服务 `/api/stream/`。
+
+## 文档自洽
+
+照 README 走了一遍：路径、字段名、鉴权头与实现一致。Range 的 206 契约是代码意图，实测未达标，文档仍按锁定决策写预期行为。
+
+## Git
+
+文档提交（先提交、后实测）：
+
 ```
-
-五轮均无失败。新增取消测试单轮为 `3 passed, 31 deselected`；流式文件全量为 `34 passed, 28 warnings`。
-
-## 6. Git
-
-实现与测试提交的实际输出：
-
-```text
 $ git log --oneline -1
-c9869a7 fix: release stream resources on cancellation
+a4d3f3b docs: document wechat_channels streaming and risk-tier
 
 $ git show --stat --format= HEAD
- app/api/stream.py                    |  99 +++++++++++++-----------
- tests/test_stream_wechat_channels.py | 142 +++++++++++++++++++++++++++++++++++
- 2 files changed, 196 insertions(+), 45 deletions(-)
+ CHANGELOG.md                    |  1 +
+ README.md                       | 68 ++++++++++++++++++++++++++++++++++++++---
+ docs/generic-fallback-engine.md |  3 ++
+ 3 files changed, 68 insertions(+), 4 deletions(-)
 ```
 
-实现提交已落在 delegate 分配的分支 `card/MediaResolverAPI-20260901-09`。报告文件随后独立入库，故上面的 Git 输出准确对应实现/测试提交。
+本 `report.md` 随后续提交入库。未跟踪 `.venv/`（软链到主仓 venv）未加入版本库。
 
-## 7. 状态
+## 状态
 
-DONE
-
-- Dispatch-Id：`dlg-20260901-121653-40ddcf`
-- Base commit：`6ddbe33a637421e98684582c64fbdc2bee989577`
-- 允许修改文件：`app/api/stream.py`、`tests/test_stream_wechat_channels.py`、`report.md`
-- 实际修改文件符合边界；未改其他平台代码。
+DONE（文档入库 + 实测留档）。Range 与 Content-Length 两条实测与预期不符，交主脑拆修复卡。
