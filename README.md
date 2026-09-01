@@ -273,13 +273,14 @@ curl http://localhost:8000/api/stream/wechat_channels/AOzokRxWHz \
 | `sph_code` | 路径 | ✅ | 视频号分享链接 `https://weixin.qq.com/sph/<sph_code>` 中的字母数字短码 |
 | `Range` | Header | - | 标准字节范围，如 `bytes=0-131071` 或 `bytes=0-`。省略则返回完整文件 |
 
-支持 `Range` 请求，可用于断点续传和播放器拖拽进度。客户端的 `Range` 会原样转发给 CDN，开放范围或超出文件末尾时的实际终点以 CDN 响应为准。响应带 `Accept-Ranges: bytes`。带 `Range` 时即使覆盖了整个文件也返回 206。
+支持 `Range` 请求，可用于断点续传和播放器拖拽进度。客户端的 `Range` 会原样转发给 CDN，开放范围或超出文件末尾时的实际终点以 CDN 响应为准。响应带 `Accept-Ranges: bytes`。带 `Range` 时即使覆盖了整个文件也返回 206。无 `Range` 时语义是完整文件：若 CDN 返回 206，必须从字节 0 到 `Content-Range` 声明的末尾完整覆盖文件，否则在响应头发出前返回 502；服务端不会自动续拉。
 
 #### 成功响应
 
 - `Content-Type: video/mp4`
 - 无 `Range`：HTTP 200，正文为完整解密后的 mp4
 - 有 `Range`：HTTP 206，带 `Content-Range: bytes start-end/total`
+- CDN 返回 200 且没有 `Content-Length` 时不声明该响应头并使用分块传输；`bytes=0-` 因无法构造完整 `Content-Range` 而返回 502。
 
 #### 失败响应 / HTTP 状态码
 
@@ -288,9 +289,9 @@ curl http://localhost:8000/api/stream/wechat_channels/AOzokRxWHz \
 | 200 | 完整文件（未带 `Range`） |
 | 206 | 部分内容（带 `Range`） |
 | 401 | API Key 无效或缺失 |
-| 416 | `Range` 格式错误；实际范围由 CDN 判定 |
+| 416 | `Range` 格式错误，或 CDN 返回 416；若 CDN 提供合法的 `Content-Range: bytes */L` 则透传 |
 | 429 | 并发流超过 `MAX_CONCURRENT_STREAMS`（默认 4），不会排队 |
-| 502 | 上游 TikHub / CDN 失败、解密密钥无效、或 CDN 未按 Range 返回 |
+| 502 | 上游 TikHub / CDN 失败、解密密钥无效、CDN 未按 Range 返回，或无 Range 收到不完整的 206 |
 
 ---
 
