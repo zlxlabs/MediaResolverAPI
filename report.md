@@ -515,7 +515,7 @@ R6 不与 CDN 轴组合：parse_byte_range 在出站请求前返回 416，三个
 | R2 × C8 | 502 | 29（JSON） | 不发送 | 29（JSON） |
 | R3 × C1 | 206 | 100000 | bytes 0-99999/600000 | 100000 |
 | R3 × C2 | 206 | 不发送 | bytes 0-99999/* | 100000 |
-| R3 × C3 | 206 | 600000 | bytes 0-599999/600000 | 600000 |
+| R3 × C3 | 206 | 100000 | bytes 0-99999/600000 | 100000 |
 | R3 × C4 | 206 | 100000 | bytes 0-99999/600000 | 100000 |
 | R3 × C5 | 502 | 53（JSON） | 不发送 | 53（JSON） |
 | R3 × C6 | 502 | 57（JSON） | 不发送 | 57（JSON） |
@@ -523,7 +523,7 @@ R6 不与 CDN 轴组合：parse_byte_range 在出站请求前返回 416，三个
 | R3 × C8 | 502 | 29（JSON） | 不发送 | 29（JSON） |
 | R4 × C1 | 502 | 38（JSON） | 不发送 | 38（JSON） |
 | R4 × C2 | 502 | 38（JSON） | 不发送 | 38（JSON） |
-| R4 × C3 | 206 | 400000 | bytes 200000-599999/600000 | 400000 |
+| R4 × C3 | 206 | 100000 | bytes 200000-299999/600000 | 100000 |
 | R4 × C4 | 206 | 100000 | bytes 200000-299999/600000 | 100000 |
 | R4 × C5 | 502 | 63（JSON） | 不发送 | 63（JSON） |
 | R4 × C6 | 502 | 57（JSON） | 不发送 | 57（JSON） |
@@ -656,4 +656,40 @@ $ git log --oneline -1
 $ git show --stat --format= HEAD
  tests/test_stream_wechat_channels.py | 1 +
  1 file changed, 1 insertion(+)
+~~~
+
+## 本次收口修复
+
+收口验收发现 R3 × C3 与 R4 × C3 的 CDN 206 终点超过客户端明确终点。app/api/stream.py 在 206 分支增加了单一终点收紧：仅当 requested_end 存在且 CDN declared_end 更大时取客户端终点；Content-Range 的 complete-length 仍使用 CDN 值，C4 的 CDN 短终点不变，绝对解密偏移不变。
+
+矩阵表已更新两格：
+
+| 格 | 修复前 | 修复后 |
+|---|---|---|
+| R3 × C3 | 206 / 600000 / bytes 0-599999/600000 / 600000 字节 | 206 / 100000 / bytes 0-99999/600000 / 100000 字节 |
+| R4 × C3 | 206 / 400000 / bytes 200000-599999/600000 / 400000 字节 | 206 / 100000 / bytes 200000-299999/600000 / 100000 字节 |
+
+红验：临时把 if requested_end is not None and end > requested_end: 改为 if False and requested_end is not None and end > requested_end:，sed 确认注入后，R3×C3 与 R4×C3 均失败；统计为 2 failed, 91 deselected。注入已恢复。
+
+最终验证：
+
+~~~
+/home/zlx/projects/work/MediaResolverAPI/.venv/bin/python -m pytest tests/test_stream_wechat_channels.py -q -k 'client_range_cdn_response_matrix'
+48 passed, 45 deselected, 49 warnings in 1.47s
+/home/zlx/projects/work/MediaResolverAPI/.venv/bin/python -m pytest tests/ -q
+298 passed, 166 warnings in 4.16s
+/home/zlx/projects/work/MediaResolverAPI/.venv/bin/python -m py_compile app/api/stream.py tests/test_stream_wechat_channels.py
+git diff --check
+~~~
+
+本次代码/测试提交：
+
+~~~
+$ git log --oneline -1
+6aafdd2 fix: clamp bounded cdn ranges to client end
+
+$ git show --stat --format= HEAD
+ app/api/stream.py                    | 14 +++++++++++++-
+ tests/test_stream_wechat_channels.py |  3 +++
+ 2 files changed, 16 insertions(+), 1 deletion(-)
 ~~~
