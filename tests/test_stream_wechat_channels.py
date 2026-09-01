@@ -1,7 +1,7 @@
 """WeChat Channels streaming decrypt endpoint — all network stubbed.
 
-Range × decrypt boundary (7), resume (2), retry cap, client disconnect,
-concurrency 429, memory bound, auth, TikHub 5xx JSON.
+Range × decrypt boundary (7), upstream failure, Content-Range reconciliation,
+client disconnect, concurrency 429, memory bound, auth, TikHub 5xx JSON.
 """
 
 from __future__ import annotations
@@ -97,11 +97,9 @@ class FakeCdn:
 def _stream_harness(monkeypatch):
     original_key = settings.API_KEY
     original_chunk = settings.STREAM_CHUNK_SIZE
-    original_retries = settings.STREAM_RESUME_MAX_RETRIES
     original_conc = settings.MAX_CONCURRENT_STREAMS
     settings.API_KEY = "test-key-123"
     settings.STREAM_CHUNK_SIZE = 65536
-    settings.STREAM_RESUME_MAX_RETRIES = 3
     settings.MAX_CONCURRENT_STREAMS = 4
     stream_mod.stream_limiter.reset()
 
@@ -158,7 +156,6 @@ def _stream_harness(monkeypatch):
     yield harness
     settings.API_KEY = original_key
     settings.STREAM_CHUNK_SIZE = original_chunk
-    settings.STREAM_RESUME_MAX_RETRIES = original_retries
     settings.MAX_CONCURRENT_STREAMS = original_conc
     stream_mod.stream_limiter.reset()
 
@@ -231,109 +228,29 @@ def test_tikhub_failure_returns_5xx_json(client, monkeypatch):
     assert resp.headers["content-type"].startswith("application/json")
 
 
-@pytest.mark.parametrize("cut", [50_000, 500_000])
-def test_resume_matches_oneshot_and_range_starts_at_forwarded(client, _stream_harness, cut):
-    _stream_harness["disconnect_abs"].append(cut)
-    _stream_harness["disconnect_abs"].append(None)
-    resp = _get(client)
-    assert resp.status_code == 200
-    assert resp.content == PLAIN
-    assert len(_stream_harness["opens"]) == 2
-    assert len(_stream_harness["media_calls"]) == 2
-    second = _stream_harness["opens"][1]["range"]
-    assert second is not None
-    assert second.startswith("bytes=")
-    start_s = second.removeprefix("bytes=").split("-", 1)[0]
-    assert int(start_s) == cut
-
-
-def test_resume_fetch_failure_retries_and_matches_oneshot(
-    client, _stream_harness, monkeypatch
+def test_upstream_disconnect_terminates_response_with_error(
+    client, _stream_harness
 ):
-    expected = _get(client).content
-    _stream_harness["opens"].clear()
-    _stream_harness["media_calls"].clear()
-    _stream_harness["disconnect_abs"].extend([50_000, None])
+    _stream_harness["disconnect_abs"].append(50_000)
+    errors: list[str] = []
+    with TestClient(app) as raising_client:
+        hid = loguru_logger.add(lambda m: errors.append(str(m)), level="ERROR")
+        try:
+            with pytest.raises(httpx.ReadError):
+                _get(raising_client)
+        finally:
+            loguru_logger.remove(hid)
 
-    real_fetch = stream_mod._fetch_media
-    fetch_calls = 0
-
-    async def fail_first_resume_fetch(object_id: str):
-        nonlocal fetch_calls
-        fetch_calls += 1
-        if fetch_calls == 2:
-            raise ProviderError("injected resume fetch failure")
-        return await real_fetch(object_id)
-
-    monkeypatch.setattr(stream_mod, "_fetch_media", fail_first_resume_fetch)
-    resp = _get(client)
-
-    assert resp.status_code == 200
-    assert resp.content == expected
-    assert fetch_calls == 3
-    assert len(_stream_harness["opens"]) == 2
+    assert len(_stream_harness["opens"]) == 1
+    assert _stream_harness["media_calls"] == [OBJECT_ID]
+    assert _stream_harness["opens"][0]["stream"].aclose_called is True
+    assert any("wechat stream upstream failed" in msg for msg in errors)
 
 
-def test_resume_non_206_failure_retries_and_matches_oneshot(
-    client, _stream_harness, monkeypatch
-):
-    expected = _get(client).content
-    _stream_harness["opens"].clear()
-    _stream_harness["media_calls"].clear()
-    _stream_harness["disconnect_abs"].extend([50_000, None])
-
-    real_open = stream_mod.open_cdn_stream
-    open_calls = 0
-
-    async def return_non_206_once(url: str, range_header: str | None):
-        nonlocal open_calls
-        open_calls += 1
-        response = await real_open(url, range_header)
-        if open_calls == 2:
-            response.status_code = 500
-        return response
-
-    monkeypatch.setattr(stream_mod, "open_cdn_stream", return_non_206_once)
-    resp = _get(client)
-
-    assert resp.status_code == 200
-    assert resp.content == expected
-    assert open_calls == 3
-
-
-def test_resume_ignored_range_failure_retries_and_matches_oneshot(
-    client, _stream_harness, monkeypatch
-):
-    expected = _get(client).content
-    _stream_harness["opens"].clear()
-    _stream_harness["media_calls"].clear()
-    _stream_harness["disconnect_abs"].extend([50_000, None])
-
-    real_open = stream_mod.open_cdn_stream
-    open_calls = 0
-
-    async def ignore_range_once(url: str, range_header: str | None):
-        nonlocal open_calls
-        open_calls += 1
-        response = await real_open(url, range_header)
-        if open_calls == 2:
-            response.payload = _cipher(KEY_B)
-            response.status_code = 200
-        return response
-
-    monkeypatch.setattr(stream_mod, "open_cdn_stream", ignore_range_once)
-    resp = _get(client)
-
-    assert resp.status_code == 200
-    assert resp.content == expected
-    assert open_calls == 3
-
-
-def test_initial_range_mismatch_retries_without_consuming_wrong_bytes(
+def test_initial_range_mismatch_fails_before_streaming(
     client, _stream_harness, monkeypatch
 ):
     range_header = "bytes=100-200"
-    expected = _slice_plain(range_header)
     real_open = stream_mod.open_cdn_stream
     open_calls = 0
 
@@ -349,17 +266,17 @@ def test_initial_range_mismatch_retries_without_consuming_wrong_bytes(
     monkeypatch.setattr(stream_mod, "open_cdn_stream", mismatch_once)
     resp = _get(client, range_header)
 
-    assert resp.status_code == 206
-    assert resp.content == expected
-    assert open_calls == 2
+    assert resp.status_code == 502
+    assert resp.headers["content-type"].startswith("application/json")
+    assert "detail" in resp.json()
+    assert open_calls == 1
     assert _stream_harness["opens"][0]["stream"].aiter_calls == 0
 
 
-def test_initial_range_missing_content_range_retries_without_consuming_bytes(
+def test_initial_range_missing_content_range_fails_before_streaming(
     client, _stream_harness, monkeypatch
 ):
     range_header = "bytes=100-200"
-    expected = _slice_plain(range_header)
     real_open = stream_mod.open_cdn_stream
     open_calls = 0
 
@@ -375,17 +292,17 @@ def test_initial_range_missing_content_range_retries_without_consuming_bytes(
     monkeypatch.setattr(stream_mod, "open_cdn_stream", missing_once)
     resp = _get(client, range_header)
 
-    assert resp.status_code == 206
-    assert resp.content == expected
-    assert open_calls == 2
+    assert resp.status_code == 502
+    assert resp.headers["content-type"].startswith("application/json")
+    assert "detail" in resp.json()
+    assert open_calls == 1
     assert _stream_harness["opens"][0]["stream"].aiter_calls == 0
 
 
-def test_initial_range_malformed_content_range_retries_without_consuming_bytes(
+def test_initial_range_malformed_content_range_fails_before_streaming(
     client, _stream_harness, monkeypatch
 ):
     range_header = "bytes=100-200"
-    expected = _slice_plain(range_header)
     real_open = stream_mod.open_cdn_stream
     open_calls = 0
 
@@ -401,91 +318,68 @@ def test_initial_range_malformed_content_range_retries_without_consuming_bytes(
     monkeypatch.setattr(stream_mod, "open_cdn_stream", malformed_once)
     resp = _get(client, range_header)
 
-    assert resp.status_code == 206
-    assert resp.content == expected
-    assert open_calls == 2
+    assert resp.status_code == 502
+    assert resp.headers["content-type"].startswith("application/json")
+    assert "detail" in resp.json()
+    assert open_calls == 1
     assert _stream_harness["opens"][0]["stream"].aiter_calls == 0
 
 
-def test_resume_range_mismatch_retries_without_consuming_wrong_bytes(
+def test_no_range_206_start_zero_reconciles_before_streaming(
     client, _stream_harness, monkeypatch
 ):
-    expected = _get(client).content
-    _stream_harness["opens"].clear()
-    _stream_harness["media_calls"].clear()
-    _stream_harness["disconnect_abs"].extend([50_000, None])
-
     real_open = stream_mod.open_cdn_stream
-    open_calls = 0
 
-    async def mismatch_resume_once(url: str, requested_range: str | None):
-        nonlocal open_calls
-        open_calls += 1
+    async def return_206(url: str, requested_range: str | None):
         response = await real_open(url, requested_range)
-        if open_calls == 2:
-            response.content_range = "bytes 50001-550000/600000"
-            response.payload = b"wrong resume bytes must not be consumed"
+        response.status_code = 206
+        response.content_range = f"bytes 0-{FILE_SIZE - 1}/{FILE_SIZE}"
         return response
 
-    monkeypatch.setattr(stream_mod, "open_cdn_stream", mismatch_resume_once)
-    resp = _get(client)
+    monkeypatch.setattr(stream_mod, "open_cdn_stream", return_206)
+    response = _get(client)
 
-    assert resp.status_code == 200
-    assert resp.content == expected
-    assert open_calls == 3
-    assert _stream_harness["opens"][1]["stream"].aiter_calls == 0
+    assert response.status_code == 200
+    assert response.content == PLAIN
 
 
-def test_resume_content_range_failures_exhaust_retry_cap(
+def test_no_range_206_nonzero_start_fails_before_streaming(
     client, _stream_harness, monkeypatch
 ):
-    settings.STREAM_RESUME_MAX_RETRIES = 3
-    _stream_harness["disconnect_abs"].extend([50_000, None, None, None])
     real_open = stream_mod.open_cdn_stream
 
-    async def always_mismatch(url: str, requested_range: str | None):
+    async def return_206(url: str, requested_range: str | None):
         response = await real_open(url, requested_range)
-        if requested_range is not None:
-            start, end, _ = stream_mod.parse_byte_range(requested_range, FILE_SIZE)
-            response.content_range = f"bytes {start + 1}-{end + 1}/{FILE_SIZE}"
+        response.status_code = 206
+        response.content_range = f"bytes 1-{FILE_SIZE}/{FILE_SIZE}"
         return response
 
-    monkeypatch.setattr(stream_mod, "open_cdn_stream", always_mismatch)
-    errors: list[str] = []
-    with TestClient(app) as raising_client:
-        hid = loguru_logger.add(lambda m: errors.append(str(m)), level="ERROR")
-        try:
-            with pytest.raises(stream_mod.UpstreamDisconnected):
-                _get(raising_client)
-        finally:
-            loguru_logger.remove(hid)
+    monkeypatch.setattr(stream_mod, "open_cdn_stream", return_206)
+    response = _get(client)
 
-    assert len(_stream_harness["opens"]) - 1 == settings.STREAM_RESUME_MAX_RETRIES
-    assert all(
-        entry["stream"].aiter_calls == 0
-        for entry in _stream_harness["opens"][1:]
-    )
-    assert any("resume exhausted" in msg for msg in errors)
+    assert response.status_code == 502
+    assert response.headers["content-type"].startswith("application/json")
+    assert "detail" in response.json()
+    assert _stream_harness["opens"][0]["stream"].aiter_calls == 0
 
 
-def test_resume_retry_cap_stops_exactly_at_limit(client, _stream_harness):
-    settings.STREAM_RESUME_MAX_RETRIES = 3
-    _stream_harness["disconnect_abs"].clear()
-    for i in range(8):
-        _stream_harness["disconnect_abs"].append(i + 1)
+def test_invalid_decode_key_returns_502_json_before_streaming(
+    client, _stream_harness, monkeypatch
+):
+    async def invalid_media(object_id: str) -> dict:
+        return {
+            "full_url": "https://cdn.test/v1",
+            "decode_key": "not-a-decimal-key",
+            "file_size": FILE_SIZE,
+        }
 
-    errors: list[str] = []
-    with TestClient(app) as raising_client:
-        hid = loguru_logger.add(lambda m: errors.append(str(m)), level="ERROR")
-        try:
-            with pytest.raises(httpx.ReadError):
-                _get(raising_client)
-        finally:
-            loguru_logger.remove(hid)
+    monkeypatch.setattr(stream_mod, "_fetch_media", invalid_media)
+    response = _get(client)
 
-    resume_opens = len(_stream_harness["opens"]) - 1
-    assert resume_opens == settings.STREAM_RESUME_MAX_RETRIES
-    assert any("resume exhausted" in msg for msg in errors)
+    assert response.status_code == 502
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json()["detail"] == "Invalid decode_key"
+    assert _stream_harness["opens"] == []
 
 
 @pytest.mark.asyncio
@@ -502,8 +396,6 @@ async def test_client_disconnect_acloses_upstream(_stream_harness):
         first_stream=cdn,
         start=0,
         end=FILE_SIZE - 1,
-        file_size=FILE_SIZE,
-        first_range_requested=False,
     )
     first = await agen.__anext__()
     assert len(first) > 0
