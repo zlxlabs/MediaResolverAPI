@@ -1,152 +1,135 @@
-# Content-Range 穷举式对账修复报告
+# 预响应取消资源释放修复报告
 
-## 1. Content-Range 对账维度枚举与处置
+## 1. 取消点枚举与处置
 
-枚举方法：先按 `Content-Range: bytes <first-byte-pos>-<last-byte-pos>/<complete-length>` 的三个位置量逐项展开；对 `first-byte-pos` 和 `last-byte-pos` 分别列出语法值域与端点关系；对 `complete-length` 分开列出数值、未知值 `*` 及其与已知文件大小的关系。然后把调用方已有的本地期望偏移、客户端请求的 Range 终点、已知 `file_size`，以及上游 `Content-Length` 与声明区间长度可组成的直接比较逐项列出。这样清单可从 schema 的字段和调用方已知量机械重生成，不依赖当前 finding 的示例。
+枚举方法：读取 `stream_wechat_channels` 从依赖解析到创建 `StreamingResponse` 的调用路径，并读取该路径上的本地辅助函数；把每个显式 `await` 和 `async with` 的隐式进入/退出等待都列为候选点。端点表的主范围止于 `StreamingResponse` 返回、响应头可以发送之前；响应体迭代属于 headers 之后，单独由现有 `_iter_decrypted` 的 `finally` 负责。按任务要求，`_open_cdn_stream_httpx` 内部的每个显式 `await` 也逐项列出。
 
-| 维度 | 与之比对的已知量 | 处置（校验/不校验） | 理由 | 锁死测试 |
+| await 点 | 位置 | 此处取消时配额是否释放 | 上游连接是否释放 | 处置 |
 | --- | --- | --- | --- | --- |
-| `first-byte-pos` 的 unit、分隔符和非负十进制语法 | Content-Range schema | 校验；缺失或畸形返回 502 JSON | 无法解析位置就无法安全对账；正则只接受 `bytes N-N/N` 或 `bytes N-N/*` | `test_initial_range_missing_content_range_fails_before_streaming`；`test_initial_range_malformed_content_range_fails_before_streaming` |
-| `last-byte-pos` 的非负十进制语法 | Content-Range schema | 校验 | 负数或非数字不是合法字节位置 | `test_initial_range_malformed_content_range_fails_before_streaming` |
-| `complete-length` 的十进制或 `*` 语法 | Content-Range schema | 校验 | 数值总长或未知总长是 schema 允许的两种形式 | `test_initial_range_malformed_content_range_fails_before_streaming`；`test_initial_range_wildcard_complete_length_is_allowed` |
-| `last-byte-pos >= first-byte-pos` | 同一 Content-Range 的两个位置量 | 校验；失败返回 502 JSON | 空区间不属于该 206 表示；这是既有实现，补测试锁死 | `test_initial_range_inverted_content_range_fails_before_streaming` |
-| `first-byte-pos == expected_offset` | 本地解析出的客户端 Range 起点 | 校验；失败返回 502 JSON | 防止上游从错误绝对偏移开始，已有对账不变量 | `test_initial_range_mismatch_fails_before_streaming`；`test_no_range_206_nonzero_start_fails_before_streaming` |
-| `last-byte-pos == expected_end` | 本地解析并发送给 CDN 的客户端 Range 终点 | 校验；失败返回 502 JSON | 起点正确但终点提前会造成响应头声明长度大于实际可读数据 | `test_initial_range_end_mismatch_fails_before_streaming` |
-| 数值 `complete-length == file_size` | 本地已知 `file_size` | 校验；失败返回 502 JSON | 上游声明的完整资源长度与本地媒体元数据矛盾 | `test_initial_range_complete_length_mismatch_fails_before_streaming` |
-| `complete-length == *` | 本地 `file_size` | 不校验 | `*` 按 HTTP 语义表示上游未提供该量；锁定决策要求未知量合法放行 | `test_initial_range_wildcard_complete_length_is_allowed` |
-| 数值 `complete-length > last-byte-pos` | 数值总长与声明终点 | 不单独校验；由既有约束推出 | `expected_end` 来自 `parse_byte_range`，始终 `<= file_size - 1`；同时数值 `complete-length == file_size`，因此该关系已被终点对账与总长对账共同推出；`*` 时总长不可判定 | 终点、总长的两个失败测试及 `RANGE_CASES` 正常矩阵共同锁定这条传递不变量 |
-| `last-byte-pos < file_size` | 本地已知 `file_size` | 不单独校验；由既有约束推出 | 与上行请求一致时，`expected_end` 已由 Range 解析裁剪到 `file_size - 1`，再由终点相等校验推出；不重复增加一条同义校验 | `test_initial_range_end_mismatch_fails_before_streaming`；全 Range 矩阵 |
-| 声明区间长度 `last - first + 1 == Content-Length`（上游提供时） | 上游 `Content-Length` | 校验；失败返回 502 JSON | 这是“起点和终点都对但只收到 1 字节”这一缺陷的直接闸门，且必须在响应头前完成 | `test_initial_range_content_length_mismatch_fails_before_streaming` |
-| 上游提供的 `Content-Length` 可解析为非负十进制 | `Content-Length` 字段语法 | 校验；失败返回 502 JSON | 非数值不能作为已知长度参与一致性判断，继续下发会把坏元数据带入响应 | `test_initial_range_invalid_content_length_fails_before_streaming` |
-| 上游未提供 `Content-Length` | `Content-Length` 缺失 | 不校验 | HTTP 流式传输可不提供该量；未知量不能被臆造，其他 Content-Range 维度仍照常校验 | `test_initial_range_missing_content_length_is_allowed` |
+| `async with self._lock_for_loop()` 的隐式进入/退出等待 | `StreamLimiter.slot`，`app/api/stream.py:121` | 是 | 否，尚未打开上游 | 获取、计数和释放位于同一个 `@asynccontextmanager` 的 `try...finally`；锁等待取消时尚未增加计数，增加后取消由外层 `finally` 释放 |
+| `async with stream_limiter.slot()` 的隐式进入/退出等待 | `_stream_slot`，`app/api/stream.py:276` | 是 | 否，尚未打开上游 | FastAPI 请求作用域的生成器依赖持有该 context manager，结构上覆盖端点调用和响应体生命周期；新增取消测试锁死 |
+| `await provider.fetch_wechat_channels_media(object_id)` | `_fetch_media`，`app/api/stream.py:272` | 是 | 否，尚未打开上游 | 外层请求作用域依赖的 `finally` 覆盖 TikHub 等待；`test_pre_response_cancel_during_media_releases_slot` |
+| `media = await _fetch_media(object_id)` | `stream_wechat_channels`，`app/api/stream.py:352` | 是 | 否，尚未打开上游 | 同上；取消异常是 `BaseException` 路径，不依赖 `except Exception` |
+| `response = await client.send(request, stream=True)` | `_open_cdn_stream_httpx`，`app/api/stream.py:90` | 是 | 是 | client 所有权在返回 `_HttpxCdnStream` 前由 `try...finally` 持有；发送取消时 `finally` 调用 `client.aclose()`；`test_pre_response_cancel_during_cdn_open_closes_client` |
+| `first_stream = await open_cdn_stream(media["full_url"], range_h)` | `stream_wechat_channels`，`app/api/stream.py:368` | 是 | 是（真实 opener） | 配额由请求依赖释放；打开阶段的部分资源由 `_open_cdn_stream_httpx` 自己的 `finally` 释放，端点只有在 await 成功返回后才获得 `first_stream` 所有权 |
+| `await client.aclose()` | `_open_cdn_stream_httpx` 的清理 `finally`，`app/api/stream.py:96` | 是 | 是 | 这是取消路径上的结构性清理点，不再由 `except Exception` 触发；未发生响应对象所有权转移时 client 必须关闭 |
+| `await first_stream.aclose()` | `stream_wechat_channels` 的预响应 `finally`，`app/api/stream.py:415` | 是 | 是 | 只要 opener 已返回流，端点在任何异常/取消/校验失败下都进入该 `finally`；配额由同一请求作用域依赖负责 |
+| `await self._response.aclose()` | `_HttpxCdnStream.aclose`，`app/api/stream.py:62` | 是 | 是 | 端点清理调用该方法；其内部另有 `finally` 保证 client 关闭 |
+| `await self._client.aclose()` | `_HttpxCdnStream.aclose` 的内部 `finally`，`app/api/stream.py:64` | 是 | 是 | response 关闭异常或取消时仍进入 client 清理结构；客户端断开测试继续锁死该行为 |
+| `await self.release()` | `StreamLimiter.slot` 的 `finally`，`app/api/stream.py:131` | 是 | 不适用 | 该点位于响应体结束或客户端断开后的请求作用域退出，不属于响应头前窗口；仍由获取同一个 slot 的 context manager 成对负责，已有并发/客户端断开测试覆盖 |
 
-所有“校验”行都在 `StreamingResponse` 构造之前执行；失败统一由既有 `UpstreamDisconnected` 转成既有风格的 502 JSON。没有恢复服务端续传，没有改 Range 首发解析、416、429、并发限制、解密算法或客户端断开清理分支。
+账本结论：预响应取消发生在 TikHub 等待时，只有配额尚未归还；发生在 CDN 建连时，配额由请求依赖归还、client 由 opener 的 `finally` 关闭；发生在已返回流的预响应校验或异常路径时，端点 `finally` 关闭该流。所有“是”均有上述结构性理由或对应测试。
 
 ## 2. 根因与实现
 
-根因是 `_reconcile_cdn_offset` 只接收并校验 `expected_offset`，只解析了 `start/end` 却没有消费 `complete-length`，也没有读取上游 `Content-Length`。调用方随后直接按本地 `end - start + 1` 构造响应头，因此上游短区间可能在响应头发出后才在流迭代中失败。
+根因是原端点把配额释放拆成响应体内部的 `finally` 和最外层 `except Exception` 两条路径。响应头发送前在 `_fetch_media` 或 `open_cdn_stream` 等待期间取消时，`asyncio.CancelledError` 不进入 `except Exception`，因此配额静默累积。原 `_open_cdn_stream_httpx` 也只在 `except Exception` 中关闭发送阶段的 client，取消会绕过关闭。
 
-本次改动：
+实现：
 
-- 在 `CdnResponse` 和 `_HttpxCdnStream` 中传递上游 `Content-Length`。
-- 在同一个 `_reconcile_cdn_offset` 函数内校验 `last-byte-pos`、数值总长和区间长度；`*` 与缺失的 `Content-Length` 明确按未知量处理。
-- 保留并补强 206 的缺失、畸形、倒置、起点不符场景，所有失败发生在响应头生成之前。
-- 新增 7 个测试；密文构造仍只使用 `generate_keystream` 直接异或，未改用 `xor_chunk`。
+- 在现有 `StreamLimiter` 上增加标准 `@asynccontextmanager slot()`，获取和释放在同一个 `try...finally` 中。
+- 通过请求作用域的 FastAPI 生成器依赖 `_stream_slot` 持有 slot，覆盖端点预处理、响应头和响应体；429 仍在获取失败时返回原 JSON 语义。
+- 端点改为预响应 `finally` 关闭仍由端点持有的 `first_stream`，成功转交给响应体后由 `_iter_decrypted` 继续管理。
+- `_open_cdn_stream_httpx` 在返回流前用 `try...finally` 持有 client；成功构造并转交流后清空本地所有权，取消发送时关闭 client。
+- 未改解密、对账、Range、416、429 或服务端续传行为；未改允许范围外文件。
 
-## 3. 逐维度红验
+## 3. 新增回归测试
 
-以下注入均是逐条进行，确认失败测试后立即恢复；下列 `if not True` / `if True` 仅为临时注入，不在最终代码中。
+- `test_pre_response_cancel_during_media_releases_slot`：TikHub media 等待期间取消，断言请求结束后 `active == 0`。
+- `test_pre_response_cancel_during_cdn_open_closes_client`：CDN client 的 `send` 等待期间取消，断言 `active == 0` 且已发送请求的 fake client 已关闭。
+- `test_repeated_pre_response_cancels_do_not_exhaust_slots`：连续 `MAX_CONCURRENT_STREAMS + 1` 次预响应取消，随后正常请求返回 200 且正文完整，直接验证没有配额累积泄漏。
 
-### 终点对账
+## 4. 反向红验
 
-注入行：
+两次注入均在验证后恢复，未进入提交。
 
-```python
-if not True:
-```
+### 只在 `except Exception` 中手工释放
 
-失败统计：
-
-```text
-FAILED tests/test_stream_wechat_channels.py::test_initial_range_end_mismatch_fails_before_streaming
-1 failed, 2 warnings in 0.11s
-```
-
-### 总长度对账
-
-注入行：
+临时把 `app/api/stream.py:129` 的结构改为：
 
 ```python
-if complete_length != "*" and not True:
+except Exception:
+    if acquired:
+        await self.release()
 ```
 
-失败统计：
+运行：
 
 ```text
-FAILED tests/test_stream_wechat_channels.py::test_initial_range_complete_length_mismatch_fails_before_streaming
-1 failed, 2 warnings in 0.11s
+FAILED tests/test_stream_wechat_channels.py::test_pre_response_cancel_during_media_releases_slot
+FAILED tests/test_stream_wechat_channels.py::test_pre_response_cancel_during_cdn_open_closes_client
+FAILED tests/test_stream_wechat_channels.py::test_repeated_pre_response_cancels_do_not_exhaust_slots
+3 failed, 31 deselected, 1 warning in 0.11s
 ```
 
-### 区间长度与 `Content-Length` 一致性
+三个测试均在 `assert stream_mod.stream_limiter.active == 0` 处失败，证明 `CancelledError` 绕过手工 `except Exception` 释放。
 
-注入行：
+### 完全移除释放
+
+临时把 `app/api/stream.py:131` 的释放改为：
 
 ```python
-if not True:
+finally:
+    pass
 ```
 
-失败统计：
+运行：
 
 ```text
-FAILED tests/test_stream_wechat_channels.py::test_initial_range_content_length_mismatch_fails_before_streaming
-1 failed, 2 warnings in 0.11s
+FAILED tests/test_stream_wechat_channels.py::test_pre_response_cancel_during_media_releases_slot
+FAILED tests/test_stream_wechat_channels.py::test_pre_response_cancel_during_cdn_open_closes_client
+FAILED tests/test_stream_wechat_channels.py::test_repeated_pre_response_cancels_do_not_exhaust_slots
+3 failed, 31 deselected, 1 warning in 0.11s
 ```
 
-### `Content-Length` 语法
-
-注入行：
+同样三个测试均在 `active == 0` 断言处失败，排除了“释放恰好由别处兜住”的假阳性。注入已恢复为：
 
 ```python
-if False:
+finally:
+    if acquired:
+        await self.release()
 ```
 
-失败统计：
-
-```text
-FAILED tests/test_stream_wechat_channels.py::test_initial_range_invalid_content_length_fails_before_streaming
-1 failed, 2 warnings in 0.13s
-```
-
-### 整体反向
-
-在状态码判断之后临时加入：
-
-```python
-if True:
-    raise UpstreamDisconnected("injected whole-reconciliation failure")
-```
-
-正常 Range 矩阵统计：
-
-```text
-FAILED tests/test_stream_wechat_channels.py::test_range_matches_full_download_slice[bytes_0_open]
-FAILED tests/test_stream_wechat_channels.py::test_range_matches_full_download_slice[bytes_encrypted_exact]
-FAILED tests/test_stream_wechat_channels.py::test_range_matches_full_download_slice[bytes_cross_boundary]
-FAILED tests/test_stream_wechat_channels.py::test_range_matches_full_download_slice[bytes_straddle]
-FAILED tests/test_stream_wechat_channels.py::test_range_matches_full_download_slice[bytes_plain_from_boundary]
-FAILED tests/test_stream_wechat_channels.py::test_range_matches_full_download_slice[bytes_plain_window]
-6 failed, 1 passed, 8 warnings in 0.28s
-```
-
-所有注入均已恢复；最终源文件没有恒真/恒假注入残留。
-
-## 4. 验证
+## 5. 验证
 
 ```text
 /home/zlx/projects/work/MediaResolverAPI/.venv/bin/python -m pytest tests/ -q
-232 passed, 107 warnings in 2.46s
+235 passed, 107 warnings in 2.44s
+```
 
+```text
 /home/zlx/projects/work/MediaResolverAPI/.venv/bin/python -m py_compile app/api/stream.py tests/test_stream_wechat_channels.py
 通过
 ```
 
-## 5. Git
+取消/并发窄测连续 5 轮均为：
 
-实现与测试提交的实际输出（报告随后单独入库，避免把报告自身的提交统计混入实现统计）：
+```text
+5 passed, 29 deselected
+```
+
+五轮均无失败。新增取消测试单轮为 `3 passed, 31 deselected`；流式文件全量为 `34 passed, 28 warnings`。
+
+## 6. Git
+
+实现与测试提交的实际输出：
 
 ```text
 $ git log --oneline -1
-7376a43 fix: reconcile complete CDN byte ranges
+c9869a7 fix: release stream resources on cancellation
 
 $ git show --stat --format= HEAD
- app/api/stream.py                    |  43 ++++++++++-
- tests/test_stream_wechat_channels.py | 138 ++++++++++++++++++++++++++++++++++-
- 2 files changed, 176 insertions(+), 5 deletions(-)
+ app/api/stream.py                    |  99 +++++++++++++-----------
+ tests/test_stream_wechat_channels.py | 142 +++++++++++++++++++++++++++++++++++
+ 2 files changed, 196 insertions(+), 45 deletions(-)
 ```
 
-## 6. 现场
+实现提交已落在 delegate 分配的分支 `card/MediaResolverAPI-20260901-09`。报告文件随后独立入库，故上面的 Git 输出准确对应实现/测试提交。
 
-- Dispatch-Id：`dlg-20260901-115526-91a845`
-- 分支：`card/MediaResolverAPI-20260901-08`
-- 基线：`c7238a4abb327224aef48b0ce5c6d05aabb7db83`
-- 允许修改范围内的实现与测试已提交；报告文件本次一并入库。
+## 7. 状态
+
+DONE
+
+- Dispatch-Id：`dlg-20260901-121653-40ddcf`
+- Base commit：`6ddbe33a637421e98684582c64fbdc2bee989577`
+- 允许修改文件：`app/api/stream.py`、`tests/test_stream_wechat_channels.py`、`report.md`
+- 实际修改文件符合边界；未改其他平台代码。
