@@ -2,6 +2,7 @@
 
 > 状态：已实现上线。六大平台（抖音 / 小红书 / 快手 / TikTok / Instagram / YouTube）
 > 的 TikHub 多级端点降级统一到一个配置驱动的引擎，每个平台只配置差异部分。
+> 微信视频号同样走该引擎，但是 TikHub 单源单端点。
 
 ## 1. 背景
 
@@ -70,6 +71,7 @@ TikHub 会不定期下线端点（已踩：Instagram 旧端点 404、小红书 `
 | TikTok | `app/v3/fetch_one_video → _v2 → _v3` | `aweme_id` | ❌（有 Cobalt 兜底） | Cobalt |
 | Instagram | `v2/fetch_post_info → v1/fetch_post_by_url` | `code_or_url` / `post_url`（均喂原始 url） | ❌（非视频/轮播≠不可用） | Cobalt |
 | YouTube | `web/get_video_info → web/get_video_info_v2` | `video_id` | ❌（有 Cobalt 兜底） | Cobalt |
+| 微信视频号 | `wechat_channels/v2/fetch_video_detail`（单端点 POST） | `object_id`（空则 `share_url`） | ❌（无终态异常类，链内不判终态） | 无（TikHub 单源） |
 
 ### 超时参数（秒）
 
@@ -79,6 +81,7 @@ TikHub 会不定期下线端点（已踩：Instagram 旧端点 404、小红书 `
 | 快手 / Instagram | 25 | 55 | 2 端点 |
 | TikTok | 18 | 60 | 3 端点（3×18<60，保证走完） |
 | YouTube | 25 | 55 | 2 端点 |
+| 微信视频号 | 25 | 30 | 单端点（1×25<30，保证能跑完） |
 
 ### 解析器自适应（schema differences）
 
