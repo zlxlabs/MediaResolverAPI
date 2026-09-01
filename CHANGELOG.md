@@ -8,6 +8,7 @@
 ## [Unreleased]
 
 ### Added
+- README 补齐下游接入文档：环境变量表（含 `PUBLIC_BASE_URL`）、视频号 `video_url` 必须带 `X-API-Key` 的差异说明，以及 Python / JavaScript / cURL 的视频号两步下载示例。
 - `LICENSE`（MIT），补齐开源所需许可证。
 - `CONTRIBUTING.md` 开发与贡献指南、`CHANGELOG.md` 变更日志。
 - README 新增「运维仪表盘 API」章节，文档化 `/api/dashboard/*` 接口与 `/dashboard/` Web 仪表盘。
