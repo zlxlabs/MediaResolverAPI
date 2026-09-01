@@ -110,3 +110,39 @@ class TestShortUrlDetection:
     )
     def test_short_url_detection(self, parser, url, expected):
         assert parser.is_short_url(url) == expected
+
+    def test_wechat_channels_sph_is_not_short_url(self, parser):
+        """视频号分享链由 TikHub 直接吃 share_url，不得进 SHORT_URL_DOMAINS。"""
+        assert parser.is_short_url("https://weixin.qq.com/sph/AOzokRxWHz") is False
+
+
+# 视频号：按路径识别，禁止把公众号域名误判进来
+class TestWechatChannelsIdentification:
+
+    def test_sph_share_url_returns_platform_without_video_id(self, parser):
+        platform, vid = parser.parse_url("https://weixin.qq.com/sph/AOzokRxWHz")
+        assert platform == "wechat_channels"
+        assert vid is None
+
+    def test_sph_share_url_www_subdomain(self, parser):
+        platform, vid = parser.parse_url("https://www.weixin.qq.com/sph/AOzokRxWHz")
+        assert platform == "wechat_channels"
+        assert vid is None
+
+    def test_identify_platform_sph(self, parser):
+        assert parser.identify_platform("https://weixin.qq.com/sph/AOzokRxWHz") == "wechat_channels"
+
+    def test_mp_weixin_is_not_wechat_channels(self, parser):
+        """公众号文章域名不得被识别成视频号。"""
+        url = "https://mp.weixin.qq.com/s/xxxx"
+        assert parser.identify_platform(url) is None
+        platform, vid = parser.parse_url(url)
+        assert platform is None
+        assert vid is None
+
+    def test_weixin_qq_without_sph_path_is_not_wechat_channels(self, parser):
+        url = "https://weixin.qq.com/s/xxxx"
+        assert parser.identify_platform(url) is None
+        platform, vid = parser.parse_url(url)
+        assert platform is None
+        assert vid is None
