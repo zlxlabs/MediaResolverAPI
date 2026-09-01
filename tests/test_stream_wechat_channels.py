@@ -238,6 +238,59 @@ def test_range_matches_full_download_slice(client, _stream_harness, name, range_
         assert resp.headers["content-length"] == str(expected_end - start + 1)
 
 
+@pytest.mark.parametrize(
+    "range_header, expected_end",
+    [("bytes=0-", FILE_SIZE - 1), ("bytes=0-131071", 131071)],
+    ids=["open-ended", "bounded"],
+)
+def test_range_start_zero_accepts_cdn_full_response(
+    client, _stream_harness, monkeypatch, range_header, expected_end
+):
+    real_open = stream_mod.open_cdn_stream
+
+    async def return_full_response(url: str, requested_range: str | None):
+        response = await real_open(url, requested_range)
+        response.status_code = 200
+        response.content_range = None
+        response.content_length = str(FILE_SIZE)
+        response.payload = _cipher(KEY_A)
+        return response
+
+    monkeypatch.setattr(stream_mod, "open_cdn_stream", return_full_response)
+    resp = _get(client, range_header)
+
+    expected = PLAIN[: expected_end + 1]
+    assert resp.status_code == 206
+    assert resp.content == expected
+    assert resp.headers["content-length"] == str(len(expected))
+    assert resp.headers["content-range"] == (
+        f"bytes 0-{expected_end}/{FILE_SIZE}"
+    )
+    assert _stream_harness["opens"][0]["range"] == range_header
+
+
+def test_range_nonzero_start_rejects_cdn_full_response(
+    client, _stream_harness, monkeypatch
+):
+    real_open = stream_mod.open_cdn_stream
+
+    async def return_full_response(url: str, requested_range: str | None):
+        response = await real_open(url, requested_range)
+        response.status_code = 200
+        response.content_range = None
+        response.content_length = str(FILE_SIZE)
+        response.payload = _cipher(KEY_A)
+        return response
+
+    monkeypatch.setattr(stream_mod, "open_cdn_stream", return_full_response)
+    resp = _get(client, "bytes=200000-")
+
+    assert resp.status_code == 502
+    assert resp.headers["content-type"].startswith("application/json")
+    assert "detail" in resp.json()
+    assert _stream_harness["opens"][0]["stream"].aiter_calls == 0
+
+
 def test_missing_api_key_401(client):
     resp = client.get(f"/api/stream/wechat_channels/{SPH_CODE}")
     assert resp.status_code == 401

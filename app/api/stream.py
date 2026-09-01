@@ -353,17 +353,17 @@ async def stream_wechat_channels(sph_code: str, request: Request):
             raise _json_http_error(502, "Invalid decode_key") from exc
 
         range_h = request.headers.get("range")
-        requested_start, _, is_partial = parse_byte_range(range_h)
+        requested_start, requested_end, is_partial = parse_byte_range(range_h)
         first_stream = await open_cdn_stream(
             media["full_url"], range_h if is_partial else None
         )
         if first_stream.status_code not in (200, 206):
             status = first_stream.status_code
             raise _json_http_error(502, f"CDN returned {status}")
-        if is_partial and first_stream.status_code == 200:
+        if is_partial and first_stream.status_code == 200 and requested_start != 0:
             raise _json_http_error(502, "CDN ignored Range request")
         try:
-            content_length = _cdn_content_length(first_stream)
+            cdn_content_length = _cdn_content_length(first_stream)
             if first_stream.status_code == 206:
                 start, end = _reconcile_cdn_offset(
                     first_stream,
@@ -371,7 +371,21 @@ async def stream_wechat_channels(sph_code: str, request: Request):
                 )
             else:
                 start = 0
-                end = None if content_length is None else content_length - 1
+                end = requested_end
+                if cdn_content_length is not None:
+                    end = (
+                        cdn_content_length - 1
+                        if end is None
+                        else min(end, cdn_content_length - 1)
+                    )
+            if is_partial and first_stream.status_code == 200:
+                if cdn_content_length is None or end is None:
+                    raise UpstreamDisconnected(
+                        "CDN 200 response missing Content-Length for Range request"
+                    )
+                content_length = end - start + 1
+            else:
+                content_length = cdn_content_length
         except UpstreamDisconnected as exc:
             raise _json_http_error(502, str(exc)) from exc
         headers = {
@@ -381,7 +395,12 @@ async def stream_wechat_channels(sph_code: str, request: Request):
         if content_length is not None:
             headers["Content-Length"] = str(content_length)
         if is_partial:
-            headers["Content-Range"] = first_stream.content_range.strip()
+            if first_stream.status_code == 206:
+                headers["Content-Range"] = first_stream.content_range.strip()
+            else:
+                headers["Content-Range"] = (
+                    f"bytes {start}-{end}/{cdn_content_length}"
+                )
         status_code = 206 if is_partial else 200
 
         opened = first_stream
