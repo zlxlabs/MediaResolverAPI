@@ -20,7 +20,7 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.main import app
 from app.services.providers.base import ProviderError
-from app.services.wechat_channels_crypto import KEYSTREAM_SIZE, xor_chunk
+from app.services.wechat_channels_crypto import KEYSTREAM_SIZE, generate_keystream
 
 OBJECT_ID = "14998022876670594427"
 FILE_SIZE = 600_000
@@ -33,7 +33,15 @@ AUTH = {"X-API-Key": "test-key-123"}
 
 
 def _cipher(key) -> bytes:
-    return xor_chunk(PLAIN, key, 0)
+    """Encrypt the leading 128KiB by indexing the keystream, never via xor_chunk.
+
+    xor_chunk is the unit under test on the decrypt path; using it here would
+    cancel an off-by-one in n_xor (ciphertext bit == plaintext bit).
+    generate_keystream is the sample-verified oracle.
+    """
+    ks = generate_keystream(key)
+    head = bytes(PLAIN[i] ^ ks[i] for i in range(KEYSTREAM_SIZE))
+    return head + PLAIN[KEYSTREAM_SIZE:]
 
 
 def _slice_plain(range_header: str | None) -> bytes:

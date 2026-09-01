@@ -47,12 +47,27 @@ def test_plaintext_region_is_identity():
 
 
 def test_boundary_crossing_chunk():
-    # 2 bytes of ciphertext + 2 bytes of plaintext, starting at 131070.
-    cipher_prefix = xor_chunk(b"\x00\x00", _KEY, KEYSTREAM_SIZE - 2)
+    # 2 ciphertext bytes + 2 plaintext bytes, starting at 131070.
+    # Ciphertext is indexed from the keystream, not via xor_chunk.
+    ks = generate_keystream(_KEY)
+    cipher_prefix = bytes(
+        (0x00 ^ ks[KEYSTREAM_SIZE - 2], 0x00 ^ ks[KEYSTREAM_SIZE - 1])
+    )
     mixed = cipher_prefix + b"\xab\xcd"
     out = xor_chunk(mixed, _KEY, KEYSTREAM_SIZE - 2)
     assert out[:2] == b"\x00\x00"
     assert out[2:] == b"\xab\xcd"
+
+
+def test_last_encrypted_byte_xored_literal():
+    """offset KEYSTREAM_SIZE-1 must XOR that one byte.
+
+    Literals exported from the correct implementation (not via xor_chunk):
+    generate_keystream(55516695)[131071] == 0xd5; 0x5a ^ 0xd5 == 0x8f.
+    """
+    cipher = bytes.fromhex("8f")
+    expected = bytes.fromhex("5a")
+    assert xor_chunk(cipher, _KEY, KEYSTREAM_SIZE - 1) == expected
 
 
 def test_empty_chunk_noop():
