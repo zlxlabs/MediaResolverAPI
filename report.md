@@ -669,7 +669,7 @@ $ git show --stat --format= HEAD
 | R3 × C3 | 206 / 600000 / bytes 0-599999/600000 / 600000 字节 | 206 / 100000 / bytes 0-99999/600000 / 100000 字节 |
 | R4 × C3 | 206 / 400000 / bytes 200000-599999/600000 / 400000 字节 | 206 / 100000 / bytes 200000-299999/600000 / 100000 字节 |
 
-红验：临时把 if requested_end is not None and end > requested_end: 改为 if False and requested_end is not None and end > requested_end:，sed 确认注入后，R3×C3 与 R4×C3 均失败；统计为 2 failed, 91 deselected。注入已恢复。
+红验：临时把 app/api/stream.py:394 的 if requested_end is not None and end > requested_end: 改为 if False and requested_end is not None and end > requested_end:，并用 sed 确认：`sed -n '394p' app/api/stream.py` 输出 `if False and requested_end is not None and end > requested_end:`。随后 R3×C3 与 R4×C3 均失败；统计为 2 failed, 91 deselected, 3 warnings。注入已恢复。
 
 最终验证：
 
