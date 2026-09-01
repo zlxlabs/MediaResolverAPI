@@ -114,3 +114,139 @@ $ git show --stat --format= HEAD
 ## 状态
 
 DONE（文档入库 + 实测留档）。Range 与 Content-Length 两条实测与预期不符，交主脑拆修复卡。
+---
+# 本卡执行报告：下载端点改用 sph 短码查询
+
+Dispatch-Id：`dlg-20260901-132447-fb24a8`
+Branch：`card/MediaResolverAPI-20260901-11`
+Base：`c8c9092`
+
+## 结论
+
+代码修复、单元测试和全量回归均通过。真实环境的三次 Range 端到端验收仍未通过，失败点已从原来的 object_id 查询转移到既有的 CDN 完整长度对账：TikHub 返回 `2450521066`，CDN 返回 `435768323`。按任务卡要求，已停止继续改动，没有修改断言、解密逻辑或对账逻辑。
+
+## 实现落点
+
+- `app/services/platforms/wechat_channels.py`
+  - 从 TikHub 响应的 `params.share_url` 严格识别 `https://weixin.qq.com/sph/<code>`。
+  - 仅接受 1–64 位字母数字短码；字段缺失或形态不符时记录 ERROR 并返回不可解析结果。
+  - `VideoInfo.video_id` 仍使用 `data.id` object_id；`video_url` 改为短码路径。
+- `app/services/providers/tikhub.py`
+  - 下载媒体查询由短码拼成 `https://weixin.qq.com/sph/<code>`。
+  - 对 TikHub 的逐字段请求断言为 `{"share_url": "...", "raw": False}`，不再发送 `object_id`。
+  - 每次请求仍现取当次 `full_url` 与 `decode_key`，没有新增跨请求状态。
+- `app/api/stream.py`
+  - 路由由 `/api/stream/wechat_channels/{object_id}` 改为 `/{sph_code}`。
+  - 外部路径输入白名单为 1–64 位字母数字；非法字符、超长和空路径均 4xx，媒体/CDN 请求均不发生。
+  - Range、Content-Range 对账、取消清理、429 和客户端断开逻辑未改。
+- `README.md`：仅同步视频号流式端点的短码路径、示例和参数说明。
+- 变更未触及禁止目录或其他平台实现。
+
+## 测试与编译
+
+基线定向回归：`64 passed, 39 warnings`。
+
+实现后的定向回归：
+
+```
+71 passed, 42 warnings in 1.05s
+```
+
+全量命令：
+
+```
+/home/zlx/projects/work/MediaResolverAPI/.venv/bin/python -m pytest tests/ -q
+```
+
+结果：
+
+```
+242 passed, 110 warnings in 2.19s
+```
+
+```
+/home/zlx/projects/work/MediaResolverAPI/.venv/bin/python -m py_compile app/api/stream.py app/api/resolve.py app/services/platforms/wechat_channels.py app/services/providers/tikhub.py
+```
+
+编译检查通过；`git diff --check` 通过。
+
+## 红验
+
+1. 短码校验红验：临时将 `app/api/stream.py` 的校验行改为 `_SPH_CODE_PATTERN = re.compile(r"^.*$")`。失败测试为：
+   - `test_invalid_sph_code_rejected_without_external_request[bad-code]`
+   - `test_invalid_sph_code_rejected_without_external_request[xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx]`
+
+   统计：`2 failed, 1 passed, 34 deselected, 4 warnings`。两项失败均实际放行到 200，并记录了媒体查询调用。随后已恢复白名单校验。
+
+2. TikHub 入参红验：临时将 `app/services/providers/tikhub.py` 的
+   `data = await self._fetch_wechat_channels("", share_url)`
+   改为 `data = await self._fetch_wechat_channels(sph_code, "")`。失败测试为：
+   - `test_download_media_uses_sph_share_url`
+   - `test_fetch_wechat_channels_media_reads_fixture_and_is_uncached`
+
+   统计：`2 failed, 2 passed, 63 deselected, 1 warning`；失败断言实际看到 `object_id: AOzokRxWHz` 而非 share_url。随后已恢复 share_url 调用。
+
+## 真实环境端到端
+
+服务按卡面命令启动：
+
+```
+/home/zlx/projects/work/MediaResolverAPI/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+API key 从 `.env` 单键读取，未打印值。服务已在验收后正常停止。
+
+视频号 `POST /api/resolve`：
+
+```
+resolve_http=200
+video_url=http://127.0.0.1:8000/api/stream/wechat_channels/AOzokRxWHz
+resolve_success=True platform=wechat_channels video_id=14998022876670594427
+resolve_video_url_shape=True
+```
+
+三次 Range 请求均失败：
+
+```
+range_1_http=502
+range_2_http=502
+range_3_http=502
+range-1.bin: bytes=80 ftyp=False
+range-2.bin: bytes=80 ftyp=False
+range-3.bin: bytes=80 ftyp=False
+```
+
+三次响应体前缀完全一致：
+
+```
+b'{"detail":"CDN 206 response has complete length 435768323, expected 2450521066"}'
+```
+
+因此本卡核心端到端判据为**实测未通过**；短码 URL 形态与 TikHub share_url 查询路径已验证，当前阻塞是卡面非目标的既有 CDN 长度不一致。
+
+抖音回归：
+
+```
+douyin_http=200
+douyin_success=True platform=douyin provider=tikhub
+```
+
+## 提交证据
+
+报告提交前最后一个代码/文档提交的实际输出：
+
+```
+$ git log --oneline -1
+1451f79 docs: document wechat stream short code
+
+$ git show --stat --format= HEAD
+ README.md                                     | 12 ++++++------
+ tests/test_tikhub_provider_wechat_channels.py |  2 +-
+ 2 files changed, 7 insertions(+), 7 deletions(-)
+```
+
+本卡实现分三次提交，依次为：
+
+- `25dd978 fix: derive wechat stream path from sph share code`
+- `8608070 fix: validate wechat stream share codes`
+- `1451f79 docs: document wechat stream short code`
