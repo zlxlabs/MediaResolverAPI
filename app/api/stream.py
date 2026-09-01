@@ -142,6 +142,8 @@ class StreamLimiter:
 
 stream_limiter = StreamLimiter()
 
+_SPH_CODE_PATTERN = re.compile(r"^[A-Za-z0-9]{1,64}$")
+
 
 def parse_byte_range(
     range_header: Optional[str], file_size: int
@@ -267,17 +269,17 @@ def _reconcile_cdn_offset(
             )
 
 
-async def _fetch_media(object_id: str) -> dict:
+async def _fetch_media(sph_code: str) -> dict:
     provider = TikHubProvider()
-    return await provider.fetch_wechat_channels_media(object_id)
+    return await provider.fetch_wechat_channels_media(sph_code)
 
 
-async def _stream_slot(object_id: str) -> AsyncIterator[None]:
+async def _stream_slot(sph_code: str) -> AsyncIterator[None]:
     async with stream_limiter.slot() as acquired:
         if not acquired:
             logger.warning(
-                "wechat stream 429 object_id={} active={}",
-                object_id,
+                "wechat stream 429 sph_code={} active={}",
+                sph_code,
                 stream_limiter.active,
             )
             raise _json_http_error(429, "Too many concurrent streams")
@@ -286,7 +288,7 @@ async def _stream_slot(object_id: str) -> AsyncIterator[None]:
 
 async def _iter_decrypted(
     *,
-    object_id: str,
+    sph_code: str,
     first_media: dict,
     first_stream: CdnResponse,
     start: int,
@@ -310,22 +312,22 @@ async def _iter_decrypted(
             raise UpstreamDisconnected("upstream closed before range complete")
     except asyncio.CancelledError:
         logger.warning(
-            "wechat stream cancelled by client object_id={} offset={}",
-            object_id,
+            "wechat stream cancelled by client sph_code={} offset={}",
+            sph_code,
             offset,
         )
         raise
     except GeneratorExit:
         logger.warning(
-            "wechat stream generator closed object_id={} offset={}",
-            object_id,
+            "wechat stream generator closed sph_code={} offset={}",
+            sph_code,
             offset,
         )
         raise
     except _UPSTREAM_FAIL as exc:
         logger.error(
-            "wechat stream upstream failed object_id={} offset={}: {}",
-            object_id,
+            "wechat stream upstream failed sph_code={} offset={}: {}",
+            sph_code,
             offset,
             exc,
         )
@@ -335,21 +337,23 @@ async def _iter_decrypted(
             await first_stream.aclose()
         except Exception as close_exc:
             logger.error(
-                "wechat stream failed to aclose upstream object_id={}: {}",
-                object_id,
+                "wechat stream failed to aclose upstream sph_code={}: {}",
+                sph_code,
                 close_exc,
             )
 
 
 @router.get(
-    "/stream/wechat_channels/{object_id}",
+    "/stream/wechat_channels/{sph_code}",
     dependencies=[Depends(_stream_slot)],
 )
-async def stream_wechat_channels(object_id: str, request: Request):
+async def stream_wechat_channels(sph_code: str, request: Request):
     first_stream: Optional[CdnResponse] = None
     try:
+        if _SPH_CODE_PATTERN.fullmatch(sph_code) is None:
+            raise _json_http_error(400, "Invalid WeChat Channels share code")
         try:
-            media = await _fetch_media(object_id)
+            media = await _fetch_media(sph_code)
         except VideoNotFoundError as exc:
             raise _json_http_error(502, str(exc)) from exc
         except ProviderError as exc:
@@ -396,7 +400,7 @@ async def stream_wechat_channels(object_id: str, request: Request):
 
         async def body() -> AsyncIterator[bytes]:
             async for chunk in _iter_decrypted(
-                object_id=object_id,
+                sph_code=sph_code,
                 first_media=media,
                 first_stream=opened,
                 start=start,

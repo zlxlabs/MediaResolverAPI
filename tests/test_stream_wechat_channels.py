@@ -22,7 +22,7 @@ from app.main import app
 from app.services.providers.base import ProviderError
 from app.services.wechat_channels_crypto import KEYSTREAM_SIZE, generate_keystream
 
-OBJECT_ID = "14998022876670594427"
+SPH_CODE = "AOzokRxWHz"
 FILE_SIZE = 600_000
 KEY_A = 55516695
 KEY_B = 12345678
@@ -111,8 +111,8 @@ def _stream_harness(monkeypatch):
     disconnect_abs: list[int | None] = []
     hold_event: dict[str, asyncio.Event | None] = {"e": None}
 
-    async def fake_fetch(object_id: str) -> dict:
-        media_calls.append(object_id)
+    async def fake_fetch(sph_code: str) -> dict:
+        media_calls.append(sph_code)
         idx = len(media_calls) - 1
         key = keys[idx] if idx < len(keys) else keys[-1]
         return {
@@ -174,11 +174,11 @@ def client(db):
     app.dependency_overrides.clear()
 
 
-def _get(client: TestClient, range_header: str | None = None, object_id: str = OBJECT_ID):
+def _get(client: TestClient, range_header: str | None = None, sph_code: str = SPH_CODE):
     headers = dict(AUTH)
     if range_header is not None:
         headers["Range"] = range_header
-    return client.get(f"/api/stream/wechat_channels/{object_id}", headers=headers)
+    return client.get(f"/api/stream/wechat_channels/{sph_code}", headers=headers)
 
 
 RANGE_CASES = [
@@ -205,22 +205,41 @@ def test_range_matches_full_download_slice(client, name, range_header):
 
 
 def test_missing_api_key_401(client):
-    resp = client.get(f"/api/stream/wechat_channels/{OBJECT_ID}")
+    resp = client.get(f"/api/stream/wechat_channels/{SPH_CODE}")
     assert resp.status_code == 401
     assert "application/json" in resp.headers.get("content-type", "")
 
 
 def test_wrong_api_key_401(client):
     resp = client.get(
-        f"/api/stream/wechat_channels/{OBJECT_ID}",
+        f"/api/stream/wechat_channels/{SPH_CODE}",
         headers={"X-API-Key": "wrong-key"},
     )
     assert resp.status_code == 401
     assert "application/json" in resp.headers.get("content-type", "")
 
 
+@pytest.mark.parametrize("invalid_sph_code", ["bad-code", "x" * 65])
+def test_invalid_sph_code_rejected_without_external_request(
+    client, _stream_harness, invalid_sph_code
+):
+    response = _get(client, sph_code=invalid_sph_code)
+
+    assert 400 <= response.status_code < 500
+    assert _stream_harness["media_calls"] == []
+    assert _stream_harness["opens"] == []
+
+
+def test_empty_sph_code_rejected_without_external_request(client, _stream_harness):
+    response = client.get("/api/stream/wechat_channels/", headers=AUTH)
+
+    assert 400 <= response.status_code < 500
+    assert _stream_harness["media_calls"] == []
+    assert _stream_harness["opens"] == []
+
+
 def test_tikhub_failure_returns_5xx_json(client, monkeypatch):
-    async def boom(object_id: str):
+    async def boom(sph_code: str):
         raise ProviderError("tikhub down")
 
     monkeypatch.setattr(stream_mod, "_fetch_media", boom)
@@ -245,7 +264,7 @@ def test_upstream_disconnect_terminates_response_with_error(
             loguru_logger.remove(hid)
 
     assert len(_stream_harness["opens"]) == 1
-    assert _stream_harness["media_calls"] == [OBJECT_ID]
+    assert _stream_harness["media_calls"] == [SPH_CODE]
     assert _stream_harness["opens"][0]["stream"].aclose_called is True
     assert any("wechat stream upstream failed" in msg for msg in errors)
 
@@ -502,7 +521,7 @@ def test_no_range_206_nonzero_start_fails_before_streaming(
 def test_invalid_decode_key_returns_502_json_before_streaming(
     client, _stream_harness, monkeypatch
 ):
-    async def invalid_media(object_id: str) -> dict:
+    async def invalid_media(sph_code: str) -> dict:
         return {
             "full_url": "https://cdn.test/v1",
             "decode_key": "not-a-decimal-key",
@@ -527,7 +546,7 @@ async def test_client_disconnect_acloses_upstream(_stream_harness):
     }
     cdn = FakeCdn(_cipher(KEY_A), status_code=200)
     agen = stream_mod._iter_decrypted(
-        object_id=OBJECT_ID,
+        sph_code=SPH_CODE,
         first_media=media,
         first_stream=cdn,
         start=0,
@@ -546,7 +565,7 @@ async def test_pre_response_cancel_during_media_releases_slot(db, _stream_harnes
     stream_mod.stream_limiter.reset()
     started = asyncio.Event()
 
-    async def blocked_fetch(object_id: str) -> dict:
+    async def blocked_fetch(sph_code: str) -> dict:
         started.set()
         await asyncio.Event().wait()
 
@@ -560,7 +579,7 @@ async def test_pre_response_cancel_during_media_releases_slot(db, _stream_harnes
     try:
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
             task = asyncio.create_task(
-                ac.get(f"/api/stream/wechat_channels/{OBJECT_ID}", headers=AUTH)
+                ac.get(f"/api/stream/wechat_channels/{SPH_CODE}", headers=AUTH)
             )
             await asyncio.wait_for(started.wait(), timeout=1)
             assert stream_mod.stream_limiter.active == 1
@@ -613,7 +632,7 @@ async def test_pre_response_cancel_during_cdn_open_closes_client(
     try:
         async with real_async_client(transport=transport, base_url="http://test") as ac:
             task = asyncio.create_task(
-                ac.get(f"/api/stream/wechat_channels/{OBJECT_ID}", headers=AUTH)
+                ac.get(f"/api/stream/wechat_channels/{SPH_CODE}", headers=AUTH)
             )
             await asyncio.wait_for(started.wait(), timeout=1)
             assert stream_mod.stream_limiter.active == 1
@@ -639,7 +658,7 @@ async def test_repeated_pre_response_cancels_do_not_exhaust_slots(
     started = asyncio.Event()
     calls = 0
 
-    async def cancel_then_return(object_id: str) -> dict:
+    async def cancel_then_return(sph_code: str) -> dict:
         nonlocal calls
         calls += 1
         if calls <= cancellations:
@@ -663,7 +682,7 @@ async def test_repeated_pre_response_cancels_do_not_exhaust_slots(
             for _ in range(cancellations):
                 started.clear()
                 task = asyncio.create_task(
-                    ac.get(f"/api/stream/wechat_channels/{OBJECT_ID}", headers=AUTH)
+                    ac.get(f"/api/stream/wechat_channels/{SPH_CODE}", headers=AUTH)
                 )
                 await asyncio.wait_for(started.wait(), timeout=1)
                 assert stream_mod.stream_limiter.active == 1
@@ -673,7 +692,7 @@ async def test_repeated_pre_response_cancels_do_not_exhaust_slots(
                 assert stream_mod.stream_limiter.active == 0
 
             response = await ac.get(
-                f"/api/stream/wechat_channels/{OBJECT_ID}", headers=AUTH
+                f"/api/stream/wechat_channels/{SPH_CODE}", headers=AUTH
             )
             assert response.status_code == 200
             assert response.content == PLAIN
@@ -699,7 +718,7 @@ async def test_concurrency_limit_429_and_release(db, _stream_harness):
 
             async def _download():
                 return await ac.get(
-                    f"/api/stream/wechat_channels/{OBJECT_ID}", headers=AUTH
+                    f"/api/stream/wechat_channels/{SPH_CODE}", headers=AUTH
                 )
 
             t1 = asyncio.create_task(_download())
@@ -710,7 +729,7 @@ async def test_concurrency_limit_429_and_release(db, _stream_harness):
                 await asyncio.sleep(0.01)
             assert stream_mod.stream_limiter.active == 2
             overflow = await ac.get(
-                f"/api/stream/wechat_channels/{OBJECT_ID}", headers=AUTH
+                f"/api/stream/wechat_channels/{SPH_CODE}", headers=AUTH
             )
             assert overflow.status_code == 429
             assert overflow.headers["content-type"].startswith("application/json")
@@ -721,7 +740,7 @@ async def test_concurrency_limit_429_and_release(db, _stream_harness):
             assert r1.content == PLAIN
             assert r2.content == PLAIN
             after = await ac.get(
-                f"/api/stream/wechat_channels/{OBJECT_ID}", headers=AUTH
+                f"/api/stream/wechat_channels/{SPH_CODE}", headers=AUTH
             )
             assert after.status_code == 200
             assert after.content == PLAIN
@@ -759,7 +778,7 @@ def test_memory_constant_no_full_body_read(client, monkeypatch, _stream_harness)
 def test_each_request_fetches_media_fresh(client, _stream_harness):
     _get(client)
     _get(client)
-    assert _stream_harness["media_calls"] == [OBJECT_ID, OBJECT_ID]
+    assert _stream_harness["media_calls"] == [SPH_CODE, SPH_CODE]
     assert len(_stream_harness["opens"]) == 2
     assert _stream_harness["opens"][0]["url"] != _stream_harness["opens"][1]["url"]
 
@@ -777,14 +796,14 @@ async def test_fetch_wechat_channels_media_reads_fixture_and_is_uncached(monkeyp
     calls: list[str] = []
 
     async def fake_chain(self, video_id, original_url):
-        calls.append(video_id)
+        calls.append((video_id, original_url))
         return payload
 
     monkeypatch.setattr(TikHubProvider, "_fetch_wechat_channels", fake_chain)
     provider = TikHubProvider()
-    a = await provider.fetch_wechat_channels_media(OBJECT_ID)
-    b = await provider.fetch_wechat_channels_media(OBJECT_ID)
-    assert calls == [OBJECT_ID, OBJECT_ID]
+    a = await provider.fetch_wechat_channels_media(SPH_CODE)
+    b = await provider.fetch_wechat_channels_media(SPH_CODE)
+    assert calls == [("", "https://weixin.qq.com/sph/AOzokRxWHz")] * 2
     assert a["full_url"] == "REDACTED"
     assert a["decode_key"] == "REDACTED"
     assert a["file_size"] == 2450521066
@@ -815,7 +834,7 @@ async def test_fetch_wechat_channels_media_retries_retryable_then_hits(monkeypat
 
     monkeypatch.setattr(TikHubProvider, "_fetch_wechat_channels", flaky)
     monkeypatch.setattr("app.services.providers.tikhub.asyncio.sleep", no_sleep)
-    out = await TikHubProvider().fetch_wechat_channels_media(OBJECT_ID)
+    out = await TikHubProvider().fetch_wechat_channels_media(SPH_CODE)
     assert n["i"] == 3
     assert out["file_size"] == 2450521066
 
@@ -837,5 +856,5 @@ async def test_fetch_wechat_channels_media_retry_exhausted_raises(monkeypatch):
     monkeypatch.setattr(TikHubProvider, "_fetch_wechat_channels", always_miss)
     monkeypatch.setattr("app.services.providers.tikhub.asyncio.sleep", no_sleep)
     with pytest.raises(VideoNotFoundError):
-        await TikHubProvider().fetch_wechat_channels_media(OBJECT_ID)
+        await TikHubProvider().fetch_wechat_channels_media(SPH_CODE)
     assert n["i"] == 3
