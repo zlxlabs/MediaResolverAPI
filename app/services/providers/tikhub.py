@@ -28,6 +28,7 @@ from ..platforms.kuaishou import KuaishouService
 from ..platforms.tiktok import TikTokService
 from ..platforms.instagram import InstagramService
 from ..platforms.youtube import YouTubeService
+from ..platforms.wechat_channels import WechatChannelsService
 
 
 class TikHubProvider(BaseProvider):
@@ -48,6 +49,7 @@ class TikHubProvider(BaseProvider):
     # 原 PLATFORM_ENDPOINTS/PLATFORM_PARAMS 已随通用 GET 路径删除（评审 Issue 3）。
     SUPPORTED_PLATFORMS = frozenset({
         "douyin", "tiktok", "kuaishou", "youtube", "xiaohongshu", "instagram",
+        "wechat_channels",
     })
 
     # 抖音终态 reason（私密/部分可见）—— 再降级也拿不到，立即短路
@@ -128,6 +130,17 @@ class TikHubProvider(BaseProvider):
     ]
     YOUTUBE_PER_ENDPOINT_TIMEOUT = 25
     YOUTUBE_TOTAL_BUDGET = 55.0
+
+    # 微信视频号：TikHub 单源、单端点 POST。classify 只出 ok/retryable（无终态异常类）。
+    WECHAT_CHANNELS_CHAIN: List[Tuple[str, str, str]] = [
+        (
+            "fetch_video_detail",
+            "/api/v1/wechat_channels/v2/fetch_video_detail",
+            "object_id",
+        ),
+    ]
+    WECHAT_CHANNELS_PER_ENDPOINT_TIMEOUT = 25
+    WECHAT_CHANNELS_TOTAL_BUDGET = 30.0
 
     @staticmethod
     def _classify_youtube(response: Dict) -> str:
@@ -337,7 +350,11 @@ class TikHubProvider(BaseProvider):
         if platform == "youtube":
             return await self._fetch_youtube(video_id, original_url)
 
-        # 全 6 平台均已走通用引擎多级降级链；到此说明 SUPPORTED_PLATFORMS 加了平台
+        # 微信视频号走单端点链（POST fetch_video_detail）
+        if platform == "wechat_channels":
+            return await self._fetch_wechat_channels(video_id, original_url)
+
+        # 全平台均已走通用引擎多级降级链；到此说明 SUPPORTED_PLATFORMS 加了平台
         # 却漏接 dispatch 分支 —— 显式报错而非静默返回 None（防隐藏路径）。
         raise ProviderError(f"No fallback chain wired for platform '{platform}'")
 
@@ -453,9 +470,14 @@ class TikHubProvider(BaseProvider):
         """
         url = f"{self.api_base}{path}"
         headers = {"Authorization": f"Bearer {self.api_key}"}
+        # 视频号 TikHub 端点是 POST JSON（raw 必须是 bool false）；其余平台保持 GET query。
+        use_post = path.startswith("/api/v1/wechat_channels/")
         try:
             async with HTTPClient(timeout=per_timeout, max_retries=0) as client:
-                response = await client.get(url, params=params, headers=headers)
+                if use_post:
+                    response = await client.post(url, json=params, headers=headers)
+                else:
+                    response = await client.get(url, params=params, headers=headers)
                 return response.json()
         except httpx.HTTPStatusError as e:
             resp = e.response
@@ -678,6 +700,52 @@ class TikHubProvider(BaseProvider):
     def _youtube_has_playable(self, data: Dict) -> bool:
         """用 YouTubeService（自适应 videos.items / streamingData）校验是否能解析出视频流。"""
         info = YouTubeService(self.api_key, self.api_base)._parse_response(data)
+        return bool(info and info.video_url)
+
+    @staticmethod
+    def _classify_wechat_channels(response: Dict) -> str:
+        """
+        视频号两态分类。单源单端点，不出终态（无 WechatChannelsTerminalError）。
+
+        Returns:
+            "retryable" : 定位不到可播放 data（空/非 dict/object_type != 0）
+            "ok"        : 有可播放 data 节点，交由解析器判定是否含 media
+        """
+        node = WechatChannelsService.extract_data(response)
+        return "ok" if node else "retryable"
+
+    async def _fetch_wechat_channels(self, video_id: str, original_url: str) -> Dict:
+        """
+        微信视频号单端点链（薄封装，骨架见 _run_chain）。
+
+        POST /api/v1/wechat_channels/v2/fetch_video_detail；
+        video_id 非空传 object_id，否则传 share_url=original_url；始终 raw: false。
+        """
+        chain = list(self.WECHAT_CHANNELS_CHAIN)
+
+        def build_params(_endpoint: Tuple) -> Dict:
+            params: Dict[str, object] = {"raw": False}
+            if video_id:
+                params["object_id"] = video_id
+            else:
+                params["share_url"] = original_url
+            return params
+
+        return await self._run_chain(
+            chain=chain,
+            build_params=build_params,
+            classify=self._classify_wechat_channels,
+            has_playable=self._wechat_channels_has_playable,
+            terminal_exc=TerminalError,  # 占位：classify 永不返回 terminal
+            total_budget=self.WECHAT_CHANNELS_TOTAL_BUDGET,
+            per_timeout=self.WECHAT_CHANNELS_PER_ENDPOINT_TIMEOUT,
+            target=video_id or original_url,
+            label="WechatChannels",
+        )
+
+    def _wechat_channels_has_playable(self, data: Dict) -> bool:
+        """用 WechatChannelsService._parse_response 校验，不另写一套判断。"""
+        info = WechatChannelsService(self.api_key, self.api_base)._parse_response(data)
         return bool(info and info.video_url)
 
     # 注：原 _validate_response / _save_failed_response（通用 GET 路径的响应校验与

@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     DEBUG: bool = False
     HOST: str = "0.0.0.0"
     PORT: int = 8000
+    # 对外公开基址。留空则 API 层用当前请求的 Host 推导；仅在反代未透传正确 Host 时才需要设置。
+    PUBLIC_BASE_URL: str = ""
 
     # Database
     DATABASE_URL: str = "sqlite:///./data/media_resolver.db"
@@ -95,6 +97,7 @@ class Settings(BaseSettings):
     PROVIDER_PRIORITY_FACEBOOK: str = ""
     PROVIDER_PRIORITY_DOUYIN: str = ""
     PROVIDER_PRIORITY_KUAISHOU: str = ""
+    PROVIDER_PRIORITY_WECHAT_CHANNELS: str = ""
 
     model_config = {
         "env_file": ".env",

@@ -80,8 +80,8 @@ class URLParser:
             logger.warning(f"无法提取域名: {url}")
             return None, None
 
-        # 识别平台
-        platform = self._identify_platform(domain)
+        # 识别平台（视频号按路径 /sph/ 判，不能只按 weixin.qq.com 域名）
+        platform = self.identify_platform(url)
         if not platform:
             logger.warning(f"不支持的平台域名: {domain}")
             return None, None
@@ -89,6 +89,11 @@ class URLParser:
         # 提取视频ID
         video_id = self._extract_video_id(url, platform)
         if not video_id:
+            # 视频号分享短链里的 sph 码不是 object_id，解析阶段拿不到真实 id 是预期的；
+            # 返回平台名让路由层走 URL_FALLBACK_PLATFORMS 用原始 url 兜底。
+            if platform == "wechat_channels":
+                logger.info(f"视频号分享链无 object_id，走 url 兜底: {url}")
+                return platform, None
             logger.warning(f"无法提取视频ID: {url}")
             return None, None
 
@@ -97,9 +102,10 @@ class URLParser:
 
     def identify_platform(self, url: str) -> Optional[str]:
         """
-        仅根据 URL 域名识别平台（不要求能提取出视频 ID）。
+        识别平台（不要求能提取出视频 ID）。
 
-        用于路由层在「无法提取 video_id」时判断是否为抖音，从而决定是否走 hybrid 兜底。
+        现有 8 个平台仍按域名匹配；视频号必须叠加路径前缀 /sph/，
+        因为 weixin.qq.com 同时承载公众号等其他业务。
 
         Args:
             url: 原始 URL
@@ -107,8 +113,20 @@ class URLParser:
         Returns:
             Optional[str]: 平台名称，无法识别返回 None
         """
+        if self._is_wechat_channels_url(url):
+            return "wechat_channels"
         domain = extract_domain(url)
         return self._identify_platform(domain) if domain else None
+
+    @staticmethod
+    def _is_wechat_channels_url(url: str) -> bool:
+        """weixin.qq.com（含子域）且路径前缀为 /sph/ 才是视频号。"""
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        if host != "weixin.qq.com" and not host.endswith(".weixin.qq.com"):
+            return False
+        path = parsed.path or ""
+        return path == "/sph" or path.startswith("/sph/")
 
     def is_short_url(self, url: str) -> bool:
         """

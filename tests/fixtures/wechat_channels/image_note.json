@@ -1,0 +1,26 @@
+{
+  "code": 200,
+  "data": {
+    "id": "14998022876670594427",
+    "object_type": 2,
+    "title": "图文笔记占位",
+    "description": "图文笔记占位",
+    "nickname": "晓辉博士",
+    "username": "v2_redacted_username",
+    "like_count": 0,
+    "fav_count": 0,
+    "forward_count": 0,
+    "comment_count": 0,
+    "read_count": 0,
+    "create_time": 1787903651,
+    "media": {
+      "duration": 0,
+      "width": 1080,
+      "height": 1080,
+      "url": "REDACTED",
+      "url_token": "REDACTED",
+      "full_url": "REDACTED",
+      "decode_key": "REDACTED"
+    }
+  }
+}
