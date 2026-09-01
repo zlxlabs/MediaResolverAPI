@@ -19,3 +19,6 @@ docker/push_to_ghcr.sh
 docker/push_to_ghcr.bat
 docker/push_to_dockerhub.sh
 docker/push_to_dockerhub.bat
+
+# 执行器工作报告（delegate 会在 ~/.local/state/delegate/<id>/report.md 留存副本）
+report.md
