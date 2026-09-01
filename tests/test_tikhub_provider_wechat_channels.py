@@ -20,6 +20,7 @@ from app.services.providers.tikhub import TikHubProvider
 FIXTURES = Path(__file__).parent / "fixtures" / "wechat_channels"
 
 OBJECT_ID = "14998022876670594427"
+SPH_CODE = "AOzokRxWHz"
 SHARE_URL = "https://weixin.qq.com/sph/AOzokRxWHz"
 
 
@@ -64,9 +65,10 @@ def test_parse_response_maps_sample_fields():
     assert info.height == 1920
     assert info.create_time is not None
     assert int(info.create_time.timestamp()) == 1787903651
-    expected_url = f"/api/stream/wechat_channels/{OBJECT_ID}"
+    expected_url = f"/api/stream/wechat_channels/{SPH_CODE}"
     assert info.video_url == expected_url
-    # 同一 object_id 两次解析必须得到完全相同的相对路径（缓存安全：不含 host）
+    assert info.video_id == OBJECT_ID
+    # 同一 share_url 两次解析必须得到完全相同的相对路径（缓存安全：不含 host）
     again = WechatChannelsService("k", "b")._parse_response(load("detail"))
     assert again is not None and again.video_url == info.video_url
     assert "://" not in info.video_url
@@ -260,6 +262,35 @@ async def test_build_params_with_share_url_only(monkeypatch):
     assert seen["fetch_video_detail"]["raw"] is False
 
 
+async def test_download_media_uses_sph_share_url(monkeypatch):
+    provider = TikHubProvider()
+    seen = {}
+
+    async def capture(self, name, path, params, per_timeout):
+        seen[name] = params
+        return load("detail")
+
+    monkeypatch.setattr(TikHubProvider, "_call_endpoint", capture)
+    media = await provider.fetch_wechat_channels_media(SPH_CODE)
+
+    assert media["file_size"] > 0
+    assert seen["fetch_video_detail"] == {"share_url": SHARE_URL, "raw": False}
+    assert "object_id" not in seen["fetch_video_detail"]
+
+
+@pytest.mark.parametrize(
+    "share_url",
+    [None, "https://example.com/sph/AOzokRxWHz", "https://weixin.qq.com/sph/a-b"],
+)
+def test_parse_response_rejects_missing_or_invalid_sph_share_url(share_url):
+    payload = load("detail")
+    if share_url is None:
+        payload["params"].pop("share_url")
+    else:
+        payload["params"]["share_url"] = share_url
+    assert WechatChannelsService("k", "b")._parse_response(payload) is None
+
+
 async def test_chain_total_budget_timeout(monkeypatch):
     provider = TikHubProvider()
     monkeypatch.setattr(TikHubProvider, "WECHAT_CHANNELS_TOTAL_BUDGET", 0.05)
@@ -302,7 +333,7 @@ async def test_resolve_fallback_without_video_id(authed_client, monkeypatch):
         info = VideoInfo(
             video_id=OBJECT_ID, platform="wechat_channels", title="t",
             description="中文描述", author_name="a", author_id="a",
-            video_url=f"http://localhost:8000/api/stream/wechat_channels/{OBJECT_ID}",
+            video_url=f"http://localhost:8000/api/stream/wechat_channels/{SPH_CODE}",
             width=912, height=1920, provider="tikhub", view_count=None,
         )
         return info, "tikhub"

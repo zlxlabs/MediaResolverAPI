@@ -22,8 +22,9 @@ from app.main import app
 from app.services.providers.base import ProviderError
 from app.services.wechat_channels_crypto import KEYSTREAM_SIZE, generate_keystream
 
-OBJECT_ID = "14998022876670594427"
+SPH_CODE = "AOzokRxWHz"
 FILE_SIZE = 600_000
+TIKHUB_FILE_SIZE = 2_450_521_066
 KEY_A = 55516695
 KEY_B = 12345678
 PLAIN = bytes.fromhex("000000206674797069736f6d") + bytes(
@@ -45,7 +46,10 @@ def _cipher(key) -> bytes:
 
 
 def _slice_plain(range_header: str | None) -> bytes:
-    start, end, _ = stream_mod.parse_byte_range(range_header, FILE_SIZE)
+    start, end, _ = stream_mod.parse_byte_range(range_header)
+    assert start is not None
+    if end is None:
+        end = FILE_SIZE - 1
     return PLAIN[start : end + 1]
 
 
@@ -111,14 +115,14 @@ def _stream_harness(monkeypatch):
     disconnect_abs: list[int | None] = []
     hold_event: dict[str, asyncio.Event | None] = {"e": None}
 
-    async def fake_fetch(object_id: str) -> dict:
-        media_calls.append(object_id)
+    async def fake_fetch(sph_code: str) -> dict:
+        media_calls.append(sph_code)
         idx = len(media_calls) - 1
         key = keys[idx] if idx < len(keys) else keys[-1]
         return {
             "full_url": f"https://cdn.test/v{len(media_calls)}",
             "decode_key": key,
-            "file_size": FILE_SIZE,
+            "file_size": TIKHUB_FILE_SIZE,
         }
 
     async def fake_open(url: str, range_header: str | None) -> FakeCdn:
@@ -126,7 +130,24 @@ def _stream_harness(monkeypatch):
         key = keys[nth - 1] if nth - 1 < len(keys) else keys[-1]
         cipher = _cipher(key)
         if range_header:
-            start, end, _ = stream_mod.parse_byte_range(range_header, FILE_SIZE)
+            requested_start, requested_end, _ = stream_mod.parse_byte_range(range_header)
+            if requested_start is None:
+                suffix = int(range_header.split("=", 1)[1].split("-", 1)[1])
+                start = max(FILE_SIZE - suffix, 0)
+            else:
+                start = requested_start
+            if start >= FILE_SIZE:
+                return FakeCdn(
+                    b"",
+                    status_code=416,
+                    content_range=f"bytes */{FILE_SIZE}",
+                    content_length="0",
+                )
+            end = (
+                FILE_SIZE - 1
+                if requested_end is None
+                else min(requested_end, FILE_SIZE - 1)
+            )
             status = 206
         else:
             start, end = 0, FILE_SIZE - 1
@@ -140,7 +161,7 @@ def _stream_harness(monkeypatch):
             content_range=(
                 f"bytes {start}-{end}/{FILE_SIZE}" if status == 206 else None
             ),
-            content_length=str(len(payload)) if status == 206 else None,
+            content_length=str(len(payload)),
             disconnect_after=rel,
             hold=hold_event["e"],
         )
@@ -174,11 +195,11 @@ def client(db):
     app.dependency_overrides.clear()
 
 
-def _get(client: TestClient, range_header: str | None = None, object_id: str = OBJECT_ID):
+def _get(client: TestClient, range_header: str | None = None, sph_code: str = SPH_CODE):
     headers = dict(AUTH)
     if range_header is not None:
         headers["Range"] = range_header
-    return client.get(f"/api/stream/wechat_channels/{object_id}", headers=headers)
+    return client.get(f"/api/stream/wechat_channels/{sph_code}", headers=headers)
 
 
 RANGE_CASES = [
@@ -189,11 +210,12 @@ RANGE_CASES = [
     ("bytes_straddle", "bytes=131071-131073"),
     ("bytes_plain_from_boundary", "bytes=131072-"),
     ("bytes_plain_window", "bytes=200000-300000"),
+    ("bytes_window_past_cdn_end", "bytes=200000-700000"),
 ]
 
 
 @pytest.mark.parametrize("name,range_header", RANGE_CASES, ids=[c[0] for c in RANGE_CASES])
-def test_range_matches_full_download_slice(client, name, range_header):
+def test_range_matches_full_download_slice(client, _stream_harness, name, range_header):
     expected = _slice_plain(range_header)
     resp = _get(client, range_header)
     assert resp.status_code in (200, 206)
@@ -202,25 +224,280 @@ def test_range_matches_full_download_slice(client, name, range_header):
     if range_header is None:
         assert resp.content[4:8] == b"ftyp"
         assert resp.status_code == 200
+        assert resp.headers["content-length"] == str(FILE_SIZE)
+        assert resp.headers["content-length"] != str(TIKHUB_FILE_SIZE)
+    else:
+        assert resp.status_code == 206
+        assert _stream_harness["opens"][0]["range"] == range_header
+        start, end, _ = stream_mod.parse_byte_range(range_header)
+        assert start is not None
+        expected_end = FILE_SIZE - 1 if end is None else min(end, FILE_SIZE - 1)
+        assert resp.headers["content-range"] == (
+            f"bytes {start}-{expected_end}/{FILE_SIZE}"
+        )
+        assert resp.headers["content-length"] == str(expected_end - start + 1)
+
+
+MATRIX_CLIENTS = {
+    "R0": (None, 0, None),
+    "R1": ("bytes=0-", 0, None),
+    "R2": ("bytes=200000-", 200000, None),
+    "R3": ("bytes=0-99999", 0, 99999),
+    "R4": ("bytes=200000-299999", 200000, 299999),
+    "R5": ("bytes=-100000", None, None),
+}
+
+
+MATRIX_RESPONSE_FORMS = ["C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8"]
+
+
+def _matrix_cdn_range(range_id: str, response_id: str) -> tuple[int, int] | None:
+    starts = {
+        "R0": 0,
+        "R1": 0,
+        "R2": 200000,
+        "R3": 0,
+        "R4": 200000,
+        "R5": FILE_SIZE - 100000,
+    }
+    if response_id == "C6":
+        return None
+    start = starts[range_id]
+    if response_id == "C5":
+        start += 1
+    if response_id == "C4":
+        end = {
+            "R0": FILE_SIZE - 2,
+            "R1": FILE_SIZE - 2,
+            "R2": FILE_SIZE - 2,
+            "R3": 99999,
+            "R4": 299999,
+            "R5": FILE_SIZE - 2,
+        }[range_id]
+    else:
+        end = FILE_SIZE - 1
+    return start, end
+
+
+def _matrix_expected(range_id: str, response_id: str) -> dict:
+    if response_id == "C7":
+        return {"status": 416, "content_length": None, "content_range": "bytes */600000"}
+    if response_id in {"C5", "C6", "C8"}:
+        return {"status": 502, "content_length": None, "content_range": None}
+    if response_id == "C4" and range_id == "R0":
+        return {"status": 502, "content_length": None, "content_range": None}
+    if response_id == "C2" and range_id == "R0":
+        return {"status": 502, "content_length": None, "content_range": None}
+    if response_id == "C2" and range_id in {"R1", "R2", "R4", "R5"}:
+        return {"status": 502, "content_length": None, "content_range": None}
+    if response_id == "C1" and range_id in {"R2", "R4", "R5"}:
+        return {"status": 502, "content_length": None, "content_range": None}
+    if response_id == "C2" and range_id == "R3":
+        return {"status": 206, "content_length": None, "content_range": "bytes 0-99999/*", "start": 0, "end": 99999}
+    if response_id == "C1":
+        _, requested_start, requested_end = MATRIX_CLIENTS[range_id]
+        start = 0
+        end = FILE_SIZE - 1 if requested_end is None else min(requested_end, FILE_SIZE - 1)
+        return {
+            "status": 200 if range_id == "R0" else 206,
+            "content_length": FILE_SIZE if range_id == "R0" else end - start + 1,
+            "content_range": None if range_id == "R0" else f"bytes {start}-{end}/{FILE_SIZE}",
+            "start": start,
+            "end": end,
+        }
+    start, end = _matrix_cdn_range(range_id, response_id)
+    requested_end = MATRIX_CLIENTS[range_id][2]
+    if requested_end is not None and end > requested_end:
+        end = requested_end
+    return {
+        "status": 200 if range_id == "R0" else 206,
+        "content_length": end - start + 1 if range_id != "R0" else FILE_SIZE,
+        "content_range": None if range_id == "R0" else f"bytes {start}-{end}/{FILE_SIZE}",
+        "start": start,
+        "end": end,
+    }
+
+
+@pytest.mark.parametrize(
+    "range_id, response_id",
+    [(range_id, response_id) for range_id in MATRIX_CLIENTS for response_id in MATRIX_RESPONSE_FORMS],
+    ids=[f"{range_id}x{response_id}" for range_id in MATRIX_CLIENTS for response_id in MATRIX_RESPONSE_FORMS],
+)
+def test_client_range_cdn_response_matrix(
+    client, _stream_harness, monkeypatch, range_id, response_id
+):
+    range_header = MATRIX_CLIENTS[range_id][0]
+    expected = _matrix_expected(range_id, response_id)
+    cipher = _cipher(KEY_A)
+
+    async def matrix_open(url: str, requested_range: str | None):
+        assert requested_range == range_header
+        if response_id == "C1":
+            cdn = FakeCdn(
+                cipher,
+                status_code=200,
+                content_length=str(FILE_SIZE),
+            )
+        elif response_id == "C2":
+            cdn = FakeCdn(cipher, status_code=200)
+        elif response_id in {"C3", "C4", "C5"}:
+            start, end = _matrix_cdn_range(range_id, response_id)
+            cdn = FakeCdn(
+                cipher[start : end + 1],
+                status_code=206,
+                content_range=f"bytes {start}-{end}/{FILE_SIZE}",
+                content_length=str(end - start + 1),
+            )
+        elif response_id == "C6":
+            cdn = FakeCdn(
+                b"malformed response must not be consumed",
+                status_code=206,
+                content_range="bytes malformed",
+            )
+        elif response_id == "C7":
+            cdn = FakeCdn(
+                b"416 response must not be consumed",
+                status_code=416,
+                content_range=f"bytes */{FILE_SIZE}",
+                content_length="0",
+            )
+        else:
+            cdn = FakeCdn(b"upstream error must not be consumed", status_code=500)
+        _stream_harness["opens"].append({"url": url, "range": requested_range, "stream": cdn})
+        return cdn
+
+    monkeypatch.setattr(stream_mod, "open_cdn_stream", matrix_open)
+    response = _get(client, range_header)
+
+    assert response.status_code == expected["status"]
+    if expected["status"] in {200, 206}:
+        assert response.headers["content-type"].startswith("video/mp4")
+        assert response.content == PLAIN[expected["start"] : expected["end"] + 1]
+        assert len(response.content) == expected["end"] - expected["start"] + 1
+        if expected["content_length"] is None:
+            assert "content-length" not in response.headers
+        else:
+            assert response.headers["content-length"] == str(expected["content_length"])
+        if expected["content_range"] is None:
+            assert "content-range" not in response.headers
+        else:
+            assert response.headers["content-range"] == expected["content_range"]
+    else:
+        assert response.headers["content-type"].startswith("application/json")
+        assert "detail" in response.json()
+        assert int(response.headers["content-length"]) == len(response.content)
+        if expected["content_range"] is None:
+            assert "content-range" not in response.headers
+        else:
+            assert response.headers["content-range"] == expected["content_range"]
+        assert _stream_harness["opens"][0]["stream"].aiter_calls == 0
+
+
+@pytest.mark.parametrize(
+    "range_header",
+    ["items=0-1", "bytes=0-1,2-3", "bytes=bad-1"],
+    ids=["non-bytes", "multiple", "malformed"],
+)
+def test_malformed_range_rejected_before_cdn_request(
+    client, _stream_harness, range_header
+):
+    response = _get(client, range_header)
+
+    assert response.status_code == 416
+    assert response.headers["content-type"].startswith("application/json")
+    assert int(response.headers["content-length"]) == len(response.content)
+    assert _stream_harness["opens"] == []
+
+
+@pytest.mark.parametrize(
+    "range_header, expected_end",
+    [("bytes=0-", FILE_SIZE - 1), ("bytes=0-131071", 131071)],
+    ids=["open-ended", "bounded"],
+)
+def test_range_start_zero_accepts_cdn_full_response(
+    client, _stream_harness, monkeypatch, range_header, expected_end
+):
+    real_open = stream_mod.open_cdn_stream
+
+    async def return_full_response(url: str, requested_range: str | None):
+        response = await real_open(url, requested_range)
+        response.status_code = 200
+        response.content_range = None
+        response.content_length = str(FILE_SIZE)
+        response.payload = _cipher(KEY_A)
+        return response
+
+    monkeypatch.setattr(stream_mod, "open_cdn_stream", return_full_response)
+    resp = _get(client, range_header)
+
+    expected = PLAIN[: expected_end + 1]
+    assert resp.status_code == 206
+    assert resp.content == expected
+    assert resp.headers["content-length"] == str(len(expected))
+    assert resp.headers["content-range"] == (
+        f"bytes 0-{expected_end}/{FILE_SIZE}"
+    )
+    assert _stream_harness["opens"][0]["range"] == range_header
+
+
+def test_range_nonzero_start_rejects_cdn_full_response(
+    client, _stream_harness, monkeypatch
+):
+    real_open = stream_mod.open_cdn_stream
+
+    async def return_full_response(url: str, requested_range: str | None):
+        response = await real_open(url, requested_range)
+        response.status_code = 200
+        response.content_range = None
+        response.content_length = str(FILE_SIZE)
+        response.payload = _cipher(KEY_A)
+        return response
+
+    monkeypatch.setattr(stream_mod, "open_cdn_stream", return_full_response)
+    resp = _get(client, "bytes=200000-")
+
+    assert resp.status_code == 502
+    assert resp.headers["content-type"].startswith("application/json")
+    assert "detail" in resp.json()
+    assert _stream_harness["opens"][0]["stream"].aiter_calls == 0
 
 
 def test_missing_api_key_401(client):
-    resp = client.get(f"/api/stream/wechat_channels/{OBJECT_ID}")
+    resp = client.get(f"/api/stream/wechat_channels/{SPH_CODE}")
     assert resp.status_code == 401
     assert "application/json" in resp.headers.get("content-type", "")
 
 
 def test_wrong_api_key_401(client):
     resp = client.get(
-        f"/api/stream/wechat_channels/{OBJECT_ID}",
+        f"/api/stream/wechat_channels/{SPH_CODE}",
         headers={"X-API-Key": "wrong-key"},
     )
     assert resp.status_code == 401
     assert "application/json" in resp.headers.get("content-type", "")
 
 
+@pytest.mark.parametrize("invalid_sph_code", ["bad-code", "x" * 65])
+def test_invalid_sph_code_rejected_without_external_request(
+    client, _stream_harness, invalid_sph_code
+):
+    response = _get(client, sph_code=invalid_sph_code)
+
+    assert 400 <= response.status_code < 500
+    assert _stream_harness["media_calls"] == []
+    assert _stream_harness["opens"] == []
+
+
+def test_empty_sph_code_rejected_without_external_request(client, _stream_harness):
+    response = client.get("/api/stream/wechat_channels/", headers=AUTH)
+
+    assert 400 <= response.status_code < 500
+    assert _stream_harness["media_calls"] == []
+    assert _stream_harness["opens"] == []
+
+
 def test_tikhub_failure_returns_5xx_json(client, monkeypatch):
-    async def boom(object_id: str):
+    async def boom(sph_code: str):
         raise ProviderError("tikhub down")
 
     monkeypatch.setattr(stream_mod, "_fetch_media", boom)
@@ -245,7 +522,7 @@ def test_upstream_disconnect_terminates_response_with_error(
             loguru_logger.remove(hid)
 
     assert len(_stream_harness["opens"]) == 1
-    assert _stream_harness["media_calls"] == [OBJECT_ID]
+    assert _stream_harness["media_calls"] == [SPH_CODE]
     assert _stream_harness["opens"][0]["stream"].aclose_called is True
     assert any("wechat stream upstream failed" in msg for msg in errors)
 
@@ -348,7 +625,7 @@ def test_initial_range_inverted_content_range_fails_before_streaming(
     assert _stream_harness["opens"][0]["stream"].aiter_calls == 0
 
 
-def test_initial_range_end_mismatch_fails_before_streaming(
+def test_initial_range_end_mismatch_uses_cdn_range(
     client, _stream_harness, monkeypatch
 ):
     real_open = stream_mod.open_cdn_stream
@@ -363,13 +640,13 @@ def test_initial_range_end_mismatch_fails_before_streaming(
     monkeypatch.setattr(stream_mod, "open_cdn_stream", return_short_range)
     response = _get(client, "bytes=100-200")
 
-    assert response.status_code == 502
-    assert response.headers["content-type"].startswith("application/json")
-    assert isinstance(response.json(), dict)
-    assert _stream_harness["opens"][0]["stream"].aiter_calls == 0
+    assert response.status_code == 206
+    assert response.headers["content-range"] == "bytes 100-199/600000"
+    assert response.headers["content-length"] == "100"
+    assert response.content == PLAIN[100:200]
 
 
-def test_initial_range_complete_length_mismatch_fails_before_streaming(
+def test_initial_range_complete_length_mismatch_is_allowed(
     client, _stream_harness, monkeypatch
 ):
     real_open = stream_mod.open_cdn_stream
@@ -382,10 +659,9 @@ def test_initial_range_complete_length_mismatch_fails_before_streaming(
     monkeypatch.setattr(stream_mod, "open_cdn_stream", return_wrong_total)
     response = _get(client, "bytes=100-200")
 
-    assert response.status_code == 502
-    assert response.headers["content-type"].startswith("application/json")
-    assert isinstance(response.json(), dict)
-    assert _stream_harness["opens"][0]["stream"].aiter_calls == 0
+    assert response.status_code == 206
+    assert response.headers["content-range"] == "bytes 100-200/600001"
+    assert response.content == _slice_plain("bytes=100-200")
 
 
 def test_initial_range_content_length_mismatch_fails_before_streaming(
@@ -441,6 +717,7 @@ def test_initial_range_missing_content_length_is_allowed(
     response = _get(client, "bytes=100-200")
 
     assert response.status_code == 206
+    assert "content-length" not in response.headers
     assert response.content == _slice_plain("bytes=100-200")
 
 
@@ -458,6 +735,7 @@ def test_initial_range_wildcard_complete_length_is_allowed(
     response = _get(client, "bytes=100-200")
 
     assert response.status_code == 206
+    assert response.headers["content-range"] == "bytes 100-200/*"
     assert response.content == _slice_plain("bytes=100-200")
 
 
@@ -477,6 +755,70 @@ def test_no_range_206_start_zero_reconciles_before_streaming(
 
     assert response.status_code == 200
     assert response.content == PLAIN
+
+
+def test_no_range_without_cdn_content_length_fails_before_streaming(
+    client, _stream_harness, monkeypatch
+):
+    real_open = stream_mod.open_cdn_stream
+
+    async def return_without_length(url: str, requested_range: str | None):
+        response = await real_open(url, requested_range)
+        response.content_length = None
+        return response
+
+    monkeypatch.setattr(stream_mod, "open_cdn_stream", return_without_length)
+    response = _get(client)
+
+    assert response.status_code == 502
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json()["detail"] == (
+        "CDN 200 response missing Content-Length for complete file"
+    )
+    assert _stream_harness["opens"][0]["stream"].aiter_calls == 0
+
+
+def test_bounded_range_accepts_cdn_full_response_without_content_length(
+    client, _stream_harness, monkeypatch
+):
+    real_open = stream_mod.open_cdn_stream
+
+    async def return_full_response(url: str, requested_range: str | None):
+        response = await real_open(url, requested_range)
+        response.status_code = 200
+        response.content_range = None
+        response.content_length = None
+        response.payload = _cipher(KEY_A)
+        return response
+
+    monkeypatch.setattr(stream_mod, "open_cdn_stream", return_full_response)
+    response = _get(client, "bytes=0-100")
+
+    assert response.status_code == 206
+    assert response.content == PLAIN[:101]
+    assert "content-length" not in response.headers
+    assert response.headers["content-range"] == "bytes 0-100/*"
+
+
+def test_bounded_range_cdn_full_response_early_end_raises(
+    client, _stream_harness, monkeypatch
+):
+    real_open = stream_mod.open_cdn_stream
+
+    async def return_early_response(url: str, requested_range: str | None):
+        response = await real_open(url, requested_range)
+        response.status_code = 200
+        response.content_range = None
+        response.content_length = None
+        response.payload = _cipher(KEY_A)[:50]
+        return response
+
+    monkeypatch.setattr(stream_mod, "open_cdn_stream", return_early_response)
+    with TestClient(app) as raising_client:
+        with pytest.raises(stream_mod.UpstreamDisconnected):
+            _get(raising_client, "bytes=0-100")
+
+    assert _stream_harness["opens"][0]["stream"].aclose_called is True
 
 
 def test_no_range_206_nonzero_start_fails_before_streaming(
@@ -502,7 +844,7 @@ def test_no_range_206_nonzero_start_fails_before_streaming(
 def test_invalid_decode_key_returns_502_json_before_streaming(
     client, _stream_harness, monkeypatch
 ):
-    async def invalid_media(object_id: str) -> dict:
+    async def invalid_media(sph_code: str) -> dict:
         return {
             "full_url": "https://cdn.test/v1",
             "decode_key": "not-a-decimal-key",
@@ -527,7 +869,7 @@ async def test_client_disconnect_acloses_upstream(_stream_harness):
     }
     cdn = FakeCdn(_cipher(KEY_A), status_code=200)
     agen = stream_mod._iter_decrypted(
-        object_id=OBJECT_ID,
+        sph_code=SPH_CODE,
         first_media=media,
         first_stream=cdn,
         start=0,
@@ -546,7 +888,7 @@ async def test_pre_response_cancel_during_media_releases_slot(db, _stream_harnes
     stream_mod.stream_limiter.reset()
     started = asyncio.Event()
 
-    async def blocked_fetch(object_id: str) -> dict:
+    async def blocked_fetch(sph_code: str) -> dict:
         started.set()
         await asyncio.Event().wait()
 
@@ -560,7 +902,7 @@ async def test_pre_response_cancel_during_media_releases_slot(db, _stream_harnes
     try:
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
             task = asyncio.create_task(
-                ac.get(f"/api/stream/wechat_channels/{OBJECT_ID}", headers=AUTH)
+                ac.get(f"/api/stream/wechat_channels/{SPH_CODE}", headers=AUTH)
             )
             await asyncio.wait_for(started.wait(), timeout=1)
             assert stream_mod.stream_limiter.active == 1
@@ -613,7 +955,7 @@ async def test_pre_response_cancel_during_cdn_open_closes_client(
     try:
         async with real_async_client(transport=transport, base_url="http://test") as ac:
             task = asyncio.create_task(
-                ac.get(f"/api/stream/wechat_channels/{OBJECT_ID}", headers=AUTH)
+                ac.get(f"/api/stream/wechat_channels/{SPH_CODE}", headers=AUTH)
             )
             await asyncio.wait_for(started.wait(), timeout=1)
             assert stream_mod.stream_limiter.active == 1
@@ -639,7 +981,7 @@ async def test_repeated_pre_response_cancels_do_not_exhaust_slots(
     started = asyncio.Event()
     calls = 0
 
-    async def cancel_then_return(object_id: str) -> dict:
+    async def cancel_then_return(sph_code: str) -> dict:
         nonlocal calls
         calls += 1
         if calls <= cancellations:
@@ -663,7 +1005,7 @@ async def test_repeated_pre_response_cancels_do_not_exhaust_slots(
             for _ in range(cancellations):
                 started.clear()
                 task = asyncio.create_task(
-                    ac.get(f"/api/stream/wechat_channels/{OBJECT_ID}", headers=AUTH)
+                    ac.get(f"/api/stream/wechat_channels/{SPH_CODE}", headers=AUTH)
                 )
                 await asyncio.wait_for(started.wait(), timeout=1)
                 assert stream_mod.stream_limiter.active == 1
@@ -673,7 +1015,7 @@ async def test_repeated_pre_response_cancels_do_not_exhaust_slots(
                 assert stream_mod.stream_limiter.active == 0
 
             response = await ac.get(
-                f"/api/stream/wechat_channels/{OBJECT_ID}", headers=AUTH
+                f"/api/stream/wechat_channels/{SPH_CODE}", headers=AUTH
             )
             assert response.status_code == 200
             assert response.content == PLAIN
@@ -699,7 +1041,7 @@ async def test_concurrency_limit_429_and_release(db, _stream_harness):
 
             async def _download():
                 return await ac.get(
-                    f"/api/stream/wechat_channels/{OBJECT_ID}", headers=AUTH
+                    f"/api/stream/wechat_channels/{SPH_CODE}", headers=AUTH
                 )
 
             t1 = asyncio.create_task(_download())
@@ -710,7 +1052,7 @@ async def test_concurrency_limit_429_and_release(db, _stream_harness):
                 await asyncio.sleep(0.01)
             assert stream_mod.stream_limiter.active == 2
             overflow = await ac.get(
-                f"/api/stream/wechat_channels/{OBJECT_ID}", headers=AUTH
+                f"/api/stream/wechat_channels/{SPH_CODE}", headers=AUTH
             )
             assert overflow.status_code == 429
             assert overflow.headers["content-type"].startswith("application/json")
@@ -721,7 +1063,7 @@ async def test_concurrency_limit_429_and_release(db, _stream_harness):
             assert r1.content == PLAIN
             assert r2.content == PLAIN
             after = await ac.get(
-                f"/api/stream/wechat_channels/{OBJECT_ID}", headers=AUTH
+                f"/api/stream/wechat_channels/{SPH_CODE}", headers=AUTH
             )
             assert after.status_code == 200
             assert after.content == PLAIN
@@ -759,7 +1101,7 @@ def test_memory_constant_no_full_body_read(client, monkeypatch, _stream_harness)
 def test_each_request_fetches_media_fresh(client, _stream_harness):
     _get(client)
     _get(client)
-    assert _stream_harness["media_calls"] == [OBJECT_ID, OBJECT_ID]
+    assert _stream_harness["media_calls"] == [SPH_CODE, SPH_CODE]
     assert len(_stream_harness["opens"]) == 2
     assert _stream_harness["opens"][0]["url"] != _stream_harness["opens"][1]["url"]
 
@@ -777,14 +1119,14 @@ async def test_fetch_wechat_channels_media_reads_fixture_and_is_uncached(monkeyp
     calls: list[str] = []
 
     async def fake_chain(self, video_id, original_url):
-        calls.append(video_id)
+        calls.append((video_id, original_url))
         return payload
 
     monkeypatch.setattr(TikHubProvider, "_fetch_wechat_channels", fake_chain)
     provider = TikHubProvider()
-    a = await provider.fetch_wechat_channels_media(OBJECT_ID)
-    b = await provider.fetch_wechat_channels_media(OBJECT_ID)
-    assert calls == [OBJECT_ID, OBJECT_ID]
+    a = await provider.fetch_wechat_channels_media(SPH_CODE)
+    b = await provider.fetch_wechat_channels_media(SPH_CODE)
+    assert calls == [("", "https://weixin.qq.com/sph/AOzokRxWHz")] * 2
     assert a["full_url"] == "REDACTED"
     assert a["decode_key"] == "REDACTED"
     assert a["file_size"] == 2450521066
@@ -815,7 +1157,7 @@ async def test_fetch_wechat_channels_media_retries_retryable_then_hits(monkeypat
 
     monkeypatch.setattr(TikHubProvider, "_fetch_wechat_channels", flaky)
     monkeypatch.setattr("app.services.providers.tikhub.asyncio.sleep", no_sleep)
-    out = await TikHubProvider().fetch_wechat_channels_media(OBJECT_ID)
+    out = await TikHubProvider().fetch_wechat_channels_media(SPH_CODE)
     assert n["i"] == 3
     assert out["file_size"] == 2450521066
 
@@ -837,5 +1179,5 @@ async def test_fetch_wechat_channels_media_retry_exhausted_raises(monkeypatch):
     monkeypatch.setattr(TikHubProvider, "_fetch_wechat_channels", always_miss)
     monkeypatch.setattr("app.services.providers.tikhub.asyncio.sleep", no_sleep)
     with pytest.raises(VideoNotFoundError):
-        await TikHubProvider().fetch_wechat_channels_media(OBJECT_ID)
+        await TikHubProvider().fetch_wechat_channels_media(SPH_CODE)
     assert n["i"] == 3

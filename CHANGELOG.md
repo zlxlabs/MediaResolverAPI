@@ -12,6 +12,7 @@
 - `CONTRIBUTING.md` 开发与贡献指南、`CHANGELOG.md` 变更日志。
 - README 新增「运维仪表盘 API」章节，文档化 `/api/dashboard/*` 接口与 `/dashboard/` Web 仪表盘。
 - Dockerfile 增加 `HEALTHCHECK` 健康探针与非 root 运行用户（uid 10001）。
+- 微信视频号（`wechat_channels`）：平台表、降级链说明、流式解密下载端点，以及仓级 `risk-tier: internal` 声明。
 
 ### Changed
 - CORS `allow_credentials` 改为 `False`，修正与 `allow_origins=["*"]` 的无效组合；README 新增「跨域访问（CORS）」接入说明。

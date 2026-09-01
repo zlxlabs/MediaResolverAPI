@@ -2,6 +2,8 @@
 
 社交媒体视频链接解析服务 —— 输入一个社交媒体视频 URL，返回无水印直链及视频元数据。
 
+risk-tier: internal
+
 ## 支持平台
 
 | 平台 | 短链解析 | 数据源 |
@@ -14,6 +16,7 @@
 | Instagram | ✅ | TikHub（多级端点降级）→ Cobalt |
 | Pinterest | ✅ | Cobalt |
 | Facebook | ✅ | Cobalt |
+| 微信视频号 (WeChat Channels) | ✅ | TikHub |
 
 > 含多个数据源的平台会按优先级依次尝试，前者失败自动降级到后者。
 >
@@ -25,6 +28,19 @@
 > - **TikTok**：`app/v3/fetch_one_video → _v2 → _v3`（同 `data.aweme_detail` schema）。有 Cobalt 兜底，故链内不判终态（误判会跳过 Cobalt），链走完落 Cobalt。
 > - **Instagram**：`v2/fetch_post_info（code_or_url）→ v1/fetch_post_by_url（post_url）`；非视频/轮播不判终态（子节点可能含视频），落 Cobalt。ID 提取失败时由路由层放行原始 url 兜底。
 > - **YouTube**：`web/get_video_info（预解析直链）→ web/get_video_info_v2（streamingData 合流）`；解析器自适应两套 schema。有 Cobalt 兜底。
+> - **微信视频号**：TikHub 单源单端点（`wechat_channels/v2/fetch_video_detail`），无 Cobalt 兜底，故链内不判终态。平台标识是 `wechat_channels`（不是 `wechat`）。
+
+---
+
+## 视频号的下载方式与它和其他平台的差别
+
+其他平台的 `video_url` 是第三方 CDN 直链，客户端自己去拉。视频号不是这样。
+
+1. **源站 mp4 是加密的。** `POST /api/resolve` 返回的 `video_url` 指向**本服务**的流式端点 `/api/stream/wechat_channels/{sph_code}`，而不是第三方 CDN。服务端边下边解密再转发，客户端拿到的是可直接播放的标准 mp4，**不需要客户端做任何解密**。
+2. **下载流量经过本服务。** 并发下载数受环境变量 `MAX_CONCURRENT_STREAMS` 限制（默认 4），超限返回 `429 Too many concurrent streams`。部署在反向代理后面时，需要确认代理对长连接、大响应体的超时与缓冲设置（流式转发，响应体可达完整视频大小）。
+3. **播放量拿不到。** `view_count` 恒为 `null`（TikHub 的 `read_count` 恒为 0，不是真实播放量），不要把它理解成「偶尔缺失」。其余统计数据（点赞 / 收藏 / 转发 / 评论）齐全。
+
+流式端点的路径、鉴权、Range 与状态码见下文 [GET /api/stream/wechat_channels/{sph_code}](#get-apistreamwechat_channelssph_code)。
 
 ---
 
@@ -159,19 +175,19 @@ curl -X POST http://localhost:8000/api/resolve \
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `success` | bool | 是否解析成功 |
-| `data.platform` | string | 平台标识：`douyin` `tiktok` `kuaishou` `youtube` `xiaohongshu` `instagram` `pinterest` `facebook` |
+| `data.platform` | string | 平台标识：`douyin` `tiktok` `kuaishou` `youtube` `xiaohongshu` `instagram` `pinterest` `facebook` `wechat_channels` |
 | `data.video_id` | string | 平台视频 ID |
 | `data.title` | string | 视频标题 |
 | `data.description` | string | 视频描述原文 |
 | `data.translated_description` | string \| null | 翻译后的中文描述（仅当 `translate=true` 且原文非中文时） |
 | `data.author_name` | string | 作者昵称 |
 | `data.author_id` | string | 作者 ID |
-| `data.video_url` | string | 视频无水印直链 |
+| `data.video_url` | string | 视频无水印直链。其他平台为第三方 CDN；视频号指向本服务的流式端点（见「视频号的下载方式」） |
 | `data.width` | int | 视频宽度（像素） |
 | `data.height` | int | 视频高度（像素） |
 | `data.duration` | int \| null | 视频时长（秒） |
 | `data.quality` | string \| null | 视频质量 |
-| `data.view_count` | int \| null | 播放量 |
+| `data.view_count` | int \| null | 播放量。视频号恒为 `null`（TikHub 的 `read_count` 恒为 0），不是偶尔缺失 |
 | `data.like_count` | int \| null | 点赞数 |
 | `data.comment_count` | int \| null | 评论数 |
 | `data.share_count` | int \| null | 分享数 |
@@ -227,10 +243,55 @@ curl http://localhost:8000/api/platforms \
     "xiaohongshu": ["tikhub"],
     "youtube": ["tikhub", "cobalt"],
     "douyin": ["tikhub"],
-    "kuaishou": ["tikhub"]
+    "kuaishou": ["tikhub"],
+    "wechat_channels": ["tikhub"]
   }
 }
 ```
+
+---
+
+### GET /api/stream/wechat_channels/{sph_code}
+
+拉取视频号的解密后 mp4。`sph_code` 是视频号分享链接 `https://weixin.qq.com/sph/<sph_code>` 中的短码，由 `POST /api/resolve` 返回的 `data.video_url` 编码携带；`data.video_id` 仍是视频号对象 ID。源站文件加密，本服务边下边解密再转发；客户端按普通 mp4 处理即可。
+
+#### 请求
+
+```bash
+curl http://localhost:8000/api/stream/wechat_channels/AOzokRxWHz \
+  -H "X-API-Key: your-api-key" \
+  -H "Range: bytes=0-131071" \
+  -o video-partial.mp4
+```
+
+鉴权与其他 `/api/*` 接口相同：`X-API-Key` Header。服务端未配置 `API_KEY` 时不校验。
+
+**请求参数：**
+
+| 字段 | 位置 | 必填 | 说明 |
+|------|------|------|------|
+| `sph_code` | 路径 | ✅ | 视频号分享链接 `https://weixin.qq.com/sph/<sph_code>` 中的字母数字短码 |
+| `Range` | Header | - | 标准字节范围，如 `bytes=0-131071` 或 `bytes=0-`。省略则返回完整文件 |
+
+支持 `Range` 请求，可用于断点续传和播放器拖拽进度。客户端的 `Range` 会原样转发给 CDN，开放范围或超出文件末尾时的实际终点以 CDN 响应为准。响应带 `Accept-Ranges: bytes`。带 `Range` 时即使覆盖了整个文件也返回 206。无 `Range` 时语义是完整文件：若 CDN 返回 206，必须从字节 0 到 `Content-Range` 声明的末尾完整覆盖文件，否则在响应头发出前返回 502；服务端不会自动续拉。
+
+#### 成功响应
+
+- `Content-Type: video/mp4`
+- 无 `Range`：HTTP 200，正文为完整解密后的 mp4
+- 有 `Range`：HTTP 206，带 `Content-Range: bytes start-end/total`
+- CDN 返回 200 且没有 `Content-Length` 时，只有客户端给出明确终点的 `Range` 请求可以不声明该响应头并使用分块传输；无 `Range` 或开放范围因无法验证完整性而在响应头发出前返回 502。
+
+#### 失败响应 / HTTP 状态码
+
+| 状态码 | 说明 |
+|--------|------|
+| 200 | 完整文件（未带 `Range`） |
+| 206 | 部分内容（带 `Range`） |
+| 401 | API Key 无效或缺失 |
+| 416 | `Range` 格式错误，或 CDN 返回 416；若 CDN 提供合法的 `Content-Range: bytes */L` 则透传 |
+| 429 | 每进程内并发流超过 `MAX_CONCURRENT_STREAMS`（默认 4），不会排队；默认 Docker 单 worker 单副本时限制成立，使用 `uvicorn --workers N` 或多副本时不是全局限制 |
+| 502 | 响应头发出前的上游 TikHub / CDN 失败、解密密钥无效、CDN 未按 Range 返回，或无 Range 收到不完整的 206；响应头发出后的上游断流/解密异常表现为连接中断或正文长度不足 |
 
 ---
 

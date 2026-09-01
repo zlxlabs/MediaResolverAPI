@@ -8,6 +8,7 @@ video_url 只填相对路径，host 由 API 层按请求补全，避免缓存钉
 """
 
 from copy import deepcopy
+import re
 from typing import Any, Dict, Optional
 
 from loguru import logger
@@ -28,6 +29,10 @@ _REDACT_KEYS = frozenset({
     "cache_url",
     "debug_info",
 })
+
+_SPH_SHARE_URL_PATTERN = re.compile(
+    r"^https://weixin\.qq\.com/sph/(?P<code>[A-Za-z0-9]{1,64})$"
+)
 
 
 def _redact_raw_data(payload: Any) -> Any:
@@ -91,6 +96,18 @@ class WechatChannelsService(BasePlatformService):
                 logger.error("微信视频号响应缺少 media 节点")
                 return None
 
+            params = response_data.get("params")
+            share_url = params.get("share_url") if isinstance(params, dict) else None
+            share_match = (
+                _SPH_SHARE_URL_PATTERN.fullmatch(share_url)
+                if isinstance(share_url, str)
+                else None
+            )
+            if share_match is None:
+                logger.error("微信视频号响应缺少有效 sph share_url")
+                return None
+            sph_code = share_match.group("code")
+
             object_id = node.get("id")
             if object_id is None or object_id == "":
                 logger.error("微信视频号响应缺少 id")
@@ -103,7 +120,7 @@ class WechatChannelsService(BasePlatformService):
             view_count = None if not read_count else read_count
 
             # 相对路径：缓存里不含 host。绝对地址由 API 层按请求补全。
-            video_url = f"/api/stream/wechat_channels/{video_id}"
+            video_url = f"/api/stream/wechat_channels/{sph_code}"
 
             return VideoInfo(
                 video_id=video_id,
