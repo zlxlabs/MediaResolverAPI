@@ -306,6 +306,9 @@ def _matrix_expected(range_id: str, response_id: str) -> dict:
             "end": end,
         }
     start, end = _matrix_cdn_range(range_id, response_id)
+    requested_end = MATRIX_CLIENTS[range_id][2]
+    if requested_end is not None and end > requested_end:
+        end = requested_end
     return {
         "status": 200 if range_id == "R0" else 206,
         "content_length": end - start + 1 if range_id != "R0" else FILE_SIZE,

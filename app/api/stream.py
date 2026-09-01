@@ -384,11 +384,17 @@ async def stream_wechat_channels(sph_code: str, request: Request):
             raise _json_http_error(502, "CDN ignored Range request")
         try:
             cdn_content_length = _cdn_content_length(first_stream)
+            content_range = None
             if first_stream.status_code == 206:
                 start, end, complete_length = _reconcile_cdn_offset(
                     first_stream,
                     expected_offset=requested_start,
                 )
+                content_range = first_stream.content_range.strip()
+                if requested_end is not None and end > requested_end:
+                    end = requested_end
+                    total = "*" if complete_length is None else str(complete_length)
+                    content_range = f"bytes {start}-{end}/{total}"
                 if requested_suffix is not None and complete_length is not None:
                     expected_suffix_start = max(complete_length - requested_suffix, 0)
                     if start != expected_suffix_start:
@@ -423,6 +429,12 @@ async def stream_wechat_channels(sph_code: str, request: Request):
                     if cdn_content_length is None
                     else end - start + 1
                 )
+            elif first_stream.status_code == 206:
+                content_length = (
+                    None
+                    if cdn_content_length is None
+                    else end - start + 1
+                )
             else:
                 content_length = cdn_content_length
         except UpstreamDisconnected as exc:
@@ -435,7 +447,7 @@ async def stream_wechat_channels(sph_code: str, request: Request):
             headers["Content-Length"] = str(content_length)
         if is_partial:
             if first_stream.status_code == 206:
-                headers["Content-Range"] = first_stream.content_range.strip()
+                headers["Content-Range"] = content_range
             else:
                 complete_length = (
                     "*" if cdn_content_length is None else str(cdn_content_length)
