@@ -633,3 +633,27 @@ $ git show --stat --format= HEAD
 ~~~
 
 本报告写入前工作树在 79a1794 后无代码/文档未提交改动；报告本身随后单独提交。
++
+## 收尾审查
+
+按 review-discipline 先做了 OCR 前置扫描；ocr-review 主腿约 70 秒无输出，未返回 reviewed/skipped envelope，随后中止，未将其当作通过，也未得到可判定 finding。人工审查仅发现矩阵失败格需要明确校验 JSON detail，已增加该断言；未发现新的 P1/P2。
+
+最终收尾验证：
+
+~~~
+/home/zlx/projects/work/MediaResolverAPI/.venv/bin/python -m pytest tests/ -q
+298 passed, 166 warnings in 3.52s
+/home/zlx/projects/work/MediaResolverAPI/.venv/bin/python -m py_compile app/api/stream.py tests/test_stream_wechat_channels.py
+git diff --check
+~~~
+
+收尾测试提交：
+
+~~~
+$ git log --oneline -1
+2acc1b7 test: assert matrix failures return detail JSON
+
+$ git show --stat --format= HEAD
+ tests/test_stream_wechat_channels.py | 1 +
+ 1 file changed, 1 insertion(+)
+~~~
