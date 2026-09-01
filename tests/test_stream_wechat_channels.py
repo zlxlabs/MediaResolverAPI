@@ -56,12 +56,14 @@ class FakeCdn:
         *,
         status_code: int,
         content_range: str | None = None,
+        content_length: str | None = None,
         disconnect_after: int | None = None,
         hold: asyncio.Event | None = None,
     ) -> None:
         self.payload = payload
         self.status_code = status_code
         self.content_range = content_range
+        self.content_length = content_length
         self.disconnect_after = disconnect_after
         self.hold = hold
         self.aclose_called = False
@@ -138,6 +140,7 @@ def _stream_harness(monkeypatch):
             content_range=(
                 f"bytes {start}-{end}/{FILE_SIZE}" if status == 206 else None
             ),
+            content_length=str(len(payload)) if status == 206 else None,
             disconnect_after=rel,
             hold=hold_event["e"],
         )
@@ -325,6 +328,139 @@ def test_initial_range_malformed_content_range_fails_before_streaming(
     assert _stream_harness["opens"][0]["stream"].aiter_calls == 0
 
 
+def test_initial_range_inverted_content_range_fails_before_streaming(
+    client, _stream_harness, monkeypatch
+):
+    real_open = stream_mod.open_cdn_stream
+
+    async def return_inverted(url: str, requested_range: str | None):
+        response = await real_open(url, requested_range)
+        response.content_range = "bytes 201-100/600000"
+        response.payload = b"inverted range must not be consumed"
+        return response
+
+    monkeypatch.setattr(stream_mod, "open_cdn_stream", return_inverted)
+    response = _get(client, "bytes=100-200")
+
+    assert response.status_code == 502
+    assert response.headers["content-type"].startswith("application/json")
+    assert isinstance(response.json(), dict)
+    assert _stream_harness["opens"][0]["stream"].aiter_calls == 0
+
+
+def test_initial_range_end_mismatch_fails_before_streaming(
+    client, _stream_harness, monkeypatch
+):
+    real_open = stream_mod.open_cdn_stream
+
+    async def return_short_range(url: str, requested_range: str | None):
+        response = await real_open(url, requested_range)
+        response.content_range = "bytes 100-199/600000"
+        response.payload = response.payload[:100]
+        response.content_length = "100"
+        return response
+
+    monkeypatch.setattr(stream_mod, "open_cdn_stream", return_short_range)
+    response = _get(client, "bytes=100-200")
+
+    assert response.status_code == 502
+    assert response.headers["content-type"].startswith("application/json")
+    assert isinstance(response.json(), dict)
+    assert _stream_harness["opens"][0]["stream"].aiter_calls == 0
+
+
+def test_initial_range_complete_length_mismatch_fails_before_streaming(
+    client, _stream_harness, monkeypatch
+):
+    real_open = stream_mod.open_cdn_stream
+
+    async def return_wrong_total(url: str, requested_range: str | None):
+        response = await real_open(url, requested_range)
+        response.content_range = "bytes 100-200/600001"
+        return response
+
+    monkeypatch.setattr(stream_mod, "open_cdn_stream", return_wrong_total)
+    response = _get(client, "bytes=100-200")
+
+    assert response.status_code == 502
+    assert response.headers["content-type"].startswith("application/json")
+    assert isinstance(response.json(), dict)
+    assert _stream_harness["opens"][0]["stream"].aiter_calls == 0
+
+
+def test_initial_range_content_length_mismatch_fails_before_streaming(
+    client, _stream_harness, monkeypatch
+):
+    real_open = stream_mod.open_cdn_stream
+
+    async def return_truncated_payload(url: str, requested_range: str | None):
+        response = await real_open(url, requested_range)
+        response.payload = b"x"
+        response.content_length = "1"
+        return response
+
+    monkeypatch.setattr(stream_mod, "open_cdn_stream", return_truncated_payload)
+    response = _get(client, "bytes=100-200")
+
+    assert response.status_code == 502
+    assert response.headers["content-type"].startswith("application/json")
+    assert isinstance(response.json(), dict)
+    assert _stream_harness["opens"][0]["stream"].aiter_calls == 0
+
+
+def test_initial_range_invalid_content_length_fails_before_streaming(
+    client, _stream_harness, monkeypatch
+):
+    real_open = stream_mod.open_cdn_stream
+
+    async def return_invalid_length(url: str, requested_range: str | None):
+        response = await real_open(url, requested_range)
+        response.content_length = "not-a-length"
+        return response
+
+    monkeypatch.setattr(stream_mod, "open_cdn_stream", return_invalid_length)
+    response = _get(client, "bytes=100-200")
+
+    assert response.status_code == 502
+    assert response.headers["content-type"].startswith("application/json")
+    assert isinstance(response.json(), dict)
+    assert _stream_harness["opens"][0]["stream"].aiter_calls == 0
+
+
+def test_initial_range_missing_content_length_is_allowed(
+    client, _stream_harness, monkeypatch
+):
+    real_open = stream_mod.open_cdn_stream
+
+    async def return_without_length(url: str, requested_range: str | None):
+        response = await real_open(url, requested_range)
+        response.content_length = None
+        return response
+
+    monkeypatch.setattr(stream_mod, "open_cdn_stream", return_without_length)
+    response = _get(client, "bytes=100-200")
+
+    assert response.status_code == 206
+    assert response.content == _slice_plain("bytes=100-200")
+
+
+def test_initial_range_wildcard_complete_length_is_allowed(
+    client, _stream_harness, monkeypatch
+):
+    real_open = stream_mod.open_cdn_stream
+
+    async def return_unknown_total(url: str, requested_range: str | None):
+        response = await real_open(url, requested_range)
+        response.content_range = "bytes 100-200/*"
+        return response
+
+    monkeypatch.setattr(stream_mod, "open_cdn_stream", return_unknown_total)
+    response = _get(client, "bytes=100-200")
+
+    assert response.status_code == 206
+    assert response.content == _slice_plain("bytes=100-200")
+
+
 def test_no_range_206_start_zero_reconciles_before_streaming(
     client, _stream_harness, monkeypatch
 ):
@@ -351,7 +487,7 @@ def test_no_range_206_nonzero_start_fails_before_streaming(
     async def return_206(url: str, requested_range: str | None):
         response = await real_open(url, requested_range)
         response.status_code = 206
-        response.content_range = f"bytes 1-{FILE_SIZE}/{FILE_SIZE}"
+        response.content_range = f"bytes 1-{FILE_SIZE - 1}/{FILE_SIZE}"
         return response
 
     monkeypatch.setattr(stream_mod, "open_cdn_stream", return_206)

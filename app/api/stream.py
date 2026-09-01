@@ -36,6 +36,7 @@ _UPSTREAM_FAIL = (
 class CdnResponse(Protocol):
     status_code: int
     content_range: Optional[str]
+    content_length: Optional[str]
 
     def aiter_bytes(self, chunk_size: int = 65536) -> AsyncIterator[bytes]:
         ...
@@ -50,6 +51,7 @@ class _HttpxCdnStream:
         self._response = response
         self.status_code = response.status_code
         self.content_range = response.headers.get("Content-Range")
+        self.content_length = response.headers.get("Content-Length")
 
     def aiter_bytes(self, chunk_size: int = 65536) -> AsyncIterator[bytes]:
         return self._response.aiter_bytes(chunk_size)
@@ -190,15 +192,19 @@ def _json_http_error(status: int, message: str) -> HTTPException:
 
 
 _CONTENT_RANGE_PATTERN = re.compile(
-    r"^bytes\s+(?P<start>\d+)-(?P<end>\d+)/(?:\d+|\*)$",
+    r"^bytes\s+(?P<start>\d+)-(?P<end>\d+)/(?P<complete_length>\d+|\*)$",
     re.IGNORECASE,
 )
 
 
 def _reconcile_cdn_offset(
-    stream: CdnResponse, *, expected_offset: int
+    stream: CdnResponse,
+    *,
+    expected_offset: int,
+    expected_end: int,
+    file_size: int,
 ) -> None:
-    """Require every CDN 206 response to declare the locally expected start."""
+    """Require CDN 206 metadata to match the locally requested byte range."""
     if stream.status_code != 206:
         return
     content_range = stream.content_range
@@ -216,6 +222,30 @@ def _reconcile_cdn_offset(
             "CDN 206 response starts at "
             f"{declared_start}, expected {expected_offset}"
         )
+    if declared_end != expected_end:
+        raise UpstreamDisconnected(
+            "CDN 206 response ends at "
+            f"{declared_end}, expected {expected_end}"
+        )
+
+    complete_length = match.group("complete_length")
+    if complete_length != "*" and int(complete_length) != file_size:
+        raise UpstreamDisconnected(
+            "CDN 206 response has complete length "
+            f"{complete_length}, expected {file_size}"
+        )
+
+    content_length = stream.content_length
+    if content_length is not None:
+        if re.fullmatch(r"\d+", content_length.strip()) is None:
+            raise UpstreamDisconnected("CDN 206 response has invalid Content-Length")
+        declared_length = int(content_length)
+        expected_length = declared_end - declared_start + 1
+        if declared_length != expected_length:
+            raise UpstreamDisconnected(
+                "CDN 206 response has Content-Length "
+                f"{declared_length}, expected {expected_length}"
+            )
 
 
 async def _fetch_media(object_id: str) -> dict:
@@ -328,7 +358,12 @@ async def stream_wechat_channels(object_id: str, request: Request):
             first_stream = None
             raise _json_http_error(502, "CDN ignored Range request")
         try:
-            _reconcile_cdn_offset(first_stream, expected_offset=start)
+            _reconcile_cdn_offset(
+                first_stream,
+                expected_offset=start,
+                expected_end=end,
+                file_size=file_size,
+            )
         except UpstreamDisconnected as exc:
             raise _json_http_error(502, str(exc)) from exc
 
