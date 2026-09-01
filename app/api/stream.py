@@ -146,18 +146,19 @@ _SPH_CODE_PATTERN = re.compile(r"^[A-Za-z0-9]{1,64}$")
 
 
 def parse_byte_range(
-    range_header: Optional[str], file_size: int
-) -> tuple[int, int, bool]:
+    range_header: Optional[str],
+) -> tuple[Optional[int], Optional[int], bool]:
     """Parse a single ``bytes=start-end`` / ``bytes=start-`` range.
 
-    Returns (start, end_inclusive, is_partial). Missing header → full file,
-    is_partial=False (HTTP 200). Present header → HTTP 206 even if it covers
-    the whole file (e.g. ``bytes=0-``).
+    Returns (requested_start, requested_end, is_partial). The end is only the
+    endpoint supplied by the client; an open-ended range has no local endpoint.
+    A suffix range has no local start because its start depends on the CDN's
+    actual file size. Missing header → full file, is_partial=False (HTTP 200).
+    Present header → HTTP 206 even if it covers the whole file (e.g.
+    ``bytes=0-``).
     """
-    if file_size <= 0:
-        raise HTTPException(status_code=502, detail="Invalid upstream file size")
     if not range_header:
-        return 0, file_size - 1, False
+        return 0, None, False
     text = range_header.strip()
     if not text.lower().startswith("bytes="):
         raise HTTPException(status_code=416, detail="Unsupported Range unit")
@@ -177,35 +178,22 @@ def parse_byte_range(
             raise HTTPException(status_code=416, detail="Malformed Range header") from exc
         if suffix <= 0:
             raise HTTPException(status_code=416, detail="Range not satisfiable")
-        start = max(file_size - suffix, 0)
-        return start, file_size - 1, True
+        return None, None, True
     try:
         start = int(start_s)
     except ValueError as exc:
         raise HTTPException(status_code=416, detail="Malformed Range header") from exc
-    if start < 0 or start >= file_size:
-        raise HTTPException(
-            status_code=416,
-            detail="Range not satisfiable",
-            headers={"Content-Range": f"bytes */{file_size}"},
-        )
+    if start < 0:
+        raise HTTPException(status_code=416, detail="Range not satisfiable")
     if end_s == "":
-        return start, file_size - 1, True
+        return start, None, True
     try:
         end = int(end_s)
     except ValueError as exc:
         raise HTTPException(status_code=416, detail="Malformed Range header") from exc
     if end < start:
         raise HTTPException(status_code=416, detail="Malformed Range header")
-    if end >= file_size:
-        end = file_size - 1
     return start, end, True
-
-
-def _range_header_for(start: int, end: int, file_size: int) -> Optional[str]:
-    if start == 0 and end == file_size - 1:
-        return f"bytes={start}-"
-    return f"bytes={start}-{end}"
 
 
 def _json_http_error(status: int, message: str) -> HTTPException:
@@ -221,12 +209,9 @@ _CONTENT_RANGE_PATTERN = re.compile(
 def _reconcile_cdn_offset(
     stream: CdnResponse,
     *,
-    expected_offset: int,
-    expected_end: int,
-) -> None:
-    """Require CDN 206 metadata to match the locally requested byte range."""
-    if stream.status_code != 206:
-        return
+    expected_offset: Optional[int],
+) -> tuple[int, int]:
+    """Validate CDN 206 metadata and return its authoritative range."""
     content_range = stream.content_range
     if not content_range:
         raise UpstreamDisconnected("CDN 206 response missing Content-Range")
@@ -237,19 +222,14 @@ def _reconcile_cdn_offset(
     declared_end = int(match.group("end"))
     if declared_end < declared_start:
         raise UpstreamDisconnected("CDN 206 response has invalid Content-Range")
-    if declared_start != expected_offset:
+    complete_length = match.group("complete_length")
+    if complete_length != "*" and int(complete_length) <= declared_end:
+        raise UpstreamDisconnected("CDN 206 response has invalid complete length")
+    if expected_offset is not None and declared_start != expected_offset:
         raise UpstreamDisconnected(
             "CDN 206 response starts at "
             f"{declared_start}, expected {expected_offset}"
         )
-    if declared_end != expected_end:
-        raise UpstreamDisconnected(
-            "CDN 206 response ends at "
-            f"{declared_end}, expected {expected_end}"
-        )
-
-    # Keep complete-length syntax validation, but do not compare it with TikHub
-    # file_size: measurements show they can differ several-fold; CDN is authoritative.
 
     content_length = stream.content_length
     if content_length is not None:
@@ -262,6 +242,16 @@ def _reconcile_cdn_offset(
                 "CDN 206 response has Content-Length "
                 f"{declared_length}, expected {expected_length}"
             )
+    return declared_start, declared_end
+
+
+def _cdn_content_length(stream: CdnResponse) -> Optional[int]:
+    content_length = stream.content_length
+    if content_length is None:
+        return None
+    if re.fullmatch(r"\d+", content_length.strip()) is None:
+        raise UpstreamDisconnected("CDN response has invalid Content-Length")
+    return int(content_length)
 
 
 async def _fetch_media(sph_code: str) -> dict:
@@ -287,23 +277,26 @@ async def _iter_decrypted(
     first_media: dict,
     first_stream: CdnResponse,
     start: int,
-    end: int,
+    end: Optional[int],
 ) -> AsyncIterator[bytes]:
-    """Yield decrypted bytes from start..end inclusive from one upstream stream."""
+    """Yield decrypted bytes from the CDN range, or until an unbounded stream ends."""
     offset = start
     chunk_size = settings.STREAM_CHUNK_SIZE
     try:
+        if end is not None and end < start:
+            return
         async for raw in first_stream.aiter_bytes(chunk_size):
             if not raw:
                 continue
-            remaining = end - offset + 1
-            if len(raw) > remaining:
-                raw = raw[:remaining]
+            if end is not None:
+                remaining = end - offset + 1
+                if len(raw) > remaining:
+                    raw = raw[:remaining]
             yield xor_chunk(raw, first_media["decode_key"], offset)
             offset += len(raw)
-            if offset > end:
+            if end is not None and offset > end:
                 return
-        if offset <= end:
+        if end is not None and offset <= end:
             raise UpstreamDisconnected("upstream closed before range complete")
     except asyncio.CancelledError:
         logger.warning(
@@ -359,35 +352,37 @@ async def stream_wechat_channels(sph_code: str, request: Request):
         except (TypeError, ValueError) as exc:
             raise _json_http_error(502, "Invalid decode_key") from exc
 
-        file_size = int(media["file_size"])
-        start, end, is_partial = parse_byte_range(
-            request.headers.get("range"), file_size
+        range_h = request.headers.get("range")
+        requested_start, _, is_partial = parse_byte_range(range_h)
+        first_stream = await open_cdn_stream(
+            media["full_url"], range_h if is_partial else None
         )
-        range_h = None if not is_partial else _range_header_for(start, end, file_size)
-        first_stream = await open_cdn_stream(media["full_url"], range_h)
         if first_stream.status_code not in (200, 206):
             status = first_stream.status_code
             raise _json_http_error(502, f"CDN returned {status}")
         if is_partial and first_stream.status_code == 200:
             raise _json_http_error(502, "CDN ignored Range request")
         try:
-            _reconcile_cdn_offset(
-                first_stream,
-                expected_offset=start,
-                expected_end=end,
-            )
+            content_length = _cdn_content_length(first_stream)
+            if first_stream.status_code == 206:
+                start, end = _reconcile_cdn_offset(
+                    first_stream,
+                    expected_offset=requested_start,
+                )
+            else:
+                start = 0
+                end = None if content_length is None else content_length - 1
         except UpstreamDisconnected as exc:
             raise _json_http_error(502, str(exc)) from exc
-
-        length = end - start + 1
         headers = {
             "Content-Type": "video/mp4",
-            "Content-Length": str(length),
             "Accept-Ranges": "bytes",
         }
-        status_code = 206 if is_partial else 200
+        if content_length is not None:
+            headers["Content-Length"] = str(content_length)
         if is_partial:
-            headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
+            headers["Content-Range"] = first_stream.content_range.strip()
+        status_code = 206 if is_partial else 200
 
         opened = first_stream
         first_stream = None  # body iterator owns it

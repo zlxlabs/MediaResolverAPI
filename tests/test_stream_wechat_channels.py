@@ -24,6 +24,7 @@ from app.services.wechat_channels_crypto import KEYSTREAM_SIZE, generate_keystre
 
 SPH_CODE = "AOzokRxWHz"
 FILE_SIZE = 600_000
+TIKHUB_FILE_SIZE = 2_450_521_066
 KEY_A = 55516695
 KEY_B = 12345678
 PLAIN = bytes.fromhex("000000206674797069736f6d") + bytes(
@@ -45,7 +46,10 @@ def _cipher(key) -> bytes:
 
 
 def _slice_plain(range_header: str | None) -> bytes:
-    start, end, _ = stream_mod.parse_byte_range(range_header, FILE_SIZE)
+    start, end, _ = stream_mod.parse_byte_range(range_header)
+    assert start is not None
+    if end is None:
+        end = FILE_SIZE - 1
     return PLAIN[start : end + 1]
 
 
@@ -118,7 +122,7 @@ def _stream_harness(monkeypatch):
         return {
             "full_url": f"https://cdn.test/v{len(media_calls)}",
             "decode_key": key,
-            "file_size": FILE_SIZE,
+            "file_size": TIKHUB_FILE_SIZE,
         }
 
     async def fake_open(url: str, range_header: str | None) -> FakeCdn:
@@ -126,7 +130,24 @@ def _stream_harness(monkeypatch):
         key = keys[nth - 1] if nth - 1 < len(keys) else keys[-1]
         cipher = _cipher(key)
         if range_header:
-            start, end, _ = stream_mod.parse_byte_range(range_header, FILE_SIZE)
+            requested_start, requested_end, _ = stream_mod.parse_byte_range(range_header)
+            if requested_start is None:
+                suffix = int(range_header.split("=", 1)[1].split("-", 1)[1])
+                start = max(FILE_SIZE - suffix, 0)
+            else:
+                start = requested_start
+            if start >= FILE_SIZE:
+                return FakeCdn(
+                    b"",
+                    status_code=416,
+                    content_range=f"bytes */{FILE_SIZE}",
+                    content_length="0",
+                )
+            end = (
+                FILE_SIZE - 1
+                if requested_end is None
+                else min(requested_end, FILE_SIZE - 1)
+            )
             status = 206
         else:
             start, end = 0, FILE_SIZE - 1
@@ -140,7 +161,7 @@ def _stream_harness(monkeypatch):
             content_range=(
                 f"bytes {start}-{end}/{FILE_SIZE}" if status == 206 else None
             ),
-            content_length=str(len(payload)) if status == 206 else None,
+            content_length=str(len(payload)),
             disconnect_after=rel,
             hold=hold_event["e"],
         )
@@ -189,11 +210,12 @@ RANGE_CASES = [
     ("bytes_straddle", "bytes=131071-131073"),
     ("bytes_plain_from_boundary", "bytes=131072-"),
     ("bytes_plain_window", "bytes=200000-300000"),
+    ("bytes_window_past_cdn_end", "bytes=200000-700000"),
 ]
 
 
 @pytest.mark.parametrize("name,range_header", RANGE_CASES, ids=[c[0] for c in RANGE_CASES])
-def test_range_matches_full_download_slice(client, name, range_header):
+def test_range_matches_full_download_slice(client, _stream_harness, name, range_header):
     expected = _slice_plain(range_header)
     resp = _get(client, range_header)
     assert resp.status_code in (200, 206)
@@ -202,6 +224,18 @@ def test_range_matches_full_download_slice(client, name, range_header):
     if range_header is None:
         assert resp.content[4:8] == b"ftyp"
         assert resp.status_code == 200
+        assert resp.headers["content-length"] == str(FILE_SIZE)
+        assert resp.headers["content-length"] != str(TIKHUB_FILE_SIZE)
+    else:
+        assert resp.status_code == 206
+        assert _stream_harness["opens"][0]["range"] == range_header
+        start, end, _ = stream_mod.parse_byte_range(range_header)
+        assert start is not None
+        expected_end = FILE_SIZE - 1 if end is None else min(end, FILE_SIZE - 1)
+        assert resp.headers["content-range"] == (
+            f"bytes {start}-{expected_end}/{FILE_SIZE}"
+        )
+        assert resp.headers["content-length"] == str(expected_end - start + 1)
 
 
 def test_missing_api_key_401(client):
@@ -367,7 +401,7 @@ def test_initial_range_inverted_content_range_fails_before_streaming(
     assert _stream_harness["opens"][0]["stream"].aiter_calls == 0
 
 
-def test_initial_range_end_mismatch_fails_before_streaming(
+def test_initial_range_end_mismatch_uses_cdn_range(
     client, _stream_harness, monkeypatch
 ):
     real_open = stream_mod.open_cdn_stream
@@ -382,10 +416,10 @@ def test_initial_range_end_mismatch_fails_before_streaming(
     monkeypatch.setattr(stream_mod, "open_cdn_stream", return_short_range)
     response = _get(client, "bytes=100-200")
 
-    assert response.status_code == 502
-    assert response.headers["content-type"].startswith("application/json")
-    assert isinstance(response.json(), dict)
-    assert _stream_harness["opens"][0]["stream"].aiter_calls == 0
+    assert response.status_code == 206
+    assert response.headers["content-range"] == "bytes 100-199/600000"
+    assert response.headers["content-length"] == "100"
+    assert response.content == PLAIN[100:200]
 
 
 def test_initial_range_complete_length_mismatch_is_allowed(
@@ -402,6 +436,7 @@ def test_initial_range_complete_length_mismatch_is_allowed(
     response = _get(client, "bytes=100-200")
 
     assert response.status_code == 206
+    assert response.headers["content-range"] == "bytes 100-200/600001"
     assert response.content == _slice_plain("bytes=100-200")
 
 
@@ -458,6 +493,7 @@ def test_initial_range_missing_content_length_is_allowed(
     response = _get(client, "bytes=100-200")
 
     assert response.status_code == 206
+    assert "content-length" not in response.headers
     assert response.content == _slice_plain("bytes=100-200")
 
 
@@ -475,6 +511,7 @@ def test_initial_range_wildcard_complete_length_is_allowed(
     response = _get(client, "bytes=100-200")
 
     assert response.status_code == 206
+    assert response.headers["content-range"] == "bytes 100-200/*"
     assert response.content == _slice_plain("bytes=100-200")
 
 
@@ -493,6 +530,24 @@ def test_no_range_206_start_zero_reconciles_before_streaming(
     response = _get(client)
 
     assert response.status_code == 200
+    assert response.content == PLAIN
+
+
+def test_no_range_without_cdn_content_length_uses_chunked_streaming(
+    client, _stream_harness, monkeypatch
+):
+    real_open = stream_mod.open_cdn_stream
+
+    async def return_without_length(url: str, requested_range: str | None):
+        response = await real_open(url, requested_range)
+        response.content_length = None
+        return response
+
+    monkeypatch.setattr(stream_mod, "open_cdn_stream", return_without_length)
+    response = _get(client)
+
+    assert response.status_code == 200
+    assert "content-length" not in response.headers
     assert response.content == PLAIN
 
 

@@ -273,7 +273,7 @@ curl http://localhost:8000/api/stream/wechat_channels/AOzokRxWHz \
 | `sph_code` | 路径 | ✅ | 视频号分享链接 `https://weixin.qq.com/sph/<sph_code>` 中的字母数字短码 |
 | `Range` | Header | - | 标准字节范围，如 `bytes=0-131071` 或 `bytes=0-`。省略则返回完整文件 |
 
-支持 `Range` 请求，可用于断点续传和播放器拖拽进度。响应带 `Accept-Ranges: bytes`。带 `Range` 时即使覆盖了整个文件也返回 206。
+支持 `Range` 请求，可用于断点续传和播放器拖拽进度。客户端的 `Range` 会原样转发给 CDN，开放范围或超出文件末尾时的实际终点以 CDN 响应为准。响应带 `Accept-Ranges: bytes`。带 `Range` 时即使覆盖了整个文件也返回 206。
 
 #### 成功响应
 
@@ -288,7 +288,7 @@ curl http://localhost:8000/api/stream/wechat_channels/AOzokRxWHz \
 | 200 | 完整文件（未带 `Range`） |
 | 206 | 部分内容（带 `Range`） |
 | 401 | API Key 无效或缺失 |
-| 416 | `Range` 格式错误或超出文件范围 |
+| 416 | `Range` 格式错误；实际范围由 CDN 判定 |
 | 429 | 并发流超过 `MAX_CONCURRENT_STREAMS`（默认 4），不会排队 |
 | 502 | 上游 TikHub / CDN 失败、解密密钥无效、或 CDN 未按 Range 返回 |
 
