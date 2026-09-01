@@ -141,6 +141,7 @@ class TikHubProvider(BaseProvider):
     ]
     WECHAT_CHANNELS_PER_ENDPOINT_TIMEOUT = 25
     WECHAT_CHANNELS_TOTAL_BUDGET = 30.0
+    WECHAT_CHANNELS_SHARE_URL_BASE = "https://weixin.qq.com/sph"
 
     @staticmethod
     def _classify_youtube(response: Dict) -> str:
@@ -748,24 +749,26 @@ class TikHubProvider(BaseProvider):
         info = WechatChannelsService(self.api_key, self.api_base)._parse_response(data)
         return bool(info and info.video_url)
 
-    async def fetch_wechat_channels_media(self, object_id: str) -> dict:
+    async def fetch_wechat_channels_media(self, sph_code: str) -> dict:
         """取当次配套的 media 信息。返回至少含 full_url / decode_key / file_size。
 
         每次调用都走一次新的 TikHub detail 请求，不缓存返回值。
         (full_url, decode_key) 必须成对使用，跨次混用必然解密失败。
 
-        object_id 查询偶发返回微信错误包（无 object_type），单端点链会记 retryable
-        后立刻 VideoNotFoundError。这里对这一瞬态做有限次重试并打 WARNING，
+        下载端点使用 sph 短码拼回 share_url 查询，避免 object_id 查询的偶发错误包。
+        share_url 查询若返回瞬态错误，单端点链会记 retryable 后抛出
+        VideoNotFoundError；这里对这一瞬态做有限次重试并打 WARNING，
         耗尽后仍把错误抛给调用方（端点转 5xx JSON），不静默当成功。
         """
-        if not object_id:
-            raise VideoNotFoundError("wechat_channels object_id is empty")
+        if not sph_code:
+            raise VideoNotFoundError("wechat_channels sph_code is empty")
+        share_url = f"{self.WECHAT_CHANNELS_SHARE_URL_BASE}/{sph_code}"
         data = None
         last_exc: Optional[BaseException] = None
         attempts = 3
         for attempt in range(1, attempts + 1):
             try:
-                data = await self._fetch_wechat_channels(object_id, "")
+                data = await self._fetch_wechat_channels("", share_url)
                 break
             except VideoNotFoundError as exc:
                 last_exc = exc
@@ -773,7 +776,7 @@ class TikHubProvider(BaseProvider):
                     raise
                 self.log_warning(
                     "wechat_channels media lookup retryable, retrying",
-                    object_id=object_id,
+                    sph_code=sph_code,
                     attempt=attempt,
                     max_attempts=attempts,
                     error=str(exc),
@@ -781,30 +784,30 @@ class TikHubProvider(BaseProvider):
                 await asyncio.sleep(0.3)
         if data is None:
             raise last_exc if last_exc else VideoNotFoundError(
-                f"wechat_channels media missing for object_id={object_id}"
+                f"wechat_channels media missing for sph_code={sph_code}"
             )
         node = data.get("data") if isinstance(data, dict) else None
         media = node.get("media") if isinstance(node, dict) else None
         if not isinstance(media, dict):
             raise ProviderError(
-                f"wechat_channels media missing for object_id={object_id}"
+                f"wechat_channels media missing for sph_code={sph_code}"
             )
         full_url = media.get("full_url")
         decode_key = media.get("decode_key")
         file_size = media.get("file_size")
         if not full_url or decode_key in (None, ""):
             raise ProviderError(
-                f"wechat_channels media incomplete for object_id={object_id}"
+                f"wechat_channels media incomplete for sph_code={sph_code}"
             )
         try:
             size = int(file_size)
         except (TypeError, ValueError) as exc:
             raise ProviderError(
-                f"wechat_channels file_size missing for object_id={object_id}"
+                f"wechat_channels file_size missing for sph_code={sph_code}"
             ) from exc
         if size < 0:
             raise ProviderError(
-                f"wechat_channels file_size invalid for object_id={object_id}"
+                f"wechat_channels file_size invalid for sph_code={sph_code}"
             )
         return {
             "full_url": str(full_url),

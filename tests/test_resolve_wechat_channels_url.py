@@ -17,6 +17,7 @@ from app.services.providers.tikhub import TikHubProvider
 
 FIXTURES = Path(__file__).parent / "fixtures" / "wechat_channels"
 OBJECT_ID = "14998022876670594427"
+SPH_CODE = "AOzokRxWHz"
 SHARE_URL = "https://weixin.qq.com/sph/AOzokRxWHz"
 DOUYIN_URL = "https://www.douyin.com/video/7477059950577978636"
 DOUYIN_CDN = "https://v3-dy.example.net/aweme/play.mp4?token=abc"
@@ -55,7 +56,8 @@ def test_empty_public_base_uses_request_host(authed_client, monkeypatch):
     assert resp.status_code == 200 and resp.json()["success"]
     video_url = resp.json()["data"]["video_url"]
     assert video_url.startswith("http://example.com:9000/api/stream/wechat_channels/")
-    assert video_url.endswith(OBJECT_ID)
+    assert video_url == f"http://example.com:9000/api/stream/wechat_channels/{SPH_CODE}"
+    assert resp.json()["data"]["video_id"] == OBJECT_ID
 
 
 def test_explicit_public_base_url_wins_over_request_host(authed_client, monkeypatch):
@@ -65,7 +67,8 @@ def test_explicit_public_base_url_wins_over_request_host(authed_client, monkeypa
     assert resp.status_code == 200 and resp.json()["success"]
     video_url = resp.json()["data"]["video_url"]
     assert video_url.startswith("https://media.example.org/api/stream/wechat_channels/")
-    assert video_url.endswith(OBJECT_ID)
+    assert video_url == f"https://media.example.org/api/stream/wechat_channels/{SPH_CODE}"
+    assert resp.json()["data"]["video_id"] == OBJECT_ID
 
 
 def test_cache_hit_uses_current_request_host_not_cached_host(authed_client, monkeypatch):
