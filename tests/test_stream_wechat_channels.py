@@ -381,6 +381,7 @@ def test_client_range_cdn_response_matrix(
             assert response.headers["content-range"] == expected["content_range"]
     else:
         assert response.headers["content-type"].startswith("application/json")
+        assert "detail" in response.json()
         assert int(response.headers["content-length"]) == len(response.content)
         if expected["content_range"] is None:
             assert "content-range" not in response.headers
