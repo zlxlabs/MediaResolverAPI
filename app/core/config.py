@@ -81,6 +81,10 @@ class Settings(BaseSettings):
     # HTTP client
     HTTP_TIMEOUT_SECONDS: int = 30
 
+    # WeChat Channels streaming proxy
+    MAX_CONCURRENT_STREAMS: int = 4
+    STREAM_CHUNK_SIZE: int = 65536
+
     # Logging
     LOG_LEVEL: str = "INFO"
     LOG_FILE_PATH: str = "./logs"

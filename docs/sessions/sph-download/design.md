@@ -97,10 +97,9 @@
    全部 131072 字节。）
 6. **不污染其他平台**：本次改动后，现有 8 个平台的解析行为与响应字段零变化。
    （锁死于：现有测试全量绿。）
-7. **上游断流可续**：CDN 连接中断时，服务端以「已成功转发的绝对字节数 N」为续传点，重新
-   取一次 detail 并以 `Range: bytes=N-` 续拉，对客户端表现为一条不间断的响应。续传次数
-   有上限，超限才让响应异常结束。
-   （锁死于：桩掉上游、在第 N 字节注入断流，断言最终产出与一次性下载逐字节相同。）
+7. **上游断流即失败**：CDN 连接中断时，本次响应立即失败并留 `ERROR` 日志，不重取链接、不
+   拼接响应。断点续传由客户端带 `Range` 重发请求完成，服务端不维护跨请求续传状态。
+   （锁死于：`test_upstream_disconnect_terminates_response_with_error`。）
 8. **客户端断开必须关闭上游**：客户端提前断开时，服务端与 CDN 之间的流必须随之关闭，
    不得留下悬挂连接继续消耗带宽。
    （锁死于：模拟客户端断开的测试，断言上游 response 的 `aclose` 被调用。）
@@ -114,7 +113,7 @@
 
 | 异常 | 发生时机 | 影响 | 处置 |
 |---|---|---|---|
-| 上游 CDN 中途断流 | 响应头已发出、字节已在传 | **无法再改 HTTP 状态码**，客户端只会收到字节数不足的残缺响应 | 不变式 7 的服务端续传 |
+| 上游 CDN 中途断流 | 响应头已发出、字节已在传 | **无法再改 HTTP 状态码**，客户端只会收到字节数不足的残缺响应 | 本次响应直接终止并留 `ERROR` 日志；客户端带 `Range` 重发 |
 | 客户端取消下载 | 传输中 | 上游连接悬挂，白耗带宽与连接数 | 不变式 8 |
 | TikHub 失败 / 限流 | 响应头**尚未**发出 | 可干净返回 502 | 强制「先同步取到 (链接, 密钥) 成功后才开始 StreamingResponse」 |
 | 本机带宽 / 连接数打满 | 高并发或大文件 | 单个 2.45GB 下载即可占满小机器上行，多个并发全部卡死 | 不变式 9 的信号量上限 |
@@ -164,3 +163,5 @@
   **卡 3 例外**：其改动核心是失败路径与资源账本（断流续传、连接清理、并发信号量），
   按 infra/状态机类 diff 规则，收敛条件升一档执行 —— 连续 2 轮无新增 P1 才算收敛。
 - **播放量字段**：视频号的 `view_count` 恒为 0，会以 `null` 返回，README 需注明。
+10. **字节偏移对账**：任何一次从上游取得的字节流，其实际起始偏移必须经 `Content-Range` 与本地记账偏移对账一致后才可被消费；无法对账即视为该次上游失败。
+   （锁死于：`test_range_matches_full_download_slice`、`test_initial_range_mismatch_fails_before_streaming`、`test_initial_range_missing_content_range_fails_before_streaming`、`test_initial_range_malformed_content_range_fails_before_streaming`、`test_no_range_206_start_zero_reconciles_before_streaming`、`test_no_range_206_nonzero_start_fails_before_streaming`。）
