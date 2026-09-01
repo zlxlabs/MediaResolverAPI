@@ -23,7 +23,13 @@ class UpstreamDisconnected(Exception):
     """CDN ended before the requested byte range was fully forwarded."""
 
 
-_UPSTREAM_FAIL = (httpx.TransportError, httpx.StreamError, OSError, UpstreamDisconnected)
+_UPSTREAM_FAIL = (
+    httpx.TransportError,
+    httpx.StreamError,
+    OSError,
+    ProviderError,
+    UpstreamDisconnected,
+)
 
 
 class CdnResponse(Protocol):
@@ -207,35 +213,60 @@ async def _iter_decrypted(
     stream: Optional[CdnResponse] = first_stream
     try:
         while offset <= end:
-            decode_key = media["decode_key"]
             try:
-                assert stream is not None
-                async for raw in stream.aiter_bytes(chunk_size):
-                    if not raw:
-                        continue
-                    remaining = end - offset + 1
-                    if len(raw) > remaining:
-                        raw = raw[:remaining]
-                    yield xor_chunk(raw, decode_key, offset)
-                    offset += len(raw)
-                    if offset > end:
-                        return
-                if offset <= end:
-                    raise UpstreamDisconnected("upstream closed before range complete")
-            except asyncio.CancelledError:
-                logger.warning(
-                    "wechat stream cancelled by client object_id={} offset={}",
-                    object_id,
-                    offset,
-                )
-                raise
-            except GeneratorExit:
-                logger.warning(
-                    "wechat stream generator closed object_id={} offset={}",
-                    object_id,
-                    offset,
-                )
-                raise
+                if stream is None:
+                    media = await _fetch_media(object_id)
+                    range_h = _range_header_for(offset, end, file_size)
+                    stream = await open_cdn_stream(media["full_url"], range_h)
+                    if stream.status_code not in (200, 206):
+                        status = stream.status_code
+                        await stream.aclose()
+                        stream = None
+                        logger.error(
+                            "wechat stream resume CDN status={} object_id={}",
+                            status,
+                            object_id,
+                        )
+                        raise UpstreamDisconnected(f"CDN status {status} on resume")
+                    if stream.status_code == 200 and offset > 0:
+                        await stream.aclose()
+                        stream = None
+                        logger.error(
+                            "wechat stream resume CDN ignored Range object_id={} offset={}",
+                            object_id,
+                            offset,
+                        )
+                        raise UpstreamDisconnected("CDN ignored Range on resume")
+
+                decode_key = media["decode_key"]
+                try:
+                    assert stream is not None
+                    async for raw in stream.aiter_bytes(chunk_size):
+                        if not raw:
+                            continue
+                        remaining = end - offset + 1
+                        if len(raw) > remaining:
+                            raw = raw[:remaining]
+                        yield xor_chunk(raw, decode_key, offset)
+                        offset += len(raw)
+                        if offset > end:
+                            return
+                    if offset <= end:
+                        raise UpstreamDisconnected("upstream closed before range complete")
+                except asyncio.CancelledError:
+                    logger.warning(
+                        "wechat stream cancelled by client object_id={} offset={}",
+                        object_id,
+                        offset,
+                    )
+                    raise
+                except GeneratorExit:
+                    logger.warning(
+                        "wechat stream generator closed object_id={} offset={}",
+                        object_id,
+                        offset,
+                    )
+                    raise
             except _UPSTREAM_FAIL as exc:
                 if offset > end:
                     return
@@ -271,28 +302,6 @@ async def _iter_decrypted(
                             close_exc,
                         )
                     stream = None
-                media = await _fetch_media(object_id)
-                range_h = _range_header_for(offset, end, file_size)
-                stream = await open_cdn_stream(media["full_url"], range_h)
-                if stream.status_code not in (200, 206):
-                    status = stream.status_code
-                    await stream.aclose()
-                    stream = None
-                    logger.error(
-                        "wechat stream resume CDN status={} object_id={}",
-                        status,
-                        object_id,
-                    )
-                    raise UpstreamDisconnected(f"CDN status {status} on resume")
-                if stream.status_code == 200 and offset > 0:
-                    await stream.aclose()
-                    stream = None
-                    logger.error(
-                        "wechat stream resume CDN ignored Range object_id={} offset={}",
-                        object_id,
-                        offset,
-                    )
-                    raise UpstreamDisconnected("CDN ignored Range on resume")
     finally:
         if stream is not None:
             try:

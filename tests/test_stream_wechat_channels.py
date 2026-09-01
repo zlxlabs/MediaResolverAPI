@@ -240,6 +240,88 @@ def test_resume_matches_oneshot_and_range_starts_at_forwarded(client, _stream_ha
     assert int(start_s) == cut
 
 
+def test_resume_fetch_failure_retries_and_matches_oneshot(
+    client, _stream_harness, monkeypatch
+):
+    expected = _get(client).content
+    _stream_harness["opens"].clear()
+    _stream_harness["media_calls"].clear()
+    _stream_harness["disconnect_abs"].extend([50_000, None])
+
+    real_fetch = stream_mod._fetch_media
+    fetch_calls = 0
+
+    async def fail_first_resume_fetch(object_id: str):
+        nonlocal fetch_calls
+        fetch_calls += 1
+        if fetch_calls == 2:
+            raise ProviderError("injected resume fetch failure")
+        return await real_fetch(object_id)
+
+    monkeypatch.setattr(stream_mod, "_fetch_media", fail_first_resume_fetch)
+    resp = _get(client)
+
+    assert resp.status_code == 200
+    assert resp.content == expected
+    assert fetch_calls == 3
+    assert len(_stream_harness["opens"]) == 2
+
+
+def test_resume_non_206_failure_retries_and_matches_oneshot(
+    client, _stream_harness, monkeypatch
+):
+    expected = _get(client).content
+    _stream_harness["opens"].clear()
+    _stream_harness["media_calls"].clear()
+    _stream_harness["disconnect_abs"].extend([50_000, None])
+
+    real_open = stream_mod.open_cdn_stream
+    open_calls = 0
+
+    async def return_non_206_once(url: str, range_header: str | None):
+        nonlocal open_calls
+        open_calls += 1
+        response = await real_open(url, range_header)
+        if open_calls == 2:
+            response.status_code = 500
+        return response
+
+    monkeypatch.setattr(stream_mod, "open_cdn_stream", return_non_206_once)
+    resp = _get(client)
+
+    assert resp.status_code == 200
+    assert resp.content == expected
+    assert open_calls == 3
+
+
+def test_resume_ignored_range_failure_retries_and_matches_oneshot(
+    client, _stream_harness, monkeypatch
+):
+    expected = _get(client).content
+    _stream_harness["opens"].clear()
+    _stream_harness["media_calls"].clear()
+    _stream_harness["disconnect_abs"].extend([50_000, None])
+
+    real_open = stream_mod.open_cdn_stream
+    open_calls = 0
+
+    async def ignore_range_once(url: str, range_header: str | None):
+        nonlocal open_calls
+        open_calls += 1
+        response = await real_open(url, range_header)
+        if open_calls == 2:
+            response.payload = _cipher(KEY_B)
+            response.status_code = 200
+        return response
+
+    monkeypatch.setattr(stream_mod, "open_cdn_stream", ignore_range_once)
+    resp = _get(client)
+
+    assert resp.status_code == 200
+    assert resp.content == expected
+    assert open_calls == 3
+
+
 def test_resume_retry_cap_stops_exactly_at_limit(client, _stream_harness):
     settings.STREAM_RESUME_MAX_RETRIES = 3
     _stream_harness["disconnect_abs"].clear()
@@ -247,13 +329,14 @@ def test_resume_retry_cap_stops_exactly_at_limit(client, _stream_harness):
         _stream_harness["disconnect_abs"].append(i + 1)
 
     errors: list[str] = []
-    hid = loguru_logger.add(lambda m: errors.append(str(m)), level="ERROR")
-    try:
-        resp = _get(client)
-    finally:
-        loguru_logger.remove(hid)
+    with TestClient(app) as raising_client:
+        hid = loguru_logger.add(lambda m: errors.append(str(m)), level="ERROR")
+        try:
+            with pytest.raises(httpx.ReadError):
+                _get(raising_client)
+        finally:
+            loguru_logger.remove(hid)
 
-    assert resp.content != PLAIN
     resume_opens = len(_stream_harness["opens"]) - 1
     assert resume_opens == settings.STREAM_RESUME_MAX_RETRIES
     assert any("resume exhausted" in msg for msg in errors)
@@ -439,4 +522,3 @@ async def test_fetch_wechat_channels_media_retry_exhausted_raises(monkeypatch):
     with pytest.raises(VideoNotFoundError):
         await TikHubProvider().fetch_wechat_channels_media(OBJECT_ID)
     assert n["i"] == 3
-
