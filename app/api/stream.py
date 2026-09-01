@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 import re
 from typing import AsyncIterator, Optional, Protocol
 
@@ -77,13 +78,22 @@ async def _open_cdn_stream_httpx(
     headers = {}
     if range_header:
         headers["Range"] = range_header
+    client: Optional[httpx.AsyncClient] = httpx.AsyncClient(
+        timeout=timeout,
+        follow_redirects=True,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        },
+    )
     try:
         request = client.build_request("GET", url, headers=headers)
         response = await client.send(request, stream=True)
-        return _HttpxCdnStream(client, response)
-    except Exception:
-        await client.aclose()
-        raise
+        stream = _HttpxCdnStream(client, response)
+        client = None
+        return stream
+    finally:
+        if client is not None:
+            await client.aclose()
 
 
 # Tests monkeypatch this name.
@@ -104,12 +114,21 @@ class StreamLimiter:
             self._lock = lock
         return lock
 
-    async def try_acquire(self) -> bool:
-        async with self._lock_for_loop():
-            if self.active >= settings.MAX_CONCURRENT_STREAMS:
-                return False
-            self.active += 1
-            return True
+    @asynccontextmanager
+    async def slot(self) -> AsyncIterator[bool]:
+        acquired = False
+        try:
+            async with self._lock_for_loop():
+                if self.active < settings.MAX_CONCURRENT_STREAMS:
+                    self.active += 1
+                    acquired = True
+            if not acquired:
+                yield False
+                return
+            yield True
+        finally:
+            if acquired:
+                await self.release()
 
     async def release(self) -> None:
         async with self._lock_for_loop():
@@ -253,6 +272,18 @@ async def _fetch_media(object_id: str) -> dict:
     return await provider.fetch_wechat_channels_media(object_id)
 
 
+async def _stream_slot(object_id: str) -> AsyncIterator[None]:
+    async with stream_limiter.slot() as acquired:
+        if not acquired:
+            logger.warning(
+                "wechat stream 429 object_id={} active={}",
+                object_id,
+                stream_limiter.active,
+            )
+            raise _json_http_error(429, "Too many concurrent streams")
+        yield
+
+
 async def _iter_decrypted(
     *,
     object_id: str,
@@ -310,24 +341,11 @@ async def _iter_decrypted(
             )
 
 
-@router.get("/stream/wechat_channels/{object_id}")
+@router.get(
+    "/stream/wechat_channels/{object_id}",
+    dependencies=[Depends(_stream_slot)],
+)
 async def stream_wechat_channels(object_id: str, request: Request):
-    if not await stream_limiter.try_acquire():
-        logger.warning(
-            "wechat stream 429 object_id={} active={}",
-            object_id,
-            stream_limiter.active,
-        )
-        raise _json_http_error(429, "Too many concurrent streams")
-
-    released = False
-
-    async def _release() -> None:
-        nonlocal released
-        if not released:
-            released = True
-            await stream_limiter.release()
-
     first_stream: Optional[CdnResponse] = None
     try:
         try:
@@ -350,12 +368,8 @@ async def stream_wechat_channels(object_id: str, request: Request):
         first_stream = await open_cdn_stream(media["full_url"], range_h)
         if first_stream.status_code not in (200, 206):
             status = first_stream.status_code
-            await first_stream.aclose()
-            first_stream = None
             raise _json_http_error(502, f"CDN returned {status}")
         if is_partial and first_stream.status_code == 200:
-            await first_stream.aclose()
-            first_stream = None
             raise _json_http_error(502, "CDN ignored Range request")
         try:
             _reconcile_cdn_offset(
@@ -381,17 +395,14 @@ async def stream_wechat_channels(object_id: str, request: Request):
         first_stream = None  # body iterator owns it
 
         async def body() -> AsyncIterator[bytes]:
-            try:
-                async for chunk in _iter_decrypted(
-                    object_id=object_id,
-                    first_media=media,
-                    first_stream=opened,
-                    start=start,
-                    end=end,
-                ):
-                    yield chunk
-            finally:
-                await _release()
+            async for chunk in _iter_decrypted(
+                object_id=object_id,
+                first_media=media,
+                first_stream=opened,
+                start=start,
+                end=end,
+            ):
+                yield chunk
 
         return StreamingResponse(
             body(),
@@ -399,8 +410,6 @@ async def stream_wechat_channels(object_id: str, request: Request):
             media_type="video/mp4",
             headers=headers,
         )
-    except Exception:
+    finally:
         if first_stream is not None:
             await first_stream.aclose()
-        await _release()
-        raise

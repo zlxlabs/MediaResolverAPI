@@ -541,6 +541,148 @@ async def test_client_disconnect_acloses_upstream(_stream_harness):
 
 
 @pytest.mark.asyncio
+async def test_pre_response_cancel_during_media_releases_slot(db, _stream_harness, monkeypatch):
+    settings.MAX_CONCURRENT_STREAMS = 1
+    stream_mod.stream_limiter.reset()
+    started = asyncio.Event()
+
+    async def blocked_fetch(object_id: str) -> dict:
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(stream_mod, "_fetch_media", blocked_fetch)
+
+    def _override_get_db():
+        yield db
+
+    app.dependency_overrides[get_db] = _override_get_db
+    transport = ASGITransport(app=app)
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            task = asyncio.create_task(
+                ac.get(f"/api/stream/wechat_channels/{OBJECT_ID}", headers=AUTH)
+            )
+            await asyncio.wait_for(started.wait(), timeout=1)
+            assert stream_mod.stream_limiter.active == 1
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert stream_mod.stream_limiter.active == 0
+    finally:
+        app.dependency_overrides.clear()
+        stream_mod.stream_limiter.reset()
+
+
+@pytest.mark.asyncio
+async def test_pre_response_cancel_during_cdn_open_closes_client(
+    db, _stream_harness, monkeypatch
+):
+    settings.MAX_CONCURRENT_STREAMS = 1
+    stream_mod.stream_limiter.reset()
+    started = asyncio.Event()
+    clients: list[object] = []
+    real_async_client = httpx.AsyncClient
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            self.closed = False
+            self.send_called = False
+            clients.append(self)
+
+        def build_request(self, method, url, headers):
+            return object()
+
+        async def send(self, request, stream):
+            self.send_called = True
+            started.set()
+            await asyncio.Event().wait()
+
+        async def aclose(self):
+            self.closed = True
+
+    monkeypatch.setattr(stream_mod.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(
+        stream_mod, "open_cdn_stream", stream_mod._open_cdn_stream_httpx
+    )
+
+    def _override_get_db():
+        yield db
+
+    app.dependency_overrides[get_db] = _override_get_db
+    transport = ASGITransport(app=app)
+    try:
+        async with real_async_client(transport=transport, base_url="http://test") as ac:
+            task = asyncio.create_task(
+                ac.get(f"/api/stream/wechat_channels/{OBJECT_ID}", headers=AUTH)
+            )
+            await asyncio.wait_for(started.wait(), timeout=1)
+            assert stream_mod.stream_limiter.active == 1
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert stream_mod.stream_limiter.active == 0
+            opened = [client for client in clients if client.send_called]
+            assert len(opened) == 1
+            assert opened[0].closed is True
+    finally:
+        app.dependency_overrides.clear()
+        stream_mod.stream_limiter.reset()
+
+
+@pytest.mark.asyncio
+async def test_repeated_pre_response_cancels_do_not_exhaust_slots(
+    db, _stream_harness, monkeypatch
+):
+    settings.MAX_CONCURRENT_STREAMS = 4
+    stream_mod.stream_limiter.reset()
+    cancellations = settings.MAX_CONCURRENT_STREAMS + 1
+    started = asyncio.Event()
+    calls = 0
+
+    async def cancel_then_return(object_id: str) -> dict:
+        nonlocal calls
+        calls += 1
+        if calls <= cancellations:
+            started.set()
+            await asyncio.Event().wait()
+        return {
+            "full_url": "https://cdn.test/v1",
+            "decode_key": KEY_A,
+            "file_size": FILE_SIZE,
+        }
+
+    monkeypatch.setattr(stream_mod, "_fetch_media", cancel_then_return)
+
+    def _override_get_db():
+        yield db
+
+    app.dependency_overrides[get_db] = _override_get_db
+    transport = ASGITransport(app=app)
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            for _ in range(cancellations):
+                started.clear()
+                task = asyncio.create_task(
+                    ac.get(f"/api/stream/wechat_channels/{OBJECT_ID}", headers=AUTH)
+                )
+                await asyncio.wait_for(started.wait(), timeout=1)
+                assert stream_mod.stream_limiter.active == 1
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+                assert stream_mod.stream_limiter.active == 0
+
+            response = await ac.get(
+                f"/api/stream/wechat_channels/{OBJECT_ID}", headers=AUTH
+            )
+            assert response.status_code == 200
+            assert response.content == PLAIN
+    finally:
+        app.dependency_overrides.clear()
+        stream_mod.stream_limiter.reset()
+
+
+@pytest.mark.asyncio
 async def test_concurrency_limit_429_and_release(db, _stream_harness):
     settings.MAX_CONCURRENT_STREAMS = 2
     stream_mod.stream_limiter.reset()
