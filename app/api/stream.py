@@ -367,7 +367,10 @@ async def _read_window_retry(
                 if attempts >= _WINDOW_MAX_ATTEMPTS or state["budget"] <= 0:
                     raise UpstreamDisconnected(str(exc)) from exc
                 state["refreshed"] = True
-                state["media"] = await _fetch_media(sph_code)
+                try:
+                    state["media"] = await _fetch_media(sph_code)
+                except ProviderError as fetch_exc:
+                    raise UpstreamDisconnected(str(fetch_exc)) from fetch_exc
                 url = state["media"]["full_url"]
                 continue
             raise UpstreamDisconnected(str(exc)) from exc
