@@ -1389,3 +1389,62 @@ def test_cdn_200_on_later_window_disconnects(client, _stream_harness, monkeypatc
     assert later
     assert later[0]["stream"].aiter_calls == 0
 
+
+def test_refresh_provider_error_before_headers_returns_502(
+    client, _stream_harness, monkeypatch
+):
+    real_fetch = stream_mod._fetch_media
+    real_open = stream_mod.open_cdn_stream
+    fetch_calls: list[str] = []
+
+    async def fetch_then_fail(sph_code: str):
+        fetch_calls.append(sph_code)
+        if len(fetch_calls) >= 2:
+            raise ProviderError("tikhub down on refresh")
+        return await real_fetch(sph_code)
+
+    async def first_window_403(url: str, requested_range: str | None):
+        response = await real_open(url, requested_range)
+        start, _, _ = stream_mod.parse_byte_range(requested_range)
+        if start is not None and start >= 200000:
+            response.status_code = 403
+        return response
+
+    monkeypatch.setattr(stream_mod, "_fetch_media", fetch_then_fail)
+    monkeypatch.setattr(stream_mod, "open_cdn_stream", first_window_403)
+    resp = _get(client, "bytes=200000-")
+    assert resp.status_code == 502
+    assert resp.headers["content-type"].startswith("application/json")
+    assert "detail" in resp.json()
+    assert fetch_calls == [SPH_CODE, SPH_CODE]
+
+
+def test_refresh_provider_error_after_headers_disconnects(
+    client, _stream_harness, monkeypatch
+):
+    settings.STREAM_WINDOW_BYTES = 131072
+    real_fetch = stream_mod._fetch_media
+    real_open = stream_mod.open_cdn_stream
+    fetch_calls: list[str] = []
+
+    async def fetch_then_fail(sph_code: str):
+        fetch_calls.append(sph_code)
+        if len(fetch_calls) >= 2:
+            raise ProviderError("tikhub down on refresh")
+        return await real_fetch(sph_code)
+
+    async def second_window_403(url: str, requested_range: str | None):
+        response = await real_open(url, requested_range)
+        start, _, _ = stream_mod.parse_byte_range(requested_range)
+        if start == 131072:
+            response.status_code = 403
+        return response
+
+    monkeypatch.setattr(stream_mod, "_fetch_media", fetch_then_fail)
+    monkeypatch.setattr(stream_mod, "open_cdn_stream", second_window_403)
+    resp = _get(client)
+    assert resp.status_code == 200
+    assert resp.status_code != 500
+    assert len(resp.content) < FILE_SIZE
+    assert fetch_calls == [SPH_CODE, SPH_CODE]
+
