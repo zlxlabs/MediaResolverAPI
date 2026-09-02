@@ -25,6 +25,15 @@ class UpstreamDisconnected(Exception):
     """CDN ended before the requested byte range was fully forwarded."""
 
 
+class CdnHttpError(Exception):
+    """CDN returned a non-success status that the caller must interpret."""
+
+    def __init__(self, status_code: int, content_range: Optional[str] = None) -> None:
+        self.status_code = status_code
+        self.content_range = content_range
+        super().__init__(f"CDN returned {status_code}")
+
+
 _UPSTREAM_FAIL = (
     httpx.TransportError,
     httpx.StreamError,
@@ -257,6 +266,77 @@ def _cdn_content_length(stream: CdnResponse) -> Optional[int]:
     if re.fullmatch(r"\d+", content_length.strip()) is None:
         raise UpstreamDisconnected("CDN response has invalid Content-Length")
     return int(content_length)
+
+
+_EXPIRED_STATUSES = frozenset({401, 403, 404, 410})
+_WINDOW_MAX_ATTEMPTS = 3
+_REQUEST_RETRY_BUDGET = 20
+_URL_REFRESH_MIN_OFFSET = 131072
+
+
+async def _consume_cdn_body(stream: CdnResponse) -> bytes:
+    chunks: list[bytes] = []
+    try:
+        async for chunk in stream.aiter_bytes(settings.STREAM_CHUNK_SIZE):
+            if chunk:
+                chunks.append(chunk)
+    except _UPSTREAM_FAIL as exc:
+        raise UpstreamDisconnected("upstream closed before range complete") from exc
+    return b"".join(chunks)
+
+
+async def _read_window(url: str, start: int, end: int) -> tuple[bytes, int, Optional[int]]:
+    """Open Range: bytes=start-end, validate 206, read the whole body, aclose.
+
+    Returns ``(raw, declared_end, complete_length)``. Body length must equal
+    ``declared_end - start + 1`` or ``UpstreamDisconnected`` is raised.
+    This is the only function that opens a CDN stream.
+    """
+    if end < start:
+        raise UpstreamDisconnected("invalid window bounds")
+    stream: Optional[CdnResponse] = None
+    try:
+        stream = await open_cdn_stream(url, f"bytes={start}-{end}")
+        status = stream.status_code
+        if status == 416:
+            raise CdnHttpError(416, stream.content_range)
+        if status in _EXPIRED_STATUSES:
+            raise CdnHttpError(status, stream.content_range)
+        if status == 200:
+            content_length = _cdn_content_length(stream)
+            window_size = end - start + 1
+            if start == 0 and content_length is not None and content_length <= window_size:
+                raw = await _consume_cdn_body(stream)
+                if len(raw) != content_length:
+                    raise UpstreamDisconnected("upstream closed before range complete")
+                return raw, content_length - 1, content_length
+            raise UpstreamDisconnected("CDN ignored Range request")
+        if status != 206:
+            raise UpstreamDisconnected(f"CDN returned {status}")
+        declared_start, declared_end, complete_length = _reconcile_cdn_offset(
+            stream,
+            expected_offset=start,
+        )
+        if declared_end < end and (
+            complete_length is None or declared_end < complete_length - 1
+        ):
+            raise UpstreamDisconnected("upstream closed before range complete")
+        expected_len = declared_end - declared_start + 1
+        raw = await _consume_cdn_body(stream)
+        if len(raw) != expected_len:
+            raise UpstreamDisconnected("upstream closed before range complete")
+        return raw, declared_end, complete_length
+    finally:
+        if stream is not None:
+            try:
+                await stream.aclose()
+            except Exception as close_exc:
+                logger.error(
+                    "wechat stream failed to aclose upstream url={} start={}: {}",
+                    url,
+                    start,
+                    close_exc,
+                )
 
 
 async def _fetch_media(sph_code: str) -> dict:

@@ -84,6 +84,7 @@ class Settings(BaseSettings):
     # WeChat Channels streaming proxy
     MAX_CONCURRENT_STREAMS: int = 4
     STREAM_CHUNK_SIZE: int = 65536
+    STREAM_WINDOW_BYTES: int = 4194304
 
     # Logging
     LOG_LEVEL: str = "INFO"

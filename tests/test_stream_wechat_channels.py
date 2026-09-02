@@ -73,26 +73,33 @@ class FakeCdn:
         self.aclose_called = False
         self.aclose_count = 0
         self.aiter_calls = 0
+        self.read_complete = False
+        self.aiter_in_progress = False
 
     async def aiter_bytes(self, chunk_size: int = 65536):
         self.aiter_calls += 1
-        if self.hold is not None:
-            await self.hold.wait()
-        sent = 0
-        data = self.payload
-        limit = self.disconnect_after
-        while sent < len(data):
-            if limit is not None and sent >= limit:
-                raise httpx.ReadError("injected upstream disconnect")
-            n = min(chunk_size, len(data) - sent)
-            if limit is not None:
-                n = min(n, limit - sent)
-                if n <= 0:
+        self.aiter_in_progress = True
+        try:
+            if self.hold is not None:
+                await self.hold.wait()
+            sent = 0
+            data = self.payload
+            limit = self.disconnect_after
+            while sent < len(data):
+                if limit is not None and sent >= limit:
                     raise httpx.ReadError("injected upstream disconnect")
-            yield data[sent : sent + n]
-            sent += n
-            if limit is not None and sent >= limit:
-                raise httpx.ReadError("injected upstream disconnect")
+                n = min(chunk_size, len(data) - sent)
+                if limit is not None:
+                    n = min(n, limit - sent)
+                    if n <= 0:
+                        raise httpx.ReadError("injected upstream disconnect")
+                yield data[sent : sent + n]
+                sent += n
+                if limit is not None and sent >= limit:
+                    raise httpx.ReadError("injected upstream disconnect")
+            self.read_complete = True
+        finally:
+            self.aiter_in_progress = False
 
     async def aclose(self) -> None:
         self.aclose_called = True
@@ -104,9 +111,11 @@ def _stream_harness(monkeypatch):
     original_key = settings.API_KEY
     original_chunk = settings.STREAM_CHUNK_SIZE
     original_conc = settings.MAX_CONCURRENT_STREAMS
+    original_window = settings.STREAM_WINDOW_BYTES
     settings.API_KEY = "test-key-123"
     settings.STREAM_CHUNK_SIZE = 65536
     settings.MAX_CONCURRENT_STREAMS = 4
+    settings.STREAM_WINDOW_BYTES = 4194304
     stream_mod.stream_limiter.reset()
 
     opens: list[dict] = []
@@ -137,12 +146,16 @@ def _stream_harness(monkeypatch):
             else:
                 start = requested_start
             if start >= FILE_SIZE:
-                return FakeCdn(
+                cdn = FakeCdn(
                     b"",
                     status_code=416,
                     content_range=f"bytes */{FILE_SIZE}",
                     content_length="0",
                 )
+                opens.append(
+                    {"url": url, "range": range_header, "stream": cdn, "start": start}
+                )
+                return cdn
             end = (
                 FILE_SIZE - 1
                 if requested_end is None
@@ -170,17 +183,30 @@ def _stream_harness(monkeypatch):
 
     monkeypatch.setattr(stream_mod, "_fetch_media", fake_fetch)
     monkeypatch.setattr(stream_mod, "open_cdn_stream", fake_open)
+    xor_while_reading: list[dict] = []
+    real_xor = stream_mod.xor_chunk
+
+    def tracking_xor(chunk, decode_key, absolute_offset):
+        for rec in opens:
+            stream = rec["stream"]
+            if getattr(stream, "aiter_in_progress", False):
+                xor_while_reading.append(rec)
+        return real_xor(chunk, decode_key, absolute_offset)
+
+    monkeypatch.setattr(stream_mod, "xor_chunk", tracking_xor)
     harness = {
         "opens": opens,
         "media_calls": media_calls,
         "disconnect_abs": disconnect_abs,
         "hold_event": hold_event,
         "keys": keys,
+        "xor_while_reading": xor_while_reading,
     }
     yield harness
     settings.API_KEY = original_key
     settings.STREAM_CHUNK_SIZE = original_chunk
     settings.MAX_CONCURRENT_STREAMS = original_conc
+    settings.STREAM_WINDOW_BYTES = original_window
     stream_mod.stream_limiter.reset()
 
 
@@ -1181,3 +1207,111 @@ async def test_fetch_wechat_channels_media_retry_exhausted_raises(monkeypatch):
     with pytest.raises(VideoNotFoundError):
         await TikHubProvider().fetch_wechat_channels_media(SPH_CODE)
     assert n["i"] == 3
+
+
+@pytest.mark.asyncio
+async def test_read_window_sends_bounded_range_and_returns_exact_bytes(_stream_harness):
+    raw, declared_end, total = await stream_mod._read_window(
+        "https://cdn.test/v1", 1000, 1099
+    )
+    assert raw == _cipher(KEY_A)[1000:1100]
+    assert declared_end == 1099
+    assert total == FILE_SIZE
+    rec = _stream_harness["opens"][0]
+    assert rec["range"] == "bytes=1000-1099"
+    assert rec["stream"].read_complete is True
+    assert rec["stream"].aclose_called is True
+    assert rec["stream"].aiter_in_progress is False
+
+
+@pytest.mark.asyncio
+async def test_read_window_probe_zero_returns_complete_length(_stream_harness):
+    raw, declared_end, total = await stream_mod._read_window(
+        "https://cdn.test/v1", 0, 0
+    )
+    assert len(raw) == 1
+    assert raw == _cipher(KEY_A)[0:1]
+    assert declared_end == 0
+    assert total == FILE_SIZE
+    assert _stream_harness["opens"][0]["range"] == "bytes=0-0"
+    assert _stream_harness["opens"][0]["stream"].read_complete is True
+    assert _stream_harness["opens"][0]["stream"].aclose_called is True
+
+
+@pytest.mark.asyncio
+async def test_read_window_eof_clip_returns_declared_range(_stream_harness):
+    start = FILE_SIZE - 50
+    raw, declared_end, total = await stream_mod._read_window(
+        "https://cdn.test/v1", start, FILE_SIZE + 1000
+    )
+    assert raw == _cipher(KEY_A)[start:FILE_SIZE]
+    assert declared_end == FILE_SIZE - 1
+    assert total == FILE_SIZE
+    assert _stream_harness["opens"][0]["stream"].read_complete is True
+    assert _stream_harness["opens"][0]["stream"].aclose_called is True
+
+
+@pytest.mark.asyncio
+async def test_read_window_short_body_raises_and_acloses(_stream_harness):
+    _stream_harness["disconnect_abs"].append(1010)
+    with pytest.raises(stream_mod.UpstreamDisconnected):
+        await stream_mod._read_window("https://cdn.test/v1", 1000, 1999)
+    rec = _stream_harness["opens"][0]
+    assert rec["stream"].aclose_called is True
+    assert rec["stream"].read_complete is False
+
+
+@pytest.mark.asyncio
+async def test_read_window_416_does_not_consume_body(_stream_harness):
+    with pytest.raises(stream_mod.CdnHttpError) as exc_info:
+        await stream_mod._read_window("https://cdn.test/v1", FILE_SIZE, FILE_SIZE + 10)
+    assert exc_info.value.status_code == 416
+    rec = _stream_harness["opens"][0]
+    assert rec["stream"].aiter_calls == 0
+    assert rec["stream"].aclose_called is True
+
+
+@pytest.mark.asyncio
+async def test_read_window_status_200_whole_file_within_window(_stream_harness, monkeypatch):
+    real_open = stream_mod.open_cdn_stream
+
+    async def return_200(url: str, requested_range: str | None):
+        response = await real_open(url, requested_range)
+        response.status_code = 200
+        response.content_range = None
+        response.content_length = str(FILE_SIZE)
+        response.payload = _cipher(KEY_A)
+        return response
+
+    monkeypatch.setattr(stream_mod, "open_cdn_stream", return_200)
+    raw, declared_end, total = await stream_mod._read_window(
+        "https://cdn.test/v1", 0, FILE_SIZE
+    )
+    assert raw == _cipher(KEY_A)
+    assert declared_end == FILE_SIZE - 1
+    assert total == FILE_SIZE
+    assert _stream_harness["opens"][0]["stream"].read_complete is True
+    assert _stream_harness["opens"][0]["stream"].aclose_called is True
+
+
+@pytest.mark.asyncio
+async def test_read_window_status_200_larger_than_window_fails_without_read(
+    _stream_harness, monkeypatch
+):
+    real_open = stream_mod.open_cdn_stream
+
+    async def return_200(url: str, requested_range: str | None):
+        response = await real_open(url, requested_range)
+        response.status_code = 200
+        response.content_range = None
+        response.content_length = str(FILE_SIZE)
+        response.payload = _cipher(KEY_A)
+        return response
+
+    monkeypatch.setattr(stream_mod, "open_cdn_stream", return_200)
+    with pytest.raises(stream_mod.UpstreamDisconnected, match="CDN ignored Range"):
+        await stream_mod._read_window("https://cdn.test/v1", 0, 1023)
+    rec = _stream_harness["opens"][0]
+    assert rec["stream"].aiter_calls == 0
+    assert rec["stream"].aclose_called is True
+
