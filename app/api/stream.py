@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from contextlib import asynccontextmanager
 import re
 from typing import AsyncIterator, Optional, Protocol
@@ -11,12 +12,17 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from loguru import logger
+from pydantic import BaseModel
 
 from ..core.config import settings
 from .deps import verify_api_key
 from ..services.providers.base import ProviderError, VideoNotFoundError
 from ..services.providers.tikhub import TikHubProvider
-from ..services.wechat_channels_crypto import generate_keystream, xor_chunk
+from ..services.wechat_channels_crypto import (
+    KEYSTREAM_SIZE,
+    generate_keystream,
+    xor_chunk,
+)
 
 router = APIRouter(dependencies=[Depends(verify_api_key)])
 
@@ -581,4 +587,81 @@ async def stream_wechat_channels(sph_code: str, request: Request):
         status_code=status_code,
         media_type="video/mp4",
         headers=headers,
+    )
+
+
+class WechatChannelsDirectInfo(BaseModel):
+    """直连信息：解密后的文件头 + CDN 直链 + 可靠总长度，客户端自行拉身子拼接。"""
+
+    sph_code: str
+    cdn_url: str
+    content_length: int
+    encrypted_head_bytes: int
+    head_b64: str
+    content_type: str = "video/mp4"
+
+
+@router.get("/stream/wechat_channels/{sph_code}/direct")
+async def stream_wechat_channels_direct(sph_code: str) -> WechatChannelsDirectInfo:
+    """只向 CDN 发一次有界请求读文件头，解密后与直链一起回给客户端。
+
+    不占流式并发槽；文件头请求遇到 URL 过期状态时重新取一次 media 再重读，
+    ``cdn_url`` 回传最终成功那一对的 ``full_url``。
+    """
+    if _SPH_CODE_PATTERN.fullmatch(sph_code) is None:
+        raise _json_http_error(400, "Invalid WeChat Channels share code")
+    try:
+        media = await _fetch_media(sph_code)
+    except ProviderError as exc:
+        raise _json_http_error(502, str(exc)) from exc
+    try:
+        generate_keystream(media["decode_key"])
+    except (TypeError, ValueError) as exc:
+        raise _json_http_error(502, "Invalid decode_key") from exc
+
+    state = {"budget": _REQUEST_RETRY_BUDGET, "refreshed": False, "media": media}
+
+    async def read_head() -> tuple[bytes, Optional[int]]:
+        raw, _declared_end, total = await _read_window_retry(
+            state["media"]["full_url"],
+            0,
+            KEYSTREAM_SIZE - 1,
+            sph_code=sph_code,
+            state=state,
+        )
+        return raw, total
+
+    try:
+        raw, total = await read_head()
+    except UpstreamDisconnected as exc:
+        cause = exc.__cause__
+        if (
+            isinstance(cause, CdnHttpError)
+            and cause.status_code in _EXPIRED_STATUSES
+            and not state["refreshed"]
+        ):
+            state["refreshed"] = True
+            try:
+                state["media"] = await _fetch_media(sph_code)
+            except ProviderError as fetch_exc:
+                raise _json_http_error(502, str(fetch_exc)) from fetch_exc
+            try:
+                raw, total = await read_head()
+            except (CdnHttpError, UpstreamDisconnected) as retry_exc:
+                raise _json_http_error(502, str(retry_exc)) from retry_exc
+        else:
+            raise _json_http_error(502, str(exc)) from exc
+    except CdnHttpError as exc:
+        raise _json_http_error(502, str(exc)) from exc
+
+    if total is None:
+        raise _json_http_error(502, "CDN response missing complete length")
+    media = state["media"]
+    head = xor_chunk(raw, media["decode_key"], 0)
+    return WechatChannelsDirectInfo(
+        sph_code=sph_code,
+        cdn_url=media["full_url"],
+        content_length=total,
+        encrypted_head_bytes=len(head),
+        head_b64=base64.b64encode(head).decode("ascii"),
     )
