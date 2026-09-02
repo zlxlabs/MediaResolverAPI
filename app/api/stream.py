@@ -315,6 +315,8 @@ async def _read_window(url: str, start: int, end: int) -> tuple[bytes, int, Opti
                 complete_length is None or declared_end < complete_length - 1
             ):
                 raise UpstreamDisconnected("upstream closed before range complete")
+            if declared_end > end:
+                raise UpstreamDisconnected("CDN 206 response exceeds requested window")
             expected_len = declared_end - declared_start + 1
             raw = await _consume_cdn_body(stream)
             if len(raw) != expected_len:
