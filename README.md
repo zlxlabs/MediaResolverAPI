@@ -353,7 +353,7 @@ HTTP 200，`Content-Type: application/json`：
 #### 客户端拼接协议
 
 1. 调用本端点，解 base64 得到文件头（明文）。
-2. 对 `cdn_url` 发 `Range: bytes=131072-`（或从 `encrypted_head_bytes` 起）拉取剩余明文身子，追加到文件头之后。
+2. 若 `encrypted_head_bytes >= content_length`，文件头已是整个文件，到此结束、**不要再发 Range**；否则对 `cdn_url` 发 `Range: bytes=131072-`（起点即 `encrypted_head_bytes`）拉取剩余明文身子，追加到文件头之后。
 3. 连接被掐或收到 401/403/404/410（token 过期）：重新调用本端点换新 `cdn_url`，从当前已下载偏移继续 `Range` 续传。
 4. 收尾校验：总字节数必须等于 `content_length`，不等则按上一条续传或重拉。
 
@@ -364,7 +364,7 @@ HTTP 200，`Content-Type: application/json`：
 | 200 | 成功 |
 | 400 | `sph_code` 不合法 |
 | 401 | API Key 无效或缺失 |
-| 502 | TikHub 失败、CDN 异常（含无法取得文件完整长度）；文件头请求遇到直链过期会自行换链重试一次，仍失败才回 502 |
+| 502 | TikHub 失败、CDN 异常（含无法取得文件完整长度）；文件头请求遇到直链过期会自行换链重试一次，仍失败才回 502。非过期类 CDN 异常（200 忽略 Range、Content-Range 越窗、正文截断）沿用流式端点的同窗重试，最多 3 次同一有界请求后回 502 |
 
 ---
 

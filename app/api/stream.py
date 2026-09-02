@@ -603,7 +603,7 @@ class WechatChannelsDirectInfo(BaseModel):
 
 @router.get("/stream/wechat_channels/{sph_code}/direct")
 async def stream_wechat_channels_direct(sph_code: str) -> WechatChannelsDirectInfo:
-    """只向 CDN 发一次有界请求读文件头，解密后与直链一起回给客户端。
+    """向 CDN 发有界请求 ``bytes=0-131071`` 读文件头（非过期异常沿用同窗最多 3 次重试），解密后与直链一起回给客户端。
 
     不占流式并发槽；文件头请求遇到 URL 过期状态时重新取一次 media 再重读，
     ``cdn_url`` 回传最终成功那一对的 ``full_url``。
