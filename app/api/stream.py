@@ -339,6 +339,45 @@ async def _read_window(url: str, start: int, end: int) -> tuple[bytes, int, Opti
                 )
 
 
+async def _read_window_retry(
+    url: str,
+    start: int,
+    end: int,
+    *,
+    sph_code: str,
+    state: dict,
+) -> tuple[bytes, int, Optional[int]]:
+    """Read one window with per-window and per-request retry limits."""
+    attempts = 0
+    while True:
+        attempts += 1
+        try:
+            return await _read_window(url, start, end)
+        except CdnHttpError as exc:
+            if exc.status_code == 416:
+                raise
+            expired = exc.status_code in _EXPIRED_STATUSES
+            can_refresh = (
+                expired
+                and start >= _URL_REFRESH_MIN_OFFSET
+                and not state["refreshed"]
+            )
+            state["budget"] -= 1
+            if can_refresh:
+                if attempts >= _WINDOW_MAX_ATTEMPTS or state["budget"] <= 0:
+                    raise UpstreamDisconnected(str(exc)) from exc
+                state["refreshed"] = True
+                state["media"] = await _fetch_media(sph_code)
+                url = state["media"]["full_url"]
+                continue
+            raise UpstreamDisconnected(str(exc)) from exc
+        except UpstreamDisconnected:
+            state["budget"] -= 1
+            if attempts >= _WINDOW_MAX_ATTEMPTS or state["budget"] <= 0:
+                raise
+            continue
+
+
 async def _fetch_media(sph_code: str) -> dict:
     provider = TikHubProvider()
     return await provider.fetch_wechat_channels_media(sph_code)
@@ -374,11 +413,11 @@ async def _iter_windows(
     first_raw: bytes,
     start: int,
     end: int,
+    state: dict,
 ) -> AsyncIterator[bytes]:
     """Yield decrypted bytes from fully-read windows. ``first_raw`` is already in memory."""
     window = settings.STREAM_WINDOW_BYTES
     chunk_size = settings.STREAM_CHUNK_SIZE
-    url = media["full_url"]
     key = media["decode_key"]
     offset = start
     try:
@@ -388,8 +427,11 @@ async def _iter_windows(
         offset += len(first_raw)
         while offset <= end:
             wend = min(offset + window - 1, end)
+            url = state["media"]["full_url"]
             try:
-                raw, declared_end, _total = await _read_window(url, offset, wend)
+                raw, declared_end, _total = await _read_window_retry(
+                    url, offset, wend, sph_code=sph_code, state=state
+                )
             except CdnHttpError as exc:
                 raise UpstreamDisconnected(str(exc)) from exc
             decrypted = xor_chunk(raw, key, offset)
@@ -447,9 +489,17 @@ async def stream_wechat_channels(sph_code: str, request: Request):
 
     window = settings.STREAM_WINDOW_BYTES
     url = media["full_url"]
+    state = {
+        "budget": _REQUEST_RETRY_BUDGET,
+        "refreshed": False,
+        "media": media,
+    }
     try:
         if requested_suffix is not None:
-            _probe, _probe_end, total = await _read_window(url, 0, 0)
+            _probe, _probe_end, total = await _read_window_retry(
+                url, 0, 0, sph_code=sph_code, state=state
+            )
+            url = state["media"]["full_url"]
             if total is None:
                 raise UpstreamDisconnected("CDN 206 response missing complete length")
             start = max(total - requested_suffix, 0)
@@ -457,13 +507,17 @@ async def stream_wechat_channels(sph_code: str, request: Request):
                 raise _416_from_cdn(f"bytes */{total}")
             end = total - 1
             first_end = min(start + window - 1, end)
-            first_raw, _declared_end, total = await _read_window(url, start, first_end)
+            first_raw, _declared_end, total = await _read_window_retry(
+                url, start, first_end, sph_code=sph_code, state=state
+            )
         else:
             start = 0 if requested_start is None else requested_start
             first_end = start + window - 1
             if requested_end is not None:
                 first_end = min(first_end, requested_end)
-            first_raw, _declared_end, total = await _read_window(url, start, first_end)
+            first_raw, _declared_end, total = await _read_window_retry(
+                url, start, first_end, sph_code=sph_code, state=state
+            )
             if total is None:
                 raise UpstreamDisconnected("CDN 206 response missing complete length")
             end = total - 1 if requested_end is None else min(requested_end, total - 1)
@@ -477,6 +531,7 @@ async def stream_wechat_channels(sph_code: str, request: Request):
     except UpstreamDisconnected as exc:
         raise _json_http_error(502, str(exc)) from exc
 
+    media = state["media"]
     headers = {
         "Content-Type": "video/mp4",
         "Accept-Ranges": "bytes",
@@ -493,6 +548,7 @@ async def stream_wechat_channels(sph_code: str, request: Request):
             first_raw=first_raw,
             start=start,
             end=end,
+            state=state,
         ):
             yield chunk
 
