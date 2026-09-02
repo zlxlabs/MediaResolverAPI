@@ -89,7 +89,9 @@ def harness(monkeypatch):
     async def fake_open(url: str, range_header: str | None) -> FakeCdn:
         opens.append({"url": url, "range": range_header})
         if control["first_status"] is not None and len(opens) == 1:
-            return FakeCdn(b"", status_code=control["first_status"])
+            cdn = FakeCdn(b"", status_code=control["first_status"])
+            opens[-1]["stream"] = cdn
+            return cdn
         key = KEY_A if url == URL_A else KEY_B
         cipher = _cipher_head(key)
         start, req_end, _ = stream_mod.parse_byte_range(range_header)
@@ -108,7 +110,12 @@ def harness(monkeypatch):
 
     monkeypatch.setattr(stream_mod, "_fetch_media", fake_fetch)
     monkeypatch.setattr(stream_mod, "open_cdn_stream", fake_open)
-    harness = {"opens": opens, "media_calls": media_calls, "control": control}
+    harness = {
+        "opens": opens,
+        "media_calls": media_calls,
+        "control": control,
+        "medias": medias,
+    }
     yield harness
     settings.API_KEY = original_key
 
@@ -164,6 +171,25 @@ def test_direct_expired_url_refreshes_media(client, harness):
     assert all(
         rec["range"] == f"bytes=0-{KEYSTREAM_SIZE - 1}" for rec in harness["opens"]
     )
+    assert harness["opens"][0]["stream"].aclose_called is True
+    assert harness["opens"][1]["stream"].aclose_called is True
+
+
+def test_direct_refresh_invalid_second_decode_key_is_502(client, harness):
+    harness["control"]["first_status"] = 403
+    harness["medias"][1]["decode_key"] = "not-a-key"
+    resp = _get(client)
+    assert resp.status_code == 502
+    assert resp.headers["content-type"].startswith("application/json")
+    assert resp.json()["detail"] == "Invalid decode_key"
+    body = resp.text
+    assert URL_A not in body
+    assert URL_B not in body
+    assert "http://" not in body
+    assert "https://" not in body
+    assert len(harness["opens"]) == 1
+    assert harness["opens"][0]["url"] == URL_A
+    assert harness["opens"][0]["stream"].aclose_called is True
 
 
 def test_direct_missing_complete_length_is_502(client, harness):
