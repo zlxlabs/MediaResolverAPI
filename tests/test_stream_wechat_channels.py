@@ -47,10 +47,23 @@ def _cipher(key) -> bytes:
 
 def _slice_plain(range_header: str | None) -> bytes:
     start, end, _ = stream_mod.parse_byte_range(range_header)
-    assert start is not None
-    if end is None:
+    if start is None:
+        assert range_header is not None
+        suffix = int(range_header.split("=", 1)[1].split("-", 1)[1])
+        start = max(FILE_SIZE - suffix, 0)
+        end = FILE_SIZE - 1
+    elif end is None:
         end = FILE_SIZE - 1
     return PLAIN[start : end + 1]
+
+
+def _assert_windows_fully_read_before_client_yield(harness) -> None:
+    assert harness["xor_while_reading"] == []
+    for rec in harness["opens"]:
+        stream = rec["stream"]
+        if stream.aiter_calls:
+            assert stream.read_complete is True
+        assert stream.aclose_called is True
 
 
 class FakeCdn:
@@ -237,16 +250,24 @@ RANGE_CASES = [
     ("bytes_plain_from_boundary", "bytes=131072-"),
     ("bytes_plain_window", "bytes=200000-300000"),
     ("bytes_window_past_cdn_end", "bytes=200000-700000"),
+    ("bytes_suffix", "bytes=-100000"),
 ]
 
+WINDOW_SIZES = [65536, 131072, 200000, 4194304, FILE_SIZE + 10]
 
+
+@pytest.mark.parametrize("window", WINDOW_SIZES, ids=[str(w) for w in WINDOW_SIZES])
 @pytest.mark.parametrize("name,range_header", RANGE_CASES, ids=[c[0] for c in RANGE_CASES])
-def test_range_matches_full_download_slice(client, _stream_harness, name, range_header):
+def test_range_matches_full_download_slice(
+    client, _stream_harness, name, range_header, window
+):
+    settings.STREAM_WINDOW_BYTES = window
     expected = _slice_plain(range_header)
     resp = _get(client, range_header)
     assert resp.status_code in (200, 206)
     assert resp.headers["content-type"].startswith("video/mp4")
     assert resp.content == expected
+    assert resp.headers["accept-ranges"] == "bytes"
     if range_header is None:
         assert resp.content[4:8] == b"ftyp"
         assert resp.status_code == 200
@@ -254,169 +275,54 @@ def test_range_matches_full_download_slice(client, _stream_harness, name, range_
         assert resp.headers["content-length"] != str(TIKHUB_FILE_SIZE)
     else:
         assert resp.status_code == 206
-        assert _stream_harness["opens"][0]["range"] == range_header
         start, end, _ = stream_mod.parse_byte_range(range_header)
-        assert start is not None
-        expected_end = FILE_SIZE - 1 if end is None else min(end, FILE_SIZE - 1)
-        assert resp.headers["content-range"] == (
-            f"bytes {start}-{expected_end}/{FILE_SIZE}"
-        )
-        assert resp.headers["content-length"] == str(expected_end - start + 1)
-
-
-MATRIX_CLIENTS = {
-    "R0": (None, 0, None),
-    "R1": ("bytes=0-", 0, None),
-    "R2": ("bytes=200000-", 200000, None),
-    "R3": ("bytes=0-99999", 0, 99999),
-    "R4": ("bytes=200000-299999", 200000, 299999),
-    "R5": ("bytes=-100000", None, None),
-}
-
-
-MATRIX_RESPONSE_FORMS = ["C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8"]
-
-
-def _matrix_cdn_range(range_id: str, response_id: str) -> tuple[int, int] | None:
-    starts = {
-        "R0": 0,
-        "R1": 0,
-        "R2": 200000,
-        "R3": 0,
-        "R4": 200000,
-        "R5": FILE_SIZE - 100000,
-    }
-    if response_id == "C6":
-        return None
-    start = starts[range_id]
-    if response_id == "C5":
-        start += 1
-    if response_id == "C4":
-        end = {
-            "R0": FILE_SIZE - 2,
-            "R1": FILE_SIZE - 2,
-            "R2": FILE_SIZE - 2,
-            "R3": 99999,
-            "R4": 299999,
-            "R5": FILE_SIZE - 2,
-        }[range_id]
-    else:
-        end = FILE_SIZE - 1
-    return start, end
-
-
-def _matrix_expected(range_id: str, response_id: str) -> dict:
-    if response_id == "C7":
-        return {"status": 416, "content_length": None, "content_range": "bytes */600000"}
-    if response_id in {"C5", "C6", "C8"}:
-        return {"status": 502, "content_length": None, "content_range": None}
-    if response_id == "C4" and range_id == "R0":
-        return {"status": 502, "content_length": None, "content_range": None}
-    if response_id == "C2" and range_id == "R0":
-        return {"status": 502, "content_length": None, "content_range": None}
-    if response_id == "C2" and range_id in {"R1", "R2", "R4", "R5"}:
-        return {"status": 502, "content_length": None, "content_range": None}
-    if response_id == "C1" and range_id in {"R2", "R4", "R5"}:
-        return {"status": 502, "content_length": None, "content_range": None}
-    if response_id == "C2" and range_id == "R3":
-        return {"status": 206, "content_length": None, "content_range": "bytes 0-99999/*", "start": 0, "end": 99999}
-    if response_id == "C1":
-        _, requested_start, requested_end = MATRIX_CLIENTS[range_id]
-        start = 0
-        end = FILE_SIZE - 1 if requested_end is None else min(requested_end, FILE_SIZE - 1)
-        return {
-            "status": 200 if range_id == "R0" else 206,
-            "content_length": FILE_SIZE if range_id == "R0" else end - start + 1,
-            "content_range": None if range_id == "R0" else f"bytes {start}-{end}/{FILE_SIZE}",
-            "start": start,
-            "end": end,
-        }
-    start, end = _matrix_cdn_range(range_id, response_id)
-    requested_end = MATRIX_CLIENTS[range_id][2]
-    if requested_end is not None and end > requested_end:
-        end = requested_end
-    return {
-        "status": 200 if range_id == "R0" else 206,
-        "content_length": end - start + 1 if range_id != "R0" else FILE_SIZE,
-        "content_range": None if range_id == "R0" else f"bytes {start}-{end}/{FILE_SIZE}",
-        "start": start,
-        "end": end,
-    }
-
-
-@pytest.mark.parametrize(
-    "range_id, response_id",
-    [(range_id, response_id) for range_id in MATRIX_CLIENTS for response_id in MATRIX_RESPONSE_FORMS],
-    ids=[f"{range_id}x{response_id}" for range_id in MATRIX_CLIENTS for response_id in MATRIX_RESPONSE_FORMS],
-)
-def test_client_range_cdn_response_matrix(
-    client, _stream_harness, monkeypatch, range_id, response_id
-):
-    range_header = MATRIX_CLIENTS[range_id][0]
-    expected = _matrix_expected(range_id, response_id)
-    cipher = _cipher(KEY_A)
-
-    async def matrix_open(url: str, requested_range: str | None):
-        assert requested_range == range_header
-        if response_id == "C1":
-            cdn = FakeCdn(
-                cipher,
-                status_code=200,
-                content_length=str(FILE_SIZE),
-            )
-        elif response_id == "C2":
-            cdn = FakeCdn(cipher, status_code=200)
-        elif response_id in {"C3", "C4", "C5"}:
-            start, end = _matrix_cdn_range(range_id, response_id)
-            cdn = FakeCdn(
-                cipher[start : end + 1],
-                status_code=206,
-                content_range=f"bytes {start}-{end}/{FILE_SIZE}",
-                content_length=str(end - start + 1),
-            )
-        elif response_id == "C6":
-            cdn = FakeCdn(
-                b"malformed response must not be consumed",
-                status_code=206,
-                content_range="bytes malformed",
-            )
-        elif response_id == "C7":
-            cdn = FakeCdn(
-                b"416 response must not be consumed",
-                status_code=416,
-                content_range=f"bytes */{FILE_SIZE}",
-                content_length="0",
-            )
+        if start is None:
+            suffix = int(range_header.split("=", 1)[1].split("-", 1)[1])
+            start = max(FILE_SIZE - suffix, 0)
+            end = FILE_SIZE - 1
+            assert _stream_harness["opens"][0]["range"] == "bytes=0-0"
         else:
-            cdn = FakeCdn(b"upstream error must not be consumed", status_code=500)
-        _stream_harness["opens"].append({"url": url, "range": requested_range, "stream": cdn})
+            requested_end = end
+            client_end = FILE_SIZE - 1 if end is None else min(end, FILE_SIZE - 1)
+            send_end = start + window - 1
+            if requested_end is not None:
+                send_end = min(send_end, requested_end)
+            assert _stream_harness["opens"][0]["range"] == f"bytes={start}-{send_end}"
+            end = client_end
+        assert resp.headers["content-range"] == f"bytes {start}-{end}/{FILE_SIZE}"
+        assert resp.headers["content-length"] == str(end - start + 1)
+    for rec in _stream_harness["opens"]:
+        assert rec["range"] is not None
+        rs, re, _ = stream_mod.parse_byte_range(rec["range"])
+        assert rs is not None and re is not None
+        assert re - rs + 1 <= window
+    _assert_windows_fully_read_before_client_yield(_stream_harness)
+
+
+def test_range_past_end_returns_416(client, _stream_harness):
+    response = _get(client, f"bytes={FILE_SIZE}-")
+    assert response.status_code == 416
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.headers["content-range"] == f"bytes */{FILE_SIZE}"
+    assert _stream_harness["opens"][0]["stream"].aiter_calls == 0
+    assert _stream_harness["opens"][0]["stream"].aclose_called is True
+
+
+def test_cdn_500_on_first_window_returns_502_json(client, _stream_harness, monkeypatch):
+    async def return_500(url: str, requested_range: str | None):
+        cdn = FakeCdn(b"upstream error must not be consumed", status_code=500)
+        _stream_harness["opens"].append(
+            {"url": url, "range": requested_range, "stream": cdn, "start": 0}
+        )
         return cdn
 
-    monkeypatch.setattr(stream_mod, "open_cdn_stream", matrix_open)
-    response = _get(client, range_header)
-
-    assert response.status_code == expected["status"]
-    if expected["status"] in {200, 206}:
-        assert response.headers["content-type"].startswith("video/mp4")
-        assert response.content == PLAIN[expected["start"] : expected["end"] + 1]
-        assert len(response.content) == expected["end"] - expected["start"] + 1
-        if expected["content_length"] is None:
-            assert "content-length" not in response.headers
-        else:
-            assert response.headers["content-length"] == str(expected["content_length"])
-        if expected["content_range"] is None:
-            assert "content-range" not in response.headers
-        else:
-            assert response.headers["content-range"] == expected["content_range"]
-    else:
-        assert response.headers["content-type"].startswith("application/json")
-        assert "detail" in response.json()
-        assert int(response.headers["content-length"]) == len(response.content)
-        if expected["content_range"] is None:
-            assert "content-range" not in response.headers
-        else:
-            assert response.headers["content-range"] == expected["content_range"]
-        assert _stream_harness["opens"][0]["stream"].aiter_calls == 0
+    monkeypatch.setattr(stream_mod, "open_cdn_stream", return_500)
+    response = _get(client)
+    assert response.status_code == 502
+    assert response.headers["content-type"].startswith("application/json")
+    assert "detail" in response.json()
+    assert _stream_harness["opens"][0]["stream"].aiter_calls == 0
+    assert _stream_harness["opens"][0]["stream"].aclose_called is True
 
 
 @pytest.mark.parametrize(
@@ -435,14 +341,10 @@ def test_malformed_range_rejected_before_cdn_request(
     assert _stream_harness["opens"] == []
 
 
-@pytest.mark.parametrize(
-    "range_header, expected_end",
-    [("bytes=0-", FILE_SIZE - 1), ("bytes=0-131071", 131071)],
-    ids=["open-ended", "bounded"],
-)
-def test_range_start_zero_accepts_cdn_full_response(
-    client, _stream_harness, monkeypatch, range_header, expected_end
+def test_range_start_zero_accepts_cdn_full_response_when_file_fits_window(
+    client, _stream_harness, monkeypatch
 ):
+    settings.STREAM_WINDOW_BYTES = FILE_SIZE
     real_open = stream_mod.open_cdn_stream
 
     async def return_full_response(url: str, requested_range: str | None):
@@ -454,16 +356,13 @@ def test_range_start_zero_accepts_cdn_full_response(
         return response
 
     monkeypatch.setattr(stream_mod, "open_cdn_stream", return_full_response)
-    resp = _get(client, range_header)
+    resp = _get(client, "bytes=0-")
 
-    expected = PLAIN[: expected_end + 1]
     assert resp.status_code == 206
-    assert resp.content == expected
-    assert resp.headers["content-length"] == str(len(expected))
-    assert resp.headers["content-range"] == (
-        f"bytes 0-{expected_end}/{FILE_SIZE}"
-    )
-    assert _stream_harness["opens"][0]["range"] == range_header
+    assert resp.content == PLAIN
+    assert resp.headers["content-length"] == str(FILE_SIZE)
+    assert resp.headers["content-range"] == f"bytes 0-{FILE_SIZE - 1}/{FILE_SIZE}"
+    assert _stream_harness["opens"][0]["stream"].read_complete is True
 
 
 def test_range_nonzero_start_rejects_cdn_full_response(
@@ -534,23 +433,14 @@ def test_tikhub_failure_returns_5xx_json(client, monkeypatch):
     assert resp.headers["content-type"].startswith("application/json")
 
 
-def test_upstream_disconnect_terminates_response_with_error(
-    client, _stream_harness
-):
+def test_first_window_short_body_returns_502_json(client, _stream_harness):
     _stream_harness["disconnect_abs"].append(50_000)
-    errors: list[str] = []
-    with TestClient(app) as raising_client:
-        hid = loguru_logger.add(lambda m: errors.append(str(m)), level="ERROR")
-        try:
-            with pytest.raises(httpx.ReadError):
-                _get(raising_client)
-        finally:
-            loguru_logger.remove(hid)
-
-    assert len(_stream_harness["opens"]) == 1
+    resp = _get(client)
+    assert resp.status_code == 502
+    assert resp.headers["content-type"].startswith("application/json")
+    assert "detail" in resp.json()
     assert _stream_harness["media_calls"] == [SPH_CODE]
     assert _stream_harness["opens"][0]["stream"].aclose_called is True
-    assert any("wechat stream upstream failed" in msg for msg in errors)
 
 
 def test_initial_range_mismatch_fails_before_streaming(
@@ -651,7 +541,7 @@ def test_initial_range_inverted_content_range_fails_before_streaming(
     assert _stream_harness["opens"][0]["stream"].aiter_calls == 0
 
 
-def test_initial_range_end_mismatch_uses_cdn_range(
+def test_mid_file_short_content_range_fails_before_streaming(
     client, _stream_harness, monkeypatch
 ):
     real_open = stream_mod.open_cdn_stream
@@ -666,10 +556,10 @@ def test_initial_range_end_mismatch_uses_cdn_range(
     monkeypatch.setattr(stream_mod, "open_cdn_stream", return_short_range)
     response = _get(client, "bytes=100-200")
 
-    assert response.status_code == 206
-    assert response.headers["content-range"] == "bytes 100-199/600000"
-    assert response.headers["content-length"] == "100"
-    assert response.content == PLAIN[100:200]
+    assert response.status_code == 502
+    assert response.headers["content-type"].startswith("application/json")
+    assert _stream_harness["opens"][0]["stream"].aiter_calls == 0
+    assert _stream_harness["opens"][0]["stream"].aclose_called is True
 
 
 def test_initial_range_complete_length_mismatch_is_allowed(
@@ -729,7 +619,7 @@ def test_initial_range_invalid_content_length_fails_before_streaming(
     assert _stream_harness["opens"][0]["stream"].aiter_calls == 0
 
 
-def test_initial_range_missing_content_length_is_allowed(
+def test_initial_range_missing_content_length_still_sets_client_length(
     client, _stream_harness, monkeypatch
 ):
     real_open = stream_mod.open_cdn_stream
@@ -743,11 +633,12 @@ def test_initial_range_missing_content_length_is_allowed(
     response = _get(client, "bytes=100-200")
 
     assert response.status_code == 206
-    assert "content-length" not in response.headers
+    assert response.headers["content-length"] == "101"
+    assert response.headers["content-range"] == f"bytes 100-200/{FILE_SIZE}"
     assert response.content == _slice_plain("bytes=100-200")
 
 
-def test_initial_range_wildcard_complete_length_is_allowed(
+def test_wildcard_complete_length_fails_before_streaming(
     client, _stream_harness, monkeypatch
 ):
     real_open = stream_mod.open_cdn_stream
@@ -760,9 +651,9 @@ def test_initial_range_wildcard_complete_length_is_allowed(
     monkeypatch.setattr(stream_mod, "open_cdn_stream", return_unknown_total)
     response = _get(client, "bytes=100-200")
 
-    assert response.status_code == 206
-    assert response.headers["content-range"] == "bytes 100-200/*"
-    assert response.content == _slice_plain("bytes=100-200")
+    assert response.status_code == 502
+    assert response.headers["content-type"].startswith("application/json")
+    assert _stream_harness["opens"][0]["stream"].aclose_called is True
 
 
 def test_no_range_206_start_zero_reconciles_before_streaming(
@@ -783,7 +674,7 @@ def test_no_range_206_start_zero_reconciles_before_streaming(
     assert response.content == PLAIN
 
 
-def test_no_range_without_cdn_content_length_fails_before_streaming(
+def test_no_range_206_without_window_content_length_still_succeeds(
     client, _stream_harness, monkeypatch
 ):
     real_open = stream_mod.open_cdn_stream
@@ -796,15 +687,13 @@ def test_no_range_without_cdn_content_length_fails_before_streaming(
     monkeypatch.setattr(stream_mod, "open_cdn_stream", return_without_length)
     response = _get(client)
 
-    assert response.status_code == 502
-    assert response.headers["content-type"].startswith("application/json")
-    assert response.json()["detail"] == (
-        "CDN 200 response missing Content-Length for complete file"
-    )
-    assert _stream_harness["opens"][0]["stream"].aiter_calls == 0
+    assert response.status_code == 200
+    assert response.headers["content-length"] == str(FILE_SIZE)
+    assert response.content == PLAIN
+    _assert_windows_fully_read_before_client_yield(_stream_harness)
 
 
-def test_bounded_range_accepts_cdn_full_response_without_content_length(
+def test_bounded_range_cdn_200_without_content_length_is_ignored_range(
     client, _stream_harness, monkeypatch
 ):
     real_open = stream_mod.open_cdn_stream
@@ -820,13 +709,13 @@ def test_bounded_range_accepts_cdn_full_response_without_content_length(
     monkeypatch.setattr(stream_mod, "open_cdn_stream", return_full_response)
     response = _get(client, "bytes=0-100")
 
-    assert response.status_code == 206
-    assert response.content == PLAIN[:101]
-    assert "content-length" not in response.headers
-    assert response.headers["content-range"] == "bytes 0-100/*"
+    assert response.status_code == 502
+    assert response.headers["content-type"].startswith("application/json")
+    assert _stream_harness["opens"][0]["stream"].aiter_calls == 0
+    assert _stream_harness["opens"][0]["stream"].aclose_called is True
 
 
-def test_bounded_range_cdn_full_response_early_end_raises(
+def test_bounded_range_cdn_200_without_content_length_early_end_is_502(
     client, _stream_harness, monkeypatch
 ):
     real_open = stream_mod.open_cdn_stream
@@ -840,10 +729,10 @@ def test_bounded_range_cdn_full_response_early_end_raises(
         return response
 
     monkeypatch.setattr(stream_mod, "open_cdn_stream", return_early_response)
-    with TestClient(app) as raising_client:
-        with pytest.raises(stream_mod.UpstreamDisconnected):
-            _get(raising_client, "bytes=0-100")
+    response = _get(client, "bytes=0-100")
 
+    assert response.status_code == 502
+    assert response.headers["content-type"].startswith("application/json")
     assert _stream_harness["opens"][0]["stream"].aclose_called is True
 
 
@@ -888,24 +777,26 @@ def test_invalid_decode_key_returns_502_json_before_streaming(
 
 @pytest.mark.asyncio
 async def test_client_disconnect_acloses_upstream(_stream_harness):
+    settings.STREAM_WINDOW_BYTES = 65536
+    first_raw, _declared_end, _total = await stream_mod._read_window(
+        "https://cdn.test/v1", 0, 65535
+    )
     media = {
         "full_url": "https://cdn.test/v1",
         "decode_key": KEY_A,
         "file_size": FILE_SIZE,
     }
-    cdn = FakeCdn(_cipher(KEY_A), status_code=200)
-    agen = stream_mod._iter_decrypted(
+    agen = stream_mod._iter_windows(
         sph_code=SPH_CODE,
-        first_media=media,
-        first_stream=cdn,
+        media=media,
+        first_raw=first_raw,
         start=0,
         end=FILE_SIZE - 1,
     )
     first = await agen.__anext__()
     assert len(first) > 0
     await agen.aclose()
-    assert cdn.aclose_called is True
-    assert cdn.aclose_count >= 1
+    assert all(rec["stream"].aclose_called for rec in _stream_harness["opens"])
 
 
 @pytest.mark.asyncio
@@ -1099,13 +990,14 @@ async def test_concurrency_limit_429_and_release(db, _stream_harness):
         stream_mod.stream_limiter.reset()
 
 
-def test_memory_constant_no_full_body_read(client, monkeypatch, _stream_harness):
+def test_memory_bound_is_window_not_full_file(client, monkeypatch, _stream_harness):
     src = Path(stream_mod.__file__).read_text(encoding="utf-8")
     assert "aread(" not in src
     assert "response.content" not in src
     assert "readall" not in src
     assert "aiter_bytes" in src
 
+    settings.STREAM_WINDOW_BYTES = 65536
     settings.STREAM_CHUNK_SIZE = 1024
     seen: list[int] = []
     real_xor = stream_mod.xor_chunk
@@ -1119,9 +1011,10 @@ def test_memory_constant_no_full_body_read(client, monkeypatch, _stream_harness)
     assert resp.status_code == 200
     assert resp.content == PLAIN
     assert seen
-    assert max(seen) <= settings.STREAM_CHUNK_SIZE
+    assert max(seen) <= settings.STREAM_WINDOW_BYTES
     assert max(seen) < FILE_SIZE
     assert sum(seen) == FILE_SIZE
+    _assert_windows_fully_read_before_client_yield(_stream_harness)
 
 
 def test_each_request_fetches_media_fresh(client, _stream_harness):

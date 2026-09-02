@@ -1,4 +1,4 @@
-"""微信视频号流式解密代理：边拉 CDN 边 XOR 前 131072 字节，其余透传。"""
+"""微信视频号流式解密代理：分窗全读 CDN，再 XOR 前 131072 字节转发。"""
 
 from __future__ import annotations
 
@@ -356,33 +356,46 @@ async def _stream_slot(sph_code: str) -> AsyncIterator[None]:
         yield
 
 
-async def _iter_decrypted(
+def _416_from_cdn(content_range: Optional[str]) -> HTTPException:
+    headers = {}
+    if content_range and _UNSATISFIABLE_RANGE_PATTERN.fullmatch(content_range.strip()):
+        headers["Content-Range"] = content_range.strip()
+    return HTTPException(
+        status_code=416,
+        detail="CDN returned 416",
+        headers=headers or None,
+    )
+
+
+async def _iter_windows(
     *,
     sph_code: str,
-    first_media: dict,
-    first_stream: CdnResponse,
+    media: dict,
+    first_raw: bytes,
     start: int,
-    end: Optional[int],
+    end: int,
 ) -> AsyncIterator[bytes]:
-    """Yield decrypted bytes from the CDN range, or until an unbounded stream ends."""
-    offset = start
+    """Yield decrypted bytes from fully-read windows. ``first_raw`` is already in memory."""
+    window = settings.STREAM_WINDOW_BYTES
     chunk_size = settings.STREAM_CHUNK_SIZE
+    url = media["full_url"]
+    key = media["decode_key"]
+    offset = start
     try:
-        if end is not None and end < start:
-            return
-        async for raw in first_stream.aiter_bytes(chunk_size):
-            if not raw:
-                continue
-            if end is not None:
-                remaining = end - offset + 1
-                if len(raw) > remaining:
-                    raw = raw[:remaining]
-            yield xor_chunk(raw, first_media["decode_key"], offset)
-            offset += len(raw)
-            if end is not None and offset > end:
-                return
-        if end is not None and offset <= end:
-            raise UpstreamDisconnected("upstream closed before range complete")
+        decrypted = xor_chunk(first_raw, key, offset)
+        for i in range(0, len(decrypted), chunk_size):
+            yield decrypted[i : i + chunk_size]
+        offset += len(first_raw)
+        while offset <= end:
+            wend = min(offset + window - 1, end)
+            try:
+                raw, declared_end, _total = await _read_window(url, offset, wend)
+            except CdnHttpError as exc:
+                raise UpstreamDisconnected(str(exc)) from exc
+            decrypted = xor_chunk(raw, key, offset)
+            for i in range(0, len(decrypted), chunk_size):
+                yield decrypted[i : i + chunk_size]
+            offset = declared_end + 1
     except asyncio.CancelledError:
         logger.warning(
             "wechat stream cancelled by client sph_code={} offset={}",
@@ -405,15 +418,6 @@ async def _iter_decrypted(
             exc,
         )
         raise
-    finally:
-        try:
-            await first_stream.aclose()
-        except Exception as close_exc:
-            logger.error(
-                "wechat stream failed to aclose upstream sph_code={}: {}",
-                sph_code,
-                close_exc,
-            )
 
 
 @router.get(
@@ -421,145 +425,80 @@ async def _iter_decrypted(
     dependencies=[Depends(_stream_slot)],
 )
 async def stream_wechat_channels(sph_code: str, request: Request):
-    first_stream: Optional[CdnResponse] = None
+    if _SPH_CODE_PATTERN.fullmatch(sph_code) is None:
+        raise _json_http_error(400, "Invalid WeChat Channels share code")
     try:
-        if _SPH_CODE_PATTERN.fullmatch(sph_code) is None:
-            raise _json_http_error(400, "Invalid WeChat Channels share code")
-        try:
-            media = await _fetch_media(sph_code)
-        except VideoNotFoundError as exc:
-            raise _json_http_error(502, str(exc)) from exc
-        except ProviderError as exc:
-            raise _json_http_error(502, str(exc)) from exc
+        media = await _fetch_media(sph_code)
+    except VideoNotFoundError as exc:
+        raise _json_http_error(502, str(exc)) from exc
+    except ProviderError as exc:
+        raise _json_http_error(502, str(exc)) from exc
 
-        try:
-            generate_keystream(media["decode_key"])
-        except (TypeError, ValueError) as exc:
-            raise _json_http_error(502, "Invalid decode_key") from exc
+    try:
+        generate_keystream(media["decode_key"])
+    except (TypeError, ValueError) as exc:
+        raise _json_http_error(502, "Invalid decode_key") from exc
 
-        range_h = request.headers.get("range")
-        requested_start, requested_end, is_partial = parse_byte_range(range_h)
-        requested_suffix = None
-        if is_partial and requested_start is None and range_h is not None:
-            requested_suffix = int(range_h.split("=", 1)[1].strip().split("-", 1)[1])
-        first_stream = await open_cdn_stream(
-            media["full_url"], range_h if is_partial else None
-        )
-        if first_stream.status_code == 416:
-            headers = {}
-            content_range = first_stream.content_range
-            if content_range and _UNSATISFIABLE_RANGE_PATTERN.fullmatch(
-                content_range.strip()
-            ):
-                headers["Content-Range"] = content_range.strip()
-            raise HTTPException(
-                status_code=416,
-                detail="CDN returned 416",
-                headers=headers or None,
-            )
-        if first_stream.status_code not in (200, 206):
-            status = first_stream.status_code
-            raise _json_http_error(502, f"CDN returned {status}")
-        if is_partial and first_stream.status_code == 200 and requested_start != 0:
-            raise _json_http_error(502, "CDN ignored Range request")
-        try:
-            cdn_content_length = _cdn_content_length(first_stream)
-            content_range = None
-            if first_stream.status_code == 206:
-                start, end, complete_length = _reconcile_cdn_offset(
-                    first_stream,
-                    expected_offset=requested_start,
-                )
-                content_range = first_stream.content_range.strip()
-                if requested_end is not None and end > requested_end:
-                    end = requested_end
-                    total = "*" if complete_length is None else str(complete_length)
-                    content_range = f"bytes {start}-{end}/{total}"
-                if requested_suffix is not None and complete_length is not None:
-                    expected_suffix_start = max(complete_length - requested_suffix, 0)
-                    if start != expected_suffix_start:
-                        raise UpstreamDisconnected(
-                            "CDN 206 response starts at "
-                            f"{start}, expected {expected_suffix_start}"
-                        )
-                if not is_partial:
-                    if complete_length is None or end != complete_length - 1:
-                        raise UpstreamDisconnected(
-                            "CDN 206 response does not contain the complete file"
-                        )
-                    cdn_content_length = complete_length
-            else:
-                start = 0
-                end = requested_end
-                if cdn_content_length is not None:
-                    end = (
-                        cdn_content_length - 1
-                        if end is None
-                        else min(end, cdn_content_length - 1)
-                    )
-                elif not is_partial and end is None:
-                    raise UpstreamDisconnected(
-                        "CDN 200 response missing Content-Length for complete file"
-                    )
-            if is_partial and first_stream.status_code == 200:
-                if requested_start != 0:
-                    raise UpstreamDisconnected("CDN ignored Range request")
-                if cdn_content_length is None and end is None:
-                    raise UpstreamDisconnected(
-                        "CDN 200 response missing Content-Length for Range request"
-                    )
-                content_length = (
-                    None
-                    if cdn_content_length is None
-                    else end - start + 1
-                )
-            elif first_stream.status_code == 206:
-                content_length = (
-                    None
-                    if cdn_content_length is None
-                    else end - start + 1
-                )
-            else:
-                content_length = cdn_content_length
-        except UpstreamDisconnected as exc:
-            raise _json_http_error(502, str(exc)) from exc
-        headers = {
-            "Content-Type": "video/mp4",
-            "Accept-Ranges": "bytes",
-        }
-        if content_length is not None:
-            headers["Content-Length"] = str(content_length)
-        if is_partial:
-            if first_stream.status_code == 206:
-                headers["Content-Range"] = content_range
-            else:
-                complete_length = (
-                    "*" if cdn_content_length is None else str(cdn_content_length)
-                )
-                headers["Content-Range"] = (
-                    f"bytes {start}-{end}/{complete_length}"
-                )
-        status_code = 206 if is_partial else 200
+    range_h = request.headers.get("range")
+    requested_start, requested_end, is_partial = parse_byte_range(range_h)
+    requested_suffix = None
+    if is_partial and requested_start is None and range_h is not None:
+        requested_suffix = int(range_h.split("=", 1)[1].strip().split("-", 1)[1])
 
-        opened = first_stream
-        first_stream = None  # body iterator owns it
+    window = settings.STREAM_WINDOW_BYTES
+    url = media["full_url"]
+    try:
+        if requested_suffix is not None:
+            _probe, _probe_end, total = await _read_window(url, 0, 0)
+            if total is None:
+                raise UpstreamDisconnected("CDN 206 response missing complete length")
+            start = max(total - requested_suffix, 0)
+            if start >= total:
+                raise _416_from_cdn(f"bytes */{total}")
+            end = total - 1
+            first_end = min(start + window - 1, end)
+            first_raw, _declared_end, total = await _read_window(url, start, first_end)
+        else:
+            start = 0 if requested_start is None else requested_start
+            first_end = start + window - 1
+            if requested_end is not None:
+                first_end = min(first_end, requested_end)
+            first_raw, _declared_end, total = await _read_window(url, start, first_end)
+            if total is None:
+                raise UpstreamDisconnected("CDN 206 response missing complete length")
+            end = total - 1 if requested_end is None else min(requested_end, total - 1)
+        needed = end - start + 1
+        if len(first_raw) > needed:
+            first_raw = first_raw[:needed]
+    except CdnHttpError as exc:
+        if exc.status_code == 416:
+            raise _416_from_cdn(exc.content_range) from exc
+        raise _json_http_error(502, str(exc)) from exc
+    except UpstreamDisconnected as exc:
+        raise _json_http_error(502, str(exc)) from exc
 
-        async def body() -> AsyncIterator[bytes]:
-            async for chunk in _iter_decrypted(
-                sph_code=sph_code,
-                first_media=media,
-                first_stream=opened,
-                start=start,
-                end=end,
-            ):
-                yield chunk
+    headers = {
+        "Content-Type": "video/mp4",
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(end - start + 1),
+    }
+    if is_partial:
+        headers["Content-Range"] = f"bytes {start}-{end}/{total}"
+    status_code = 206 if is_partial else 200
 
-        return StreamingResponse(
-            body(),
-            status_code=status_code,
-            media_type="video/mp4",
-            headers=headers,
-        )
-    finally:
-        if first_stream is not None:
-            await first_stream.aclose()
+    async def body() -> AsyncIterator[bytes]:
+        async for chunk in _iter_windows(
+            sph_code=sph_code,
+            media=media,
+            first_raw=first_raw,
+            start=start,
+            end=end,
+        ):
+            yield chunk
+
+    return StreamingResponse(
+        body(),
+        status_code=status_code,
+        media_type="video/mp4",
+        headers=headers,
+    )
