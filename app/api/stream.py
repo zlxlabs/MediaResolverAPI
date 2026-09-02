@@ -77,13 +77,6 @@ async def _open_cdn_stream_httpx(
     url: str, range_header: Optional[str]
 ) -> CdnResponse:
     timeout = httpx.Timeout(connect=15.0, read=60.0, write=15.0, pool=15.0)
-    client = httpx.AsyncClient(
-        timeout=timeout,
-        follow_redirects=True,
-        headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        },
-    )
     headers = {}
     if range_header:
         headers["Range"] = range_header
@@ -296,36 +289,43 @@ async def _read_window(url: str, start: int, end: int) -> tuple[bytes, int, Opti
         raise UpstreamDisconnected("invalid window bounds")
     stream: Optional[CdnResponse] = None
     try:
-        stream = await open_cdn_stream(url, f"bytes={start}-{end}")
-        status = stream.status_code
-        if status == 416:
-            raise CdnHttpError(416, stream.content_range)
-        if status in _EXPIRED_STATUSES:
-            raise CdnHttpError(status, stream.content_range)
-        if status == 200:
-            content_length = _cdn_content_length(stream)
-            window_size = end - start + 1
-            if start == 0 and content_length is not None and content_length <= window_size:
-                raw = await _consume_cdn_body(stream)
-                if len(raw) != content_length:
-                    raise UpstreamDisconnected("upstream closed before range complete")
-                return raw, content_length - 1, content_length
-            raise UpstreamDisconnected("CDN ignored Range request")
-        if status != 206:
-            raise UpstreamDisconnected(f"CDN returned {status}")
-        declared_start, declared_end, complete_length = _reconcile_cdn_offset(
-            stream,
-            expected_offset=start,
-        )
-        if declared_end < end and (
-            complete_length is None or declared_end < complete_length - 1
-        ):
-            raise UpstreamDisconnected("upstream closed before range complete")
-        expected_len = declared_end - declared_start + 1
-        raw = await _consume_cdn_body(stream)
-        if len(raw) != expected_len:
-            raise UpstreamDisconnected("upstream closed before range complete")
-        return raw, declared_end, complete_length
+        try:
+            stream = await open_cdn_stream(url, f"bytes={start}-{end}")
+            status = stream.status_code
+            if status == 416:
+                raise CdnHttpError(416, stream.content_range)
+            if status in _EXPIRED_STATUSES:
+                raise CdnHttpError(status, stream.content_range)
+            if status == 200:
+                content_length = _cdn_content_length(stream)
+                window_size = end - start + 1
+                if start == 0 and content_length is not None and content_length <= window_size:
+                    raw = await _consume_cdn_body(stream)
+                    if len(raw) != content_length:
+                        raise UpstreamDisconnected("upstream closed before range complete")
+                    return raw, content_length - 1, content_length
+                raise UpstreamDisconnected("CDN ignored Range request")
+            if status != 206:
+                raise UpstreamDisconnected(f"CDN returned {status}")
+            declared_start, declared_end, complete_length = _reconcile_cdn_offset(
+                stream,
+                expected_offset=start,
+            )
+            if declared_end < end and (
+                complete_length is None or declared_end < complete_length - 1
+            ):
+                raise UpstreamDisconnected("upstream closed before range complete")
+            expected_len = declared_end - declared_start + 1
+            raw = await _consume_cdn_body(stream)
+            if len(raw) != expected_len:
+                raise UpstreamDisconnected("upstream closed before range complete")
+            return raw, declared_end, complete_length
+        except CdnHttpError:
+            raise
+        except _UPSTREAM_FAIL as exc:
+            if isinstance(exc, UpstreamDisconnected):
+                raise
+            raise UpstreamDisconnected("upstream closed before range complete") from exc
     finally:
         if stream is not None:
             try:
@@ -413,7 +413,7 @@ async def _cancel_task(task: Optional[asyncio.Task]) -> None:
         task.cancel()
     try:
         await task
-    except (asyncio.CancelledError, Exception):
+    except BaseException:
         pass
 
 

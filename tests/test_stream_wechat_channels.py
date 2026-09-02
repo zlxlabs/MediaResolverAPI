@@ -1245,6 +1245,28 @@ def test_later_window_short_once_then_succeeds(client, _stream_harness):
     _assert_windows_fully_read_before_client_yield(_stream_harness)
 
 
+def test_later_window_connect_timeout_once_then_succeeds(
+    client, _stream_harness, monkeypatch
+):
+    settings.STREAM_WINDOW_BYTES = 65536
+    real_open = stream_mod.open_cdn_stream
+    timed_out = {"n": 0}
+
+    async def maybe_timeout(url: str, requested_range: str | None):
+        start, _, _ = stream_mod.parse_byte_range(requested_range)
+        if start == 65536 and timed_out["n"] == 0:
+            timed_out["n"] += 1
+            raise httpx.ConnectTimeout("connect")
+        return await real_open(url, requested_range)
+
+    monkeypatch.setattr(stream_mod, "open_cdn_stream", maybe_timeout)
+    resp = _get(client)
+    assert resp.status_code == 200
+    assert resp.content == PLAIN
+    assert timed_out["n"] == 1
+    _assert_windows_fully_read_before_client_yield(_stream_harness)
+
+
 def test_same_window_three_failures_disconnects_after_headers(client, _stream_harness):
     settings.STREAM_WINDOW_BYTES = 65536
     _stream_harness["disconnect_abs"].extend([None, 65536 + 10, 65536 + 10, 65536 + 10])

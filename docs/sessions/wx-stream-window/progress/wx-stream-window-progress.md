@@ -32,3 +32,10 @@
 - 本段结论：文档去掉「服务端不会自动续拉 / 无 Range 收到不完整 206 返回 502」等旧语义，补上 `STREAM_WINDOW_BYTES`。
 - 关键决策与已否决方案：无。
 - 下一步唯一动作：红验三条不变式、全量 pytest、连续 5 次，以及本机 A/B/C 端到端。
+
+## 2026-09-02 提交⑥ 窗口连接超时纳入重试
+
+- 当前阶段：implementing
+- 本段结论：端到端 A 在 offset=32MiB 预读下一窗时 `httpx.ConnectTimeout` 未进入 3 次重试、直接断流；把 `open_cdn_stream` 的传输错误收成 `UpstreamDisconnected` 走原重试，并去掉每窗泄漏的多余 `AsyncClient`。
+- 关键决策与已否决方案：未把连接超时改成 Range 重连当前透传流；仍只重试当前有界窗口。
+- 下一步唯一动作：重启 uvicorn 再跑 A/B/C，并完成红验与全量 pytest。
