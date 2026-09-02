@@ -311,6 +311,63 @@ curl http://localhost:8000/api/stream/wechat_channels/AOzokRxWHz \
 
 ---
 
+### GET /api/stream/wechat_channels/{sph_code}/direct
+
+返回视频号的「直连信息」：解密后的文件头 + CDN 直链 + 可靠总长度。视频号源 mp4 只有前 131072 字节加密、之后全是明文，且 CDN 直链不绑定请求方 IP，因此客户端可以拿直链自己拉身子、与文件头拼接，绕开「下游到本服务」这一跳的带宽瓶颈。服务端只向 CDN 发一次有界请求（`Range: bytes=0-131071`），瞬时完成，不占流式并发槽。
+
+#### 请求
+
+```bash
+curl http://localhost:8000/api/stream/wechat_channels/AOzokRxWHz/direct \
+  -H "X-API-Key: your-api-key"
+```
+
+鉴权与流式端点相同：`X-API-Key` Header，参数只有路径里的 `sph_code`。
+
+#### 成功响应
+
+HTTP 200，`Content-Type: application/json`：
+
+```json
+{
+  "sph_code": "AOzokRxWHz",
+  "cdn_url": "https://finder.video.qq.com/...",
+  "content_length": 435768323,
+  "encrypted_head_bytes": 131072,
+  "head_b64": "<解密后的文件头，标准 base64>",
+  "content_type": "video/mp4"
+}
+```
+
+**响应字段：**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `sph_code` | string | 回显请求中的短码 |
+| `cdn_url` | string | CDN 直链（带时效 token）。**不得写入日志或持久化缓存**；过期后重新调用本端点换新 |
+| `content_length` | int | 文件总字节数，取自 CDN `Content-Range` 的完整长度 |
+| `encrypted_head_bytes` | int | 加密区长度。正常为 131072；文件短于 131072 字节时等于文件长度，此时 `head_b64` 解码后就是整个文件 |
+| `head_b64` | string | 解密后的前 `encrypted_head_bytes` 字节，标准 base64 |
+| `content_type` | string | 恒为 `video/mp4` |
+
+#### 客户端拼接协议
+
+1. 调用本端点，解 base64 得到文件头（明文）。
+2. 对 `cdn_url` 发 `Range: bytes=131072-`（或从 `encrypted_head_bytes` 起）拉取剩余明文身子，追加到文件头之后。
+3. 连接被掐或收到 401/403/404/410（token 过期）：重新调用本端点换新 `cdn_url`，从当前已下载偏移继续 `Range` 续传。
+4. 收尾校验：总字节数必须等于 `content_length`，不等则按上一条续传或重拉。
+
+#### 失败响应 / HTTP 状态码
+
+| 状态码 | 说明 |
+|--------|------|
+| 200 | 成功 |
+| 400 | `sph_code` 不合法 |
+| 401 | API Key 无效或缺失 |
+| 502 | TikHub 失败、CDN 异常（含无法取得文件完整长度）；文件头请求遇到直链过期会自行换链重试一次，仍失败才回 502 |
+
+---
+
 ### GET /health
 
 健康检查，无需认证。
