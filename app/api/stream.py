@@ -406,6 +406,17 @@ def _416_from_cdn(content_range: Optional[str]) -> HTTPException:
     )
 
 
+async def _cancel_task(task: Optional[asyncio.Task]) -> None:
+    if task is None:
+        return
+    if not task.done():
+        task.cancel()
+    try:
+        await task
+    except (asyncio.CancelledError, Exception):
+        pass
+
+
 async def _iter_windows(
     *,
     sph_code: str,
@@ -420,24 +431,30 @@ async def _iter_windows(
     chunk_size = settings.STREAM_CHUNK_SIZE
     key = media["decode_key"]
     offset = start
+    current = first_raw
+    prefetch: Optional[asyncio.Task] = None
     try:
-        decrypted = xor_chunk(first_raw, key, offset)
-        for i in range(0, len(decrypted), chunk_size):
-            yield decrypted[i : i + chunk_size]
-        offset += len(first_raw)
-        while offset <= end:
-            wend = min(offset + window - 1, end)
-            url = state["media"]["full_url"]
-            try:
-                raw, declared_end, _total = await _read_window_retry(
-                    url, offset, wend, sph_code=sph_code, state=state
+        while True:
+            next_start = offset + len(current)
+            if next_start <= end:
+                wend = min(next_start + window - 1, end)
+                url = state["media"]["full_url"]
+                prefetch = asyncio.create_task(
+                    _read_window_retry(
+                        url, next_start, wend, sph_code=sph_code, state=state
+                    )
                 )
-            except CdnHttpError as exc:
-                raise UpstreamDisconnected(str(exc)) from exc
-            decrypted = xor_chunk(raw, key, offset)
+            else:
+                prefetch = None
+            decrypted = xor_chunk(current, key, offset)
             for i in range(0, len(decrypted), chunk_size):
                 yield decrypted[i : i + chunk_size]
-            offset = declared_end + 1
+            if prefetch is None:
+                break
+            raw, declared_end, _total = await prefetch
+            prefetch = None
+            current = raw
+            offset = next_start
     except asyncio.CancelledError:
         logger.warning(
             "wechat stream cancelled by client sph_code={} offset={}",
@@ -460,6 +477,8 @@ async def _iter_windows(
             exc,
         )
         raise
+    finally:
+        await _cancel_task(prefetch)
 
 
 @router.get(

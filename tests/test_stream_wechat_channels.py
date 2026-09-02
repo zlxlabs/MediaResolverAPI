@@ -199,10 +199,17 @@ def _stream_harness(monkeypatch):
     real_xor = stream_mod.xor_chunk
 
     def tracking_xor(chunk, decode_key, absolute_offset):
+        window = settings.STREAM_WINDOW_BYTES
         for rec in opens:
             stream = rec["stream"]
-            if getattr(stream, "aiter_in_progress", False):
-                xor_while_reading.append(rec)
+            if not getattr(stream, "aiter_in_progress", False):
+                continue
+            rec_start = rec.get("start")
+            if rec_start is not None and not (
+                rec_start <= absolute_offset <= rec_start + window
+            ):
+                continue
+            xor_while_reading.append(rec)
         return real_xor(chunk, decode_key, absolute_offset)
 
     monkeypatch.setattr(stream_mod, "xor_chunk", tracking_xor)
@@ -778,6 +785,8 @@ async def test_client_disconnect_acloses_upstream(_stream_harness):
     first_raw, _declared_end, _total = await stream_mod._read_window(
         "https://cdn.test/v1", 0, 65535
     )
+    hold = asyncio.Event()
+    _stream_harness["hold_event"]["e"] = hold
     media = {
         "full_url": "https://cdn.test/v1",
         "decode_key": KEY_A,
@@ -793,8 +802,26 @@ async def test_client_disconnect_acloses_upstream(_stream_harness):
     )
     first = await agen.__anext__()
     assert len(first) > 0
+    for _ in range(50):
+        if len(_stream_harness["opens"]) >= 2:
+            break
+        await asyncio.sleep(0.01)
+    assert len(_stream_harness["opens"]) >= 2
     await agen.aclose()
     assert all(rec["stream"].aclose_called for rec in _stream_harness["opens"])
+    hold.set()
+    await asyncio.sleep(0)
+    live = [
+        t
+        for t in asyncio.all_tasks()
+        if not t.done() and t is not asyncio.current_task()
+    ]
+    prefetch_left = [
+        t
+        for t in live
+        if "_read_window" in repr(t.get_coro())
+    ]
+    assert prefetch_left == []
 
 
 @pytest.mark.asyncio
