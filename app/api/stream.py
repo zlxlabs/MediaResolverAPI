@@ -332,9 +332,9 @@ async def _read_window(url: str, start: int, end: int) -> tuple[bytes, int, Opti
                 await stream.aclose()
             except Exception as close_exc:
                 logger.error(
-                    "wechat stream failed to aclose upstream url={} start={}: {}",
-                    url,
+                    "wechat stream failed to aclose upstream window start={} end={}: {}",
                     start,
+                    end,
                     close_exc,
                 )
 
