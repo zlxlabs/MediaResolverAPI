@@ -1234,6 +1234,33 @@ async def test_read_window_status_200_larger_than_window_fails_without_read(
     assert rec["stream"].aclose_called is True
 
 
+@pytest.mark.asyncio
+async def test_read_window_declared_end_past_requested_end_fails_without_read(
+    _stream_harness, monkeypatch
+):
+    real_open = stream_mod.open_cdn_stream
+    ks = generate_keystream(KEY_A)
+    payload = bytes(PLAIN[i] ^ ks[i] for i in range(1000, 2000))
+
+    async def oversized_206(url: str, requested_range: str | None):
+        response = await real_open(url, requested_range)
+        response.status_code = 206
+        response.content_range = f"bytes 1000-1999/{FILE_SIZE}"
+        response.content_length = "1000"
+        response.payload = payload
+        return response
+
+    monkeypatch.setattr(stream_mod, "open_cdn_stream", oversized_206)
+    with pytest.raises(
+        stream_mod.UpstreamDisconnected,
+        match="CDN 206 response exceeds requested window",
+    ):
+        await stream_mod._read_window("https://cdn.test/v1", 1000, 1099)
+    rec = _stream_harness["opens"][0]
+    assert rec["stream"].aiter_calls == 0
+    assert rec["stream"].aclose_called is True
+
+
 def test_later_window_short_once_then_succeeds(client, _stream_harness):
     settings.STREAM_WINDOW_BYTES = 65536
     normal_opens = (FILE_SIZE + 65535) // 65536
@@ -1388,6 +1415,48 @@ def test_cdn_200_on_later_window_disconnects(client, _stream_harness, monkeypatc
     later = [rec for rec in _stream_harness["opens"] if rec["start"] == 65536]
     assert later
     assert later[0]["stream"].aiter_calls == 0
+
+
+def test_later_window_oversized_content_range_disconnects(
+    client, _stream_harness, monkeypatch
+):
+    window = 65536
+    file_len = window * 4
+    oversized_end = window * 3 - 1
+    settings.STREAM_WINDOW_BYTES = window
+    real_open = stream_mod.open_cdn_stream
+    ks = generate_keystream(KEY_A)
+    cipher = bytes(
+        PLAIN[i] ^ ks[i] if i < KEYSTREAM_SIZE else PLAIN[i] for i in range(file_len)
+    )
+
+    async def oversized_second(url: str, requested_range: str | None):
+        response = await real_open(url, requested_range)
+        start, _, _ = stream_mod.parse_byte_range(requested_range)
+        if start == 0:
+            response.status_code = 206
+            response.content_range = f"bytes 0-{window - 1}/{file_len}"
+            response.payload = cipher[0:window]
+            response.content_length = str(window)
+        elif start == window:
+            payload = cipher[window : oversized_end + 1]
+            response.status_code = 206
+            response.content_range = f"bytes {window}-{oversized_end}/{file_len}"
+            response.payload = payload
+            response.content_length = str(len(payload))
+        return response
+
+    monkeypatch.setattr(stream_mod, "open_cdn_stream", oversized_second)
+    resp = _get(client)
+    assert resp.status_code == 200
+    content_length = int(resp.headers["content-length"])
+    assert content_length == file_len
+    assert len(resp.content) <= content_length
+    assert len(resp.content) < file_len
+    later = [rec for rec in _stream_harness["opens"] if rec["start"] == window]
+    assert len(later) == 3
+    assert [rec["range"] for rec in later] == [f"bytes={window}-{window * 2 - 1}"] * 3
+    assert all(rec["stream"].aiter_calls == 0 for rec in later)
 
 
 def test_refresh_provider_error_before_headers_returns_502(
