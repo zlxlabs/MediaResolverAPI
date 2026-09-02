@@ -646,6 +646,10 @@ async def stream_wechat_channels_direct(sph_code: str) -> WechatChannelsDirectIn
             except ProviderError as fetch_exc:
                 raise _json_http_error(502, str(fetch_exc)) from fetch_exc
             try:
+                generate_keystream(state["media"]["decode_key"])
+            except (TypeError, ValueError) as exc:
+                raise _json_http_error(502, "Invalid decode_key") from exc
+            try:
                 raw, total = await read_head()
             except (CdnHttpError, UpstreamDisconnected) as retry_exc:
                 raise _json_http_error(502, str(retry_exc)) from retry_exc
