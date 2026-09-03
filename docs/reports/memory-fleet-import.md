@@ -5,7 +5,7 @@
 - 执行器 / 模型：cursor / cursor-grok-4.6-high（implementer）
 - 分支：`card/MediaResolverAPI-20260904-01`
 - 基线：`f66787dc26e84fd9893c9473f4653d6da5b33e4e`
-- 提交：见本节提交后回填；推送卡分支、不开 PR、不合并。
+- 提交：`95a3c1ed1d42be6c9dd98596086af915797c1d51`；推送卡分支、不开 PR、不合并。
 
 本仓无规则文件（无 `AGENTS.md` / `CLAUDE.md`），未加指针。
 
