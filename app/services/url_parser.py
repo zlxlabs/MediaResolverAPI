@@ -21,7 +21,9 @@ class URLParser:
     SHORT_URL_DOMAINS = {
         'v.douyin.com',      # 抖音短链
         'vm.tiktok.com',     # TikTok短链
+        'vt.tiktok.com',     # TikTok新短链
         'xhslink.com',       # 小红书短链
+        'xhslink.cn',        # 小红书新短链
         'youtu.be',          # YouTube短链
         'pin.it',            # Pinterest短链
         'fb.watch',          # Facebook短链
@@ -36,6 +38,7 @@ class URLParser:
         # TikTok
         'tiktok.com': 'tiktok',
         'vm.tiktok.com': 'tiktok',
+        'vt.tiktok.com': 'tiktok',
 
         # 快手
         'kuaishou.com': 'kuaishou',
@@ -48,6 +51,7 @@ class URLParser:
         # 小红书
         'xiaohongshu.com': 'xiaohongshu',
         'xhslink.com': 'xiaohongshu',
+        'xhslink.cn': 'xiaohongshu',
 
         # Instagram
         'instagram.com': 'instagram',
