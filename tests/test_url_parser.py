@@ -101,9 +101,11 @@ class TestShortUrlDetection:
         [
             ("https://v.douyin.com/abc123/", True),
             ("https://vm.tiktok.com/ZMxyz/", True),
+            ("https://vt.tiktok.com/ZSVc3fkd2/", True),
             ("https://youtu.be/abc", True),
             ("https://pin.it/abc", True),
             ("https://xhslink.com/abc", True),
+            ("https://xhslink.cn/o/8Gx4uVk2CR1", True),
             ("https://www.youtube.com/watch?v=abc", False),
             ("https://www.tiktok.com/@user/video/123", False),
         ],
@@ -114,6 +116,17 @@ class TestShortUrlDetection:
     def test_wechat_channels_sph_is_not_short_url(self, parser):
         """视频号分享链由 TikHub 直接吃 share_url，不得进 SHORT_URL_DOMAINS。"""
         assert parser.is_short_url("https://weixin.qq.com/sph/AOzokRxWHz") is False
+
+    @pytest.mark.parametrize(
+        "url,expected_platform",
+        [
+            ("https://xhslink.cn/o/8Gx4uVk2CR1", "xiaohongshu"),
+            ("https://vt.tiktok.com/ZSVc3fkd2/", "tiktok"),
+        ],
+    )
+    def test_new_short_domains_identify_platform(self, parser, url, expected_platform):
+        assert parser.is_short_url(url) is True
+        assert parser.identify_platform(url) == expected_platform
 
 
 # 视频号：按路径识别，禁止把公众号域名误判进来
