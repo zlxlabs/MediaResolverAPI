@@ -69,6 +69,10 @@ cp .env.example .env
 | `HTTP_TIMEOUT_SECONDS` | 服务访问上游 HTTP 的超时（秒） | `30` | 一般不用改；上游较慢需要放宽超时时才设 |
 | `TRANSLATION_ENABLED` | 是否翻译视频描述（影响响应里的 `translated_description`） | `True` | 不需要翻译时设为 `false`；为 True 且请求 `translate=true` 时还需配置 `OPENAI_API_KEY` |
 | `OPENAI_API_KEY` | 翻译用的 OpenAI 兼容接口密钥 | 空字符串 `""` | 需要翻译描述时必须设；留空则即使 `TRANSLATION_ENABLED=True` 也不会翻译 |
+| `OPENAI_MODEL` | 翻译主模型名称 | `gpt-4o-mini` | 名称必须是网关当前可用的模型 |
+| `OPENAI_MODEL_FALLBACKS` | 主模型不可用时按顺序尝试的备用模型，逗号分隔 | 空字符串 `""` | 网关删除单个模型名称时配置备用模型；名单全灭会打开翻译熔断 |
+| `TRANSLATION_CIRCUIT_COOLDOWN_SECONDS` | 翻译熔断冷却时间（秒） | `900` | 名单全灭后，冷却期内不再请求翻译上游 |
+| `TRANSLATION_STARTUP_PROBE` | 是否在服务启动时探测翻译上游 | `True` | 探测失败只打开翻译熔断，不阻止服务启动 |
 
 ### 2. 启动服务
 
@@ -167,6 +171,7 @@ curl -X POST http://localhost:8000/api/resolve \
     "title": "Video Title",
     "description": "Original video description",
     "translated_description": "翻译后的视频描述",
+    "translation_status": "ok",
     "author_name": "creator_name",
     "author_id": "creator_id",
     "video_url": "https://direct-download-link.mp4",
@@ -197,6 +202,7 @@ curl -X POST http://localhost:8000/api/resolve \
 | `data.title` | string | 视频标题 |
 | `data.description` | string | 视频描述原文 |
 | `data.translated_description` | string \| null | 翻译后的中文描述（仅当 `translate=true` 且原文非中文时） |
+| `data.translation_status` | string \| null | 翻译状态：`ok`、`skipped_chinese`、`skipped_disabled`、`skipped_not_requested` 或 `failed`；失败时译文为 `null`，不代表整次解析失败 |
 | `data.author_name` | string | 作者昵称 |
 | `data.author_id` | string | 作者 ID |
 | `data.video_url` | string | 视频无水印直链。其他平台为第三方 CDN；视频号指向本服务的流式端点（见「视频号的下载方式」） |
@@ -375,6 +381,16 @@ HTTP 200，`Content-Type: application/json`：
 ```bash
 curl http://localhost:8000/health
 # {"status": "ok"}
+```
+
+### GET /health/translation
+
+查看翻译子系统状态，无需认证。熔断打开时返回 `unavailable`；未启用翻译或未配置密钥时返回 `disabled`。
+该接口不是容器存活探针，Docker `HEALTHCHECK` 仍只探测 `GET /health`。
+
+```bash
+curl http://localhost:8000/health/translation
+# {"status": "ok", "circuit_open": false}
 ```
 
 ---

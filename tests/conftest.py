@@ -44,6 +44,25 @@ def test_tikhub_api_key():
     settings.TIKHUB_API_KEY = original_key
 
 
+@pytest.fixture(autouse=True)
+def disable_translation_startup_probe():
+    """测试默认不让 TestClient 触发真实翻译上游探测。"""
+    original_probe = settings.TRANSLATION_STARTUP_PROBE
+    settings.TRANSLATION_STARTUP_PROBE = False
+    yield
+    settings.TRANSLATION_STARTUP_PROBE = original_probe
+
+
+@pytest.fixture(autouse=True)
+def reset_translation_service():
+    """每个测试隔离翻译服务实例及其熔断状态。"""
+    import app.api.resolve as resolve_module
+
+    resolve_module._translation_service = None
+    yield
+    resolve_module._translation_service = None
+
+
 @pytest.fixture()
 def db(setup_db):
     """Provide a test database session."""

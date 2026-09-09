@@ -18,7 +18,11 @@ from ..core.database import get_db
 from ..services.url_parser import url_parser
 from ..services.video_resolver import VideoResolver, VideoResolverError
 from ..services.cache import CacheService
-from ..services.translation.openai import TranslationService
+from ..services.translation.openai import (
+    TranslationResult,
+    TranslationService,
+    TranslationStatus,
+)
 
 router = APIRouter(dependencies=[Depends(verify_api_key)])
 
@@ -70,6 +74,7 @@ class VideoInfoResponse(BaseModel):
     title: str
     description: str
     translated_description: Optional[str] = None
+    translation_status: Optional[TranslationStatus] = None
     author_name: str
     author_id: str
     video_url: str
@@ -168,6 +173,9 @@ async def resolve_url(
 
         cache_service = CacheService(db)
         translated_desc = None
+        translation_result = TranslationResult(
+            TranslationStatus.skipped_not_requested, None
+        )
 
         # Step 3: Check cache（仅在已知 video_id 时；hybrid / by_url 兜底要解析后才拿到 id）
         if not use_hybrid and video_id and not request.force_refresh:
@@ -179,11 +187,34 @@ async def resolve_url(
                 log_data["cache_hit"] = True
                 log_data["success"] = True
                 log_data["provider"] = cached_info.provider
+                if request.translate:
+                    translation = get_translation_service()
+                    if translation.is_chinese(cached_info.description):
+                        translation_result = TranslationResult(
+                            TranslationStatus.skipped_chinese, None
+                        )
+                    elif cached_translation and translation.is_chinese(cached_translation):
+                        translation_result = TranslationResult(
+                            TranslationStatus.ok, cached_translation
+                        )
+                    else:
+                        translation_result = await translation.translate_to_chinese(
+                            cached_info.description
+                        )
+                        translated_desc = _translation_text(translation_result)
+                        cache_service.cache_video(
+                            platform, video_id, cached_info, translated_desc
+                        )
+                else:
+                    translation_result = TranslationResult(
+                        TranslationStatus.skipped_not_requested, None
+                    )
                 return ResolveResponse(
                     success=True,
                     data=_build_response(
                         cached_info,
-                        cached_translation,
+                        _translation_text(translation_result),
+                        translation_result.status,
                         public_origin=_public_origin(http_request),
                     ),
                 )
@@ -204,14 +235,12 @@ async def resolve_url(
             log_data["video_id"] = video_id
 
         # Step 5: Translate description (if requested and not Chinese)
-        if request.translate and settings.TRANSLATION_ENABLED:
+        if request.translate:
             translation = get_translation_service()
-            if video_info.description and not translation.is_chinese(
+            translation_result = await translation.translate_to_chinese(
                 video_info.description
-            ):
-                translated_desc = await translation.translate_to_chinese(
-                    video_info.description
-                )
+            )
+            translated_desc = _translation_text(translation_result)
 
         # Step 6: Cache result
         cache_service.cache_video(
@@ -225,6 +254,7 @@ async def resolve_url(
             data=_build_response(
                 video_info,
                 translated_desc,
+                translation_result.status,
                 public_origin=_public_origin(http_request),
             ),
         )
@@ -274,7 +304,17 @@ def _absolutize_video_url(video_url: str, public_origin: str) -> str:
     return f"{public_origin.rstrip('/')}{video_url}"
 
 
-def _build_response(video_info, translated_desc=None, public_origin: str = "") -> VideoInfoResponse:
+def _translation_text(result: TranslationResult) -> Optional[str]:
+    """Expose translated text only for a successful translation."""
+    return result.text if result.status == TranslationStatus.ok else None
+
+
+def _build_response(
+    video_info,
+    translated_desc=None,
+    translation_status: Optional[TranslationStatus] = None,
+    public_origin: str = "",
+) -> VideoInfoResponse:
     """Build VideoInfoResponse from VideoInfo object."""
     return VideoInfoResponse(
         platform=video_info.platform,
@@ -282,6 +322,7 @@ def _build_response(video_info, translated_desc=None, public_origin: str = "") -
         title=video_info.title,
         description=video_info.description,
         translated_description=translated_desc,
+        translation_status=translation_status,
         author_name=video_info.author_name,
         author_id=video_info.author_id,
         video_url=_absolutize_video_url(video_info.video_url, public_origin),

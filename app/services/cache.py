@@ -40,7 +40,7 @@ class CacheService:
             tuple[Optional[VideoInfo], Optional[str]]: 缓存的视频信息和翻译后的描述，如果不存在或已过期返回None
         """
         if not settings.CACHE_ENABLED:
-            return None
+            return None, None
 
         try:
             cache_record = self.db.query(VideoCache).filter(

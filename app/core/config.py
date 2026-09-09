@@ -69,7 +69,10 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = ""
     OPENAI_API_BASE: str = "https://api.openai.com/v1"
     OPENAI_MODEL: str = "gpt-4o-mini"
+    OPENAI_MODEL_FALLBACKS: str = ""
     TRANSLATION_ENABLED: bool = True
+    TRANSLATION_CIRCUIT_COOLDOWN_SECONDS: float = 900
+    TRANSLATION_STARTUP_PROBE: bool = True
 
     # Cache
     CACHE_ENABLED: bool = True
