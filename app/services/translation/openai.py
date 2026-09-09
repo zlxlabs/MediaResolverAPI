@@ -2,6 +2,8 @@
 OpenAI翻译服务
 """
 
+from dataclasses import dataclass
+from enum import Enum
 from typing import Optional
 import httpx
 import json
@@ -26,7 +28,7 @@ class TranslationService:
         if not self.enabled:
             logger.warning("翻译服务未启用或缺少API密钥")
 
-    async def translate_to_chinese(self, text: str) -> str:
+    async def translate_to_chinese(self, text: str) -> "TranslationResult":
         """
         将文本翻译成中文
 
@@ -34,20 +36,20 @@ class TranslationService:
             text: 待翻译的文本
 
         Returns:
-            str: 翻译后的中文文本，如果翻译失败或文本已是中文则返回原文本
+            TranslationResult: 翻译状态和中文文本；失败时 text 为 None
         """
         if not text or not text.strip():
-            return text
+            return TranslationResult(TranslationStatus.skipped_chinese, None)
 
         # 检查是否已经是中文
         if self.is_chinese(text):
             logger.debug("文本已是中文，跳过翻译")
-            return text
+            return TranslationResult(TranslationStatus.skipped_chinese, None)
 
         # 检查翻译服务是否可用
         if not self.enabled:
-            logger.debug("翻译服务未启用，返回原文本")
-            return text
+            logger.debug("翻译服务未启用")
+            return TranslationResult(TranslationStatus.skipped_disabled, None)
 
         try:
             # 构建翻译提示词
@@ -88,17 +90,19 @@ class TranslationService:
                     # 验证翻译结果
                     if translated_text and len(translated_text) > 0:
                         logger.info(f"翻译成功: {text[:50]}... -> {translated_text[:50]}...")
-                        return translated_text
+                        return TranslationResult(
+                            TranslationStatus.ok, translated_text, self.model
+                        )
                     else:
-                        logger.warning("翻译结果为空，返回原文本")
-                        return text
+                        logger.warning("翻译结果为空")
+                        return TranslationResult(TranslationStatus.failed, None)
                 else:
-                    logger.error(f"OpenAI API请求失败: {response.status_code} - {response.text}")
-                    return text
+                    logger.error(f"OpenAI API请求失败: {response.status_code}")
+                    return TranslationResult(TranslationStatus.failed, None)
 
         except Exception as e:
             logger.error(f"翻译失败: {e}")
-            return text
+            return TranslationResult(TranslationStatus.failed, None)
 
     def is_chinese(self, text: str) -> bool:
         """
@@ -135,3 +139,22 @@ class TranslationService:
 5. 只返回翻译结果，不要包含任何解释或额外内容
 
 翻译："""
+
+
+class TranslationStatus(str, Enum):
+    """翻译结果状态。"""
+
+    ok = "ok"
+    skipped_chinese = "skipped_chinese"
+    skipped_disabled = "skipped_disabled"
+    skipped_not_requested = "skipped_not_requested"
+    failed = "failed"
+
+
+@dataclass(frozen=True)
+class TranslationResult:
+    """翻译结果；只有成功结果才携带译文。"""
+
+    status: TranslationStatus
+    text: Optional[str]
+    model: Optional[str] = None
