@@ -8,6 +8,7 @@
 ## [Unreleased]
 
 ### Added
+- 翻译结果状态、模型备用名单、翻译熔断与 `/health/translation` 健康口；翻译失败不再写入响应译文或缓存。
 - README 补齐下游接入文档：环境变量表（含 `PUBLIC_BASE_URL`）、视频号 `video_url` 必须带 `X-API-Key` 的差异说明，以及 Python / JavaScript / cURL 的视频号两步下载示例。
 - `LICENSE`（MIT），补齐开源所需许可证。
 - `CONTRIBUTING.md` 开发与贡献指南、`CHANGELOG.md` 变更日志。

@@ -39,3 +39,10 @@
 - 本段结论：新增 `/health/translation`，只返回翻译状态和熔断标志；`/health` 始终保持存活语义。启动探测按运行时开关执行，失败打开翻译熔断但不阻止应用启动，测试夹具自动关闭真实探测；相关测试 4/4 通过。
 - 关键决策与已否决方案：健康口不接 Docker HEALTHCHECK；探测异常由启动生命周期隔离并转换为翻译熔断，不冒泡成进程启动失败。
 - 下一步唯一动作：补齐 README、`.env.example`、CHANGELOG，并核对响应字段与运维说明。
+
+## 里程碑 7：交付文档
+
+- 当前阶段：implementing
+- 本段结论：README 已补充 `translation_status`、模型名单/熔断/启动探测配置和 `/health/translation` 使用说明；`.env.example` 与 CHANGELOG 已同步。文档明确翻译健康口不是 Docker 存活探针。
+- 关键决策与已否决方案：保留 `GET /health` 的 `{"status":"ok"}` 契约，不改 Docker HEALTHCHECK；PR 关联说明按任务要求保持 `Refs #21` 由主脑处理。
+- 下一步唯一动作：提交文档并执行最终现场、差异和测试验收，写入完整报告。
