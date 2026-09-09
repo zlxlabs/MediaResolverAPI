@@ -18,9 +18,10 @@ from .core.config import settings
 from .core.database import init_db, SessionLocal
 from .core.logging import setup_logging
 from .observability import init_observability
-from .api.resolve import router as resolve_router
+from .api.resolve import get_translation_service, router as resolve_router
 from .api.dashboard import router as dashboard_router
 from .api.stream import router as stream_router
+from .services.translation.openai import probe_translation_upstream
 
 # Initialize observability (GlitchTip/Sentry) as early as possible. Fail-open.
 init_observability()
@@ -62,6 +63,15 @@ async def lifespan(app: FastAPI):
     init_db()
     logger.info("Database initialized")
     _cleanup_expired_data()
+    if settings.TRANSLATION_STARTUP_PROBE:
+        translation_service = get_translation_service()
+        try:
+            await probe_translation_upstream(translation_service)
+        except Exception as exc:
+            translation_service.open_circuit(type(exc).__name__)
+            logger.warning(
+                "翻译启动探测异常，已打开熔断: {}", type(exc).__name__
+            )
     yield
     # Shutdown
     logger.info("Shutting down")
@@ -111,6 +121,14 @@ async def root():
 async def health():
     """Health check endpoint."""
     return {"status": "ok"}
+
+
+@app.get("/health/translation")
+async def translation_health():
+    """翻译子系统健康状态，不作为容器存活探针。"""
+    translation_service = get_translation_service()
+    status = translation_service.health_status
+    return {"status": status, "circuit_open": status == "unavailable"}
 
 
 @app.exception_handler(Exception)

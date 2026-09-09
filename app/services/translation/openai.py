@@ -192,6 +192,10 @@ class TranslationService:
         self._circuit_opened_at = time.monotonic()
         report_translation_unavailable(models, error_code)
 
+    def open_circuit(self, error_code: str) -> None:
+        """因启动探测异常打开翻译熔断。"""
+        self._open_circuit(self.models, error_code)
+
     @staticmethod
     def _translated_text(response: httpx.Response) -> Optional[str]:
         try:
@@ -260,5 +264,5 @@ async def probe_translation_upstream(service: TranslationService) -> Translation
     """启动时探测翻译上游，失败仅影响翻译熔断状态。"""
     result = await service.translate_to_chinese("translation startup probe")
     if result.status == TranslationStatus.failed and not service.circuit_open:
-        service._open_circuit(service.models, "startup_probe_failed")
+        service.open_circuit("startup_probe_failed")
     return result
