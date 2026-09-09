@@ -126,3 +126,45 @@ def test_cache_hit_with_empty_translation_is_retranslated_and_written_back(
     db.refresh(db.query(VideoCache).filter(VideoCache.video_id == info.video_id).one())
     cached = db.query(VideoCache).filter(VideoCache.video_id == info.video_id).one()
     assert cached.translated_desc == "一段中文描述"
+
+
+def test_cache_hit_with_chinese_source_does_not_expose_stale_translation(
+    authed_client, db, monkeypatch
+):
+    import app.api.resolve as resolve_mod
+
+    info = _video_info()
+    info.description = "这已经是一段中文简介"
+    db.add(
+        VideoCache(
+            platform="tiktok",
+            video_id=info.video_id,
+            video_data=info.to_dict(),
+            translated_desc="历史译文",
+            provider="tikhub",
+            cached_at=datetime.now(timezone.utc),
+        )
+    )
+    db.commit()
+
+    class _ChineseAwareTranslation:
+        def is_chinese(self, text):
+            return text == info.description
+
+        async def translate_to_chinese(self, text):
+            raise AssertionError("Chinese source should not be translated")
+
+    monkeypatch.setattr(
+        resolve_mod,
+        "get_translation_service",
+        lambda: _ChineseAwareTranslation(),
+    )
+
+    response = authed_client.post(
+        "/api/resolve",
+        json={"url": "https://www.tiktok.com/@author/video/7592102779420115355"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["translated_description"] is None
+    assert response.json()["data"]["translation_status"] == "skipped_chinese"

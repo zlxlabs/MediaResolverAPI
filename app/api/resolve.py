@@ -189,13 +189,13 @@ async def resolve_url(
                 log_data["provider"] = cached_info.provider
                 if request.translate:
                     translation = get_translation_service()
-                    if cached_translation and translation.is_chinese(cached_translation):
-                        translation_result = TranslationResult(
-                            TranslationStatus.ok, cached_translation
-                        )
-                    elif translation.is_chinese(cached_info.description):
+                    if translation.is_chinese(cached_info.description):
                         translation_result = TranslationResult(
                             TranslationStatus.skipped_chinese, None
+                        )
+                    elif cached_translation and translation.is_chinese(cached_translation):
+                        translation_result = TranslationResult(
+                            TranslationStatus.ok, cached_translation
                         )
                     else:
                         translation_result = await translation.translate_to_chinese(

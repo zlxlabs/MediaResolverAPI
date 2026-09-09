@@ -153,3 +153,17 @@ def test_translation_unavailable_reports_sentry_event(monkeypatch):
     assert "检查网关渠道或改 OPENAI_MODEL / OPENAI_MODEL_FALLBACKS 后重启 media-resolver-api" in message
     assert kwargs["fingerprint"] == ["translation_upstream_unavailable"]
     assert kwargs["level"] == "error"
+
+
+def test_translation_unavailable_alert_is_fail_open(monkeypatch):
+    """Sentry 上报异常不能让翻译调用方崩溃。"""
+    reporter = getattr(translation_module, "report_translation_unavailable", None)
+    assert callable(reporter)
+
+    def fail_capture(*args, **kwargs):
+        raise RuntimeError("sentry unavailable")
+
+    monkeypatch.setattr(
+        translation_module.sentry_sdk, "capture_message", fail_capture
+    )
+    reporter(["model-a"], "model_not_found")
