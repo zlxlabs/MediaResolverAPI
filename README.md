@@ -163,6 +163,7 @@ curl -X POST http://localhost:8000/api/resolve \
 | `translate` | bool | - | `true` | 是否将视频描述翻译为中文 |
 | `force_refresh` | bool | - | `false` | 跳过缓存，强制重新解析 |
 | `download_mode` | `video` \| `audio` | - | `video` | 下载意图；`audio` 返回原生音频轨或音频直链，直链字段仍为 `video_url` |
+| `quality` | string | - | - | 可选清晰度封顶，格式为 `^\d+p$`（如 `720p`）；仅对视频意图有意义 |
 
 `download_mode=audio` 的平台路由：
 
@@ -171,6 +172,10 @@ curl -X POST http://localhost:8000/api/resolve \
 - 抖音、快手、小红书、微信视频号：没有音频路径，返回 HTTP 400，错误 detail 以 `audio_not_available` 开头，不调用任何数据源。
 
 audio 模式不代表 MP3 或其他容器格式，服务不做转码；请使用响应中的 `media_type` 判断 `video_url` 的媒体类型。
+
+`quality` 是清晰度封顶而非精确匹配：在不超过 cap 的流中按分辨率取最高档，同档按码率取最高；如果所有流都高于 cap，则取分辨率最低的超档。显式 `quality` 会覆盖平台默认选流规则（例如 Twitter 传 `2160p` 可选择 2160p；YouTube 不传时仍保持 1080p 优先）。当前统一以视频短边 `min(width, height)` 作为 `p` 档比较基准。
+
+当平台只返回单流或没有逐档分辨率元数据时，`quality` 为 no-op：Instagram、微信视频号，以及当前 TikTok、快手、小红书的这类响应均保持默认结果，不报错也不伪造清晰度。`download_mode=audio` 与 `quality` 组合无意义，服务返回 HTTP 422。
 
 #### 成功响应
 

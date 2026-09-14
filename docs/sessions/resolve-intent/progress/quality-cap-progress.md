@@ -25,3 +25,10 @@
 - 本段结论：quality 已从 API 穿过 VideoResolver、TikHubAdapter 到 YouTube/Twitter/Douyin 等现有解析器；Cobalt 将 `720p` 映射为上游接受的 `videoQuality: "720"`。Douyin fixture 的多档分辨率可封顶，TikTok/Kuaishou/Xiaohongshu 当前 fixture 无可选多档，Instagram 通过适配器保持 no-op。
 - 关键决策与已否决方案：不修改 Instagram/Wechat Channels 禁止文件，也不把 Cobalt 的未知实际档位伪填进响应 quality；不传 quality 时 resolver/provider kwargs 仍保持卡 1 的原形状。
 - 下一步唯一动作：补齐 README 契约、执行红验并跑最终全量测试。
+
+## 里程碑 5：契约文档与验证准备
+
+- 当前阶段：verifying
+- 本段结论：README 已记录 quality 格式、封顶/超档语义、短边比较基准、no-op 平台与 audio 组合 422；实现与专项测试已覆盖端点、缓存、解析器和 Cobalt 边界。
+- 关键决策与已否决方案：不新增 variants 菜单或平台共享选流抽象；不改变未传 quality 的默认分支。
+- 下一步唯一动作：完成两条核心断言红验并运行最终全量测试。
