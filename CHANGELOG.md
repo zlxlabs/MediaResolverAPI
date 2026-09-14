@@ -8,6 +8,9 @@
 ## [Unreleased]
 
 ### Added
+- `POST /api/resolve` 新增 `download_mode` 参数：`audio` 返回原生音频轨（YouTube 经 TikHub 取最高码率纯音频轨）或 Cobalt 音频直链（Twitter / TikTok / Instagram / Pinterest / Facebook），无音频路径的平台返回 HTTP 400。
+- `POST /api/resolve` 新增 `quality` 参数：清晰度封顶（如 `720p`），不超过 cap 取最高档、全部高于 cap 取最低超档，显式覆盖平台默认选流；与 `download_mode=audio` 组合返回 HTTP 422。
+- X（Twitter）video 模式的 resolve 响应新增 `data.variants`：全部 mp4 档位（`url` / `bitrate` / `width` / `height` / `quality`）按码率升序透出，供下游（如 ASR）自选低码率流。
 - X（Twitter）公开视频解析：支持 x.com / twitter.com status URL，TikHub 获取元数据并以 Cobalt 兜底。
 - 翻译结果状态、模型备用名单、翻译熔断与 `/health/translation` 健康口；翻译失败不再写入响应译文或缓存。
 - README 补齐下游接入文档：环境变量表（含 `PUBLIC_BASE_URL`）、视频号 `video_url` 必须带 `X-API-Key` 的差异说明，以及 Python / JavaScript / cURL 的视频号两步下载示例。

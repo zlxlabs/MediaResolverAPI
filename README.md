@@ -241,6 +241,18 @@ audio 模式不代表 MP3 或其他容器格式，服务不做转码；请使用
 | `data.provider` | string \| null | 实际使用的数据源：`tikhub` 或 `cobalt` |
 | `error` | string \| null | 错误信息（`success=false` 时） |
 
+`data.variants` 数组元素的字段（仅 X（Twitter）video 模式透出）：
+
+| 元素字段 | 类型 | 说明 |
+|------|------|------|
+| `url` | string | 该档 mp4 直链 |
+| `bitrate` | int \| null | 视频总码率（bps，含音频轨）；源站未返回或值非法时为 `null`，此类档排在数组末尾 |
+| `width` | int | 宽度（像素）；未知为 `0` |
+| `height` | int | 高度（像素）；未知为 `0` |
+| `quality` | string \| null | 档位名（如 `270p`）；分辨率未知时为 `null` |
+
+数组按 `bitrate` 升序、同码率按短边升序，`variants[0]` 即最低码率档——只需要完整音频轨的下游（如 ASR）取首条最省流量。数组仅含 mp4 档，不含 HLS（m3u8）。
+
 > **注意：** 部分字段可能为 `null`，取决于平台和数据源的返回情况。通过 Cobalt 解析的视频通常只有基础信息（直链、标题），缺少统计数据。
 
 #### 失败响应
