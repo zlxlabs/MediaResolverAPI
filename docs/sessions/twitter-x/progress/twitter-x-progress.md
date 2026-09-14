@@ -47,3 +47,13 @@
 关键决策与已否决方案：`has_playable` 与 adapter 均复用 `TwitterService._parse_response`；Cobalt fallback 使用桩响应验证，不请求真实网络。
 
 下一步唯一动作：完成反向红验后运行整仓 `pytest` 并整理最终报告。
+
+## 里程碑 6：最终验证
+
+当前阶段：complete
+
+本段结论：两次反向红验均由断言失败转红并已精确还原；目标测试 56 项通过，整仓 pytest 首轮 360 项通过；最终提交后将再次复核相同命令。
+
+关键决策与已否决方案：最终实现只改任务卡允许文件，未引入指定清晰度/音频字段、真实上游请求、引用帖视频、HLS 或 status 分轨解析。
+
+下一步唯一动作：在本段提交后重跑 Verify-Command 与整仓 `pytest`，然后写入 delegate 报告。
