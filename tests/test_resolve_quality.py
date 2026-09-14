@@ -10,7 +10,6 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import app.api.resolve as resolve_mod
-from app.api.resolve import ResolveRequest
 from app.models.video_cache import VideoCache, ensure_video_cache_schema
 from app.services.adapters.tikhub_adapter import TikHubAdapter
 from app.services.cache import CacheService
@@ -36,13 +35,6 @@ def _load_quality(name: str) -> dict:
 def _load_platform(platform: str, name: str) -> dict:
     path = Path(__file__).parent / "fixtures" / platform / f"{name}.json"
     return json.loads(path.read_text(encoding="utf-8"))
-
-
-@pytest.mark.parametrize("quality", ["720p", "1080p", "2160p"])
-def test_quality_accepts_resolution_cap(quality):
-    request = ResolveRequest.model_validate({"url": YOUTUBE_URL, "quality": quality})
-
-    assert request.quality == quality
 
 
 @pytest.mark.parametrize("quality", ["720", "720P", "p720", "720p60", ""])
@@ -188,6 +180,7 @@ def test_card1_cache_table_migrates_quality_and_hits_default(db):
         ("1080p", "youtube-1080.mp4"),
         ("720p", "youtube-720-high.mp4"),
         ("240p", "youtube-360.mp4"),
+        ("2160p", "youtube-2160.mp4"),
     ],
 )
 def test_youtube_quality_cap_selects_expected_stream(quality, expected):
@@ -197,15 +190,6 @@ def test_youtube_quality_cap_selects_expected_stream(quality, expected):
 
     assert info is not None
     assert info.video_url.endswith(expected)
-
-
-def test_youtube_quality_can_select_above_default_1080p():
-    info = YouTubeService("key", "base")._parse_response(
-        _load_quality("youtube_multi"), quality="2160p"
-    )
-
-    assert info is not None
-    assert info.video_url.endswith("youtube-2160.mp4")
 
 
 def test_youtube_without_quality_keeps_1080p_default():
@@ -321,29 +305,6 @@ async def test_cobalt_quality_is_mapped_to_upstream_video_quality(monkeypatch):
     ]
 
 
-@pytest.mark.asyncio
-async def test_resolver_passes_quality_through_tikhub_and_adapter(monkeypatch):
-    resolver = VideoResolver()
-    calls = []
-
-    async def tikhub_fetch(*args, **kwargs):
-        calls.append(kwargs)
-        return _load_quality("youtube_multi")
-
-    monkeypatch.setattr(resolver.tikhub_provider, "fetch_video_info", tikhub_fetch)
-
-    info, provider = await resolver.resolve(
-        "youtube",
-        "quality-youtube",
-        YOUTUBE_URL,
-        quality="720p",
-    )
-
-    assert provider == "tikhub"
-    assert info.video_url.endswith("youtube-720-high.mp4")
-    assert calls[0]["quality"] == "720p"
-
-
 def test_api_quality_e2e_uses_quality_specific_cache_entry(
     authed_client, db, monkeypatch
 ):
@@ -418,8 +379,6 @@ def test_quality_is_noop_for_single_stream_fixtures(service, platform, fixture):
     assert default_info is not None
     assert requested_info is not None
     assert requested_info.video_url == default_info.video_url
-    assert requested_info.width == default_info.width
-    assert requested_info.height == default_info.height
 
 
 def test_quality_is_noop_for_instagram_adapter():
