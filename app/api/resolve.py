@@ -188,6 +188,7 @@ async def resolve_url(
         log_data["video_id"] = video_id
 
         cache_service = CacheService(db)
+        cache_quality = request.quality or ""
         translated_desc = None
         translation_result = TranslationResult(
             TranslationStatus.skipped_not_requested, None
@@ -196,7 +197,7 @@ async def resolve_url(
         # Step 3: Check cache（仅在已知 video_id 时；hybrid / by_url 兜底要解析后才拿到 id）
         if not use_hybrid and video_id and not request.force_refresh:
             cached_info, cached_translation = cache_service.get_cached_video(
-                platform, video_id, request.download_mode
+                platform, video_id, request.download_mode, cache_quality
             )
             if cached_info:
                 logger.info(f"Cache hit: {platform}:{video_id}")
@@ -224,6 +225,7 @@ async def resolve_url(
                             cached_info,
                             translated_desc,
                             request.download_mode,
+                            cache_quality,
                         )
                 else:
                     translation_result = TranslationResult(
@@ -272,6 +274,7 @@ async def resolve_url(
             video_info,
             translated_desc,
             request.download_mode,
+            cache_quality,
         )
 
         # Step 7: Return response
