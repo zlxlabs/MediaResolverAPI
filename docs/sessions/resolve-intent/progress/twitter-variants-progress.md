@@ -18,3 +18,10 @@
 - 本段结论：缓存重建从序列化数据透传 `variants`，旧缓存行没有该键时自然得到 `None`；新缓存数据可完整回环。
 - 关键决策与已否决方案：沿用任务卡约定，不添加旧行回填或额外兼容分支。
 - 下一步唯一动作：增加 API 响应模型和 `_build_response` 的 variants 映射。
+
+## 2026-09-14 — API response contract
+
+- 当前阶段：implementing — API 模型与映射
+- 本段结论：新增 `VideoVariant` 和可选 `VideoInfoResponse.variants`，响应映射逐条绝对化 URL；`VideoInfo.variants is None` 时响应字段保持 `null`。
+- 关键决策与已否决方案：variants 只作为常驻附加字段，不增加请求参数或平台分支。
+- 下一步唯一动作：补解析层与 API/缓存回环测试，并先执行未改代码红验。

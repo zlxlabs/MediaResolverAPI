@@ -81,6 +81,16 @@ class ResolveRequest(BaseModel):
         return self
 
 
+class VideoVariant(BaseModel):
+    """A playable MP4 variant exposed for downstream stream selection."""
+
+    url: str
+    bitrate: Optional[int] = None
+    width: int = 0
+    height: int = 0
+    quality: Optional[str] = None
+
+
 class VideoInfoResponse(BaseModel):
     """Video info in the response."""
 
@@ -98,6 +108,7 @@ class VideoInfoResponse(BaseModel):
     height: int
     duration: Optional[int] = None
     quality: Optional[str] = None
+    variants: Optional[list[VideoVariant]] = None
     view_count: Optional[int] = None
     like_count: Optional[int] = None
     comment_count: Optional[int] = None
@@ -367,6 +378,20 @@ def _build_response(
         height=video_info.height,
         duration=video_info.duration,
         quality=video_info.quality,
+        variants=(
+            [
+                VideoVariant(
+                    url=_absolutize_video_url(variant["url"], public_origin),
+                    bitrate=variant.get("bitrate"),
+                    width=variant.get("width", 0),
+                    height=variant.get("height", 0),
+                    quality=variant.get("quality"),
+                )
+                for variant in video_info.variants
+            ]
+            if video_info.variants is not None
+            else None
+        ),
         view_count=video_info.view_count,
         like_count=video_info.like_count,
         comment_count=video_info.comment_count,
