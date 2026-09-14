@@ -1,0 +1,19 @@
+{
+  "code": 200,
+  "data": {
+    "id": "2098782845183410287",
+    "text": "quoted video only",
+    "author": {"name": "Codez", "screen_name": "0xCodez"},
+    "quoted": {
+      "media": {
+        "video": [
+          {
+            "variants": [
+              {"content_type": "video/mp4", "bitrate": 99999999, "url": "https://video.twimg.com/amplify_video/fake/quoted_must_not_win.mp4"}
+            ]
+          }
+        ]
+      }
+    }
+  }
+}
