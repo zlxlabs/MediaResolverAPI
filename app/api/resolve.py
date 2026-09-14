@@ -5,7 +5,7 @@ Core API for resolving social media URLs into direct download links.
 """
 
 import time
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -17,6 +17,7 @@ from .deps import verify_api_key
 from ..core.database import get_db
 from ..services.url_parser import url_parser
 from ..services.video_resolver import VideoResolver, VideoResolverError
+from ..services.providers.base import AudioNotAvailableError
 from ..services.cache import CacheService
 from ..services.translation.openai import (
     TranslationResult,
@@ -64,6 +65,9 @@ class ResolveRequest(BaseModel):
     force_refresh: bool = Field(
         default=False, description="Skip cache and fetch fresh data"
     )
+    download_mode: Literal["video", "audio"] = Field(
+        default="video", description="Download intent"
+    )
 
 
 class VideoInfoResponse(BaseModel):
@@ -78,6 +82,7 @@ class VideoInfoResponse(BaseModel):
     author_name: str
     author_id: str
     video_url: str
+    media_type: Literal["video", "audio"] = "video"
     width: int
     height: int
     duration: Optional[int] = None
@@ -180,7 +185,7 @@ async def resolve_url(
         # Step 3: Check cache（仅在已知 video_id 时；hybrid / by_url 兜底要解析后才拿到 id）
         if not use_hybrid and video_id and not request.force_refresh:
             cached_info, cached_translation = cache_service.get_cached_video(
-                platform, video_id
+                platform, video_id, request.download_mode
             )
             if cached_info:
                 logger.info(f"Cache hit: {platform}:{video_id}")
@@ -203,7 +208,11 @@ async def resolve_url(
                         )
                         translated_desc = _translation_text(translation_result)
                         cache_service.cache_video(
-                            platform, video_id, cached_info, translated_desc
+                            platform,
+                            video_id,
+                            cached_info,
+                            translated_desc,
+                            request.download_mode,
                         )
                 else:
                     translation_result = TranslationResult(
@@ -221,12 +230,15 @@ async def resolve_url(
 
         # Step 4: Resolve video info
         resolver = get_video_resolver()
-        video_info, provider_name = await resolver.resolve(
-            platform=platform,
-            video_id=video_id or "",
-            original_url=original_url,
-            use_hybrid=use_hybrid,
-        )
+        resolver_kwargs = {
+            "platform": platform,
+            "video_id": video_id or "",
+            "original_url": original_url,
+            "use_hybrid": use_hybrid,
+        }
+        if request.download_mode == "audio":
+            resolver_kwargs["download_mode"] = request.download_mode
+        video_info, provider_name = await resolver.resolve(**resolver_kwargs)
         log_data["provider"] = provider_name
 
         # hybrid / by_url 兜底路径：用解析出的真实 id 归一化回填（缓存语义 codex #8 / 评审 Issue 5）
@@ -244,7 +256,11 @@ async def resolve_url(
 
         # Step 6: Cache result
         cache_service.cache_video(
-            platform, video_id, video_info, translated_desc
+            platform,
+            video_id,
+            video_info,
+            translated_desc,
+            request.download_mode,
         )
 
         # Step 7: Return response
@@ -261,6 +277,10 @@ async def resolve_url(
 
     except HTTPException:
         raise
+    except AudioNotAvailableError as e:
+        logger.info(f"Audio resolution unavailable: {e}")
+        log_data["error_msg"] = str(e)
+        raise HTTPException(status_code=400, detail=str(e))
     except VideoResolverError as e:
         logger.error(f"Video resolution failed: {e}")
         log_data["error_msg"] = str(e)[:500]
@@ -326,6 +346,7 @@ def _build_response(
         author_name=video_info.author_name,
         author_id=video_info.author_id,
         video_url=_absolutize_video_url(video_info.video_url, public_origin),
+        media_type=video_info.media_type,
         width=video_info.width,
         height=video_info.height,
         duration=video_info.duration,

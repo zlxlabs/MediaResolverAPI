@@ -15,6 +15,7 @@ from .providers import (
     VideoNotFoundError,
     TerminalError,
 )
+from .providers.base import AudioNotAvailableError
 from .adapters import TikHubAdapter, CobaltAdapter
 from .platforms.base import VideoInfo
 from ..core.config import settings
@@ -23,6 +24,14 @@ from ..core.config import settings
 class VideoResolverError(Exception):
     """视频解析错误"""
     pass
+
+
+AUDIO_COBALT_PLATFORMS = frozenset(
+    {"twitter", "tiktok", "instagram", "pinterest", "facebook"}
+)
+AUDIO_UNAVAILABLE_PLATFORMS = frozenset(
+    {"douyin", "kuaishou", "xiaohongshu", "wechat_channels"}
+)
 
 
 class VideoResolver:
@@ -133,7 +142,8 @@ class VideoResolver:
         video_id: str,
         original_url: str,
         force_refresh: bool = False,
-        use_hybrid: bool = False
+        use_hybrid: bool = False,
+        download_mode: str = "video",
     ) -> Tuple[VideoInfo, str]:
         """
         解析视频信息
@@ -155,7 +165,15 @@ class VideoResolver:
         platform = platform.lower()
 
         # 获取该平台的提供者链
-        providers = self.provider_chains.get(platform, [])
+        if download_mode == "audio" and platform in AUDIO_UNAVAILABLE_PLATFORMS:
+            raise AudioNotAvailableError(
+                f"audio_not_available: platform '{platform}' has no audio path"
+            )
+
+        if download_mode == "audio" and platform in AUDIO_COBALT_PLATFORMS:
+            providers = [self.cobalt_provider]
+        else:
+            providers = self.provider_chains.get(platform, [])
 
         if not providers:
             raise VideoResolverError(f"No provider available for platform: {platform}")
@@ -164,6 +182,7 @@ class VideoResolver:
             f"Starting video resolution",
             platform=platform,
             video_id=video_id,
+            download_mode=download_mode,
             providers=[p.provider_name for p in providers]
         )
 
@@ -187,21 +206,27 @@ class VideoResolver:
                 )
 
                 # 调用提供者获取原始数据
-                raw_data = await provider.fetch_video_info(
-                    platform=platform,
-                    video_id=video_id,
-                    original_url=original_url,
-                    use_hybrid=use_hybrid
-                )
+                provider_kwargs = {
+                    "platform": platform,
+                    "video_id": video_id,
+                    "original_url": original_url,
+                    "use_hybrid": use_hybrid,
+                }
+                if download_mode == "audio":
+                    provider_kwargs["download_mode"] = download_mode
+                raw_data = await provider.fetch_video_info(**provider_kwargs)
 
                 # 使用对应的适配器转换数据
-                video_info = self._adapt_data(
-                    raw_data=raw_data,
-                    provider_name=provider_name,
-                    platform=platform,
-                    video_id=video_id,
-                    original_url=original_url
-                )
+                adapt_kwargs = {
+                    "raw_data": raw_data,
+                    "provider_name": provider_name,
+                    "platform": platform,
+                    "video_id": video_id,
+                    "original_url": original_url,
+                }
+                if download_mode == "audio":
+                    adapt_kwargs["download_mode"] = download_mode
+                video_info = self._adapt_data(**adapt_kwargs)
 
                 if not video_info:
                     raise ProviderError(f"Failed to adapt {provider_name} response")
@@ -303,7 +328,8 @@ class VideoResolver:
         provider_name: str,
         platform: str,
         video_id: str,
-        original_url: str
+        original_url: str,
+        download_mode: str = "video",
     ) -> Optional[VideoInfo]:
         """
         使用对应的适配器转换原始数据
@@ -320,9 +346,17 @@ class VideoResolver:
         """
         try:
             if provider_name == "tikhub":
-                return self.tikhub_adapter.adapt(raw_data, platform, video_id)
+                return self.tikhub_adapter.adapt(
+                    raw_data, platform, video_id, download_mode=download_mode
+                )
             elif provider_name == "cobalt":
-                return self.cobalt_adapter.adapt(raw_data, platform, video_id, original_url)
+                return self.cobalt_adapter.adapt(
+                    raw_data,
+                    platform,
+                    video_id,
+                    original_url,
+                    download_mode=download_mode,
+                )
             else:
                 logger.error(f"Unknown provider: {provider_name}")
                 return None

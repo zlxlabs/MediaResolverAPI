@@ -1,0 +1,37 @@
+{
+  "data": {
+    "videoDetails": {
+      "videoId": "dQw4w9WgXcQ",
+      "title": "youtube no audio test",
+      "shortDescription": "description",
+      "author": "Rick Astley",
+      "channelId": "UCuAXFkgsw1L7xaCfnd5JJOw",
+      "viewCount": "1000000"
+    },
+    "streamingData": {
+      "formats": [
+        {
+          "itag": 18,
+          "url": "https://rr2.googlevideo.com/yt_video_muxed.mp4",
+          "width": 640,
+          "height": 360,
+          "qualityLabel": "360p",
+          "mimeType": "video/mp4"
+        }
+      ],
+      "adaptiveFormats": [
+        {
+          "itag": 137,
+          "url": "https://rr2.googlevideo.com/yt_video_only.mp4",
+          "mimeType": "video/mp4; codecs=\"avc1.640028\"",
+          "bitrate": 4000000
+        },
+        {
+          "itag": 248,
+          "mimeType": "video/webm; codecs=\"vp9\"",
+          "signatureCipher": "s=video-only"
+        }
+      ]
+    }
+  }
+}

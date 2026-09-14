@@ -1,0 +1,44 @@
+{
+  "data": {
+    "videoDetails": {
+      "videoId": "dQw4w9WgXcQ",
+      "title": "youtube audio test",
+      "shortDescription": "audio description",
+      "author": "Rick Astley",
+      "channelId": "UCuAXFkgsw1L7xaCfnd5JJOw",
+      "viewCount": "1000000"
+    },
+    "streamingData": {
+      "formats": [
+        {
+          "itag": 18,
+          "url": "https://rr2.googlevideo.com/yt_audio_muxed.mp4",
+          "width": 640,
+          "height": 360,
+          "qualityLabel": "360p",
+          "mimeType": "video/mp4"
+        }
+      ],
+      "adaptiveFormats": [
+        {
+          "itag": 140,
+          "url": "https://rr2.googlevideo.com/yt_audio_low.m4a",
+          "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"",
+          "bitrate": 128000
+        },
+        {
+          "itag": 251,
+          "url": "https://rr2.googlevideo.com/yt_audio_high.webm",
+          "mimeType": "audio/webm; codecs=\"opus\"",
+          "bitrate": 160000
+        },
+        {
+          "itag": 137,
+          "url": "https://rr2.googlevideo.com/yt_video_only.mp4",
+          "mimeType": "video/mp4; codecs=\"avc1.640028\"",
+          "bitrate": 4000000
+        }
+      ]
+    }
+  }
+}

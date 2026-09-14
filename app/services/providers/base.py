@@ -14,6 +14,11 @@ class ProviderError(Exception):
     pass
 
 
+class AudioNotAvailableError(Exception):
+    """平台没有可用的音频解析路径。"""
+    pass
+
+
 class VideoNotFoundError(ProviderError):
     """视频未找到错误"""
     pass

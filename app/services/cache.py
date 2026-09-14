@@ -28,7 +28,9 @@ class CacheService:
         """
         self.db = db
 
-    def get_cached_video(self, platform: str, video_id: str) -> tuple[Optional[VideoInfo], Optional[str]]:
+    def get_cached_video(
+        self, platform: str, video_id: str, download_mode: str = "video"
+    ) -> tuple[Optional[VideoInfo], Optional[str]]:
         """
         获取缓存的视频信息和翻译结果
 
@@ -45,7 +47,8 @@ class CacheService:
         try:
             cache_record = self.db.query(VideoCache).filter(
                 VideoCache.platform == platform,
-                VideoCache.video_id == video_id
+                VideoCache.video_id == video_id,
+                VideoCache.download_mode == download_mode,
             ).first()
 
             if not cache_record:
@@ -72,6 +75,7 @@ class CacheService:
                 height=cached_data.get("height", 0),
                 duration=cached_data.get("duration"),
                 quality=cached_data.get("quality"),
+                media_type=cached_data.get("media_type", "video"),
                 view_count=cached_data.get("view_count"),
                 like_count=cached_data.get("like_count"),
                 comment_count=cached_data.get("comment_count"),
@@ -90,7 +94,14 @@ class CacheService:
             logger.error(f"获取缓存失败: {e}")
             return None, None
 
-    def cache_video(self, platform: str, video_id: str, video_info: VideoInfo, translated_desc: Optional[str] = None) -> bool:
+    def cache_video(
+        self,
+        platform: str,
+        video_id: str,
+        video_info: VideoInfo,
+        translated_desc: Optional[str] = None,
+        download_mode: str = "video",
+    ) -> bool:
         """
         缓存视频信息和翻译结果
 
@@ -110,7 +121,8 @@ class CacheService:
             # 检查是否已存在缓存记录
             existing_cache = self.db.query(VideoCache).filter(
                 VideoCache.platform == platform,
-                VideoCache.video_id == video_id
+                VideoCache.video_id == video_id,
+                VideoCache.download_mode == download_mode,
             ).first()
 
             # 准备缓存数据
@@ -130,6 +142,7 @@ class CacheService:
                 new_cache = VideoCache(
                     platform=platform,
                     video_id=video_id,
+                    download_mode=download_mode,
                     video_data=cache_data,
                     translated_desc=translated_desc,
                     provider=video_info.provider or "tikhub"
@@ -145,25 +158,32 @@ class CacheService:
             self.db.rollback()
             return False
 
-    def clear_cache(self, platform: str, video_id: str) -> bool:
+    def clear_cache(
+        self, platform: str, video_id: str, download_mode: Optional[str] = None
+    ) -> bool:
         """
-        清除特定的缓存记录
+        清除视频缓存记录；未指定模式时清除该视频的全部下载意图。
 
         Args:
             platform: 平台名称
             video_id: 视频ID
+            download_mode: 下载意图；指定时只清除该模式，否则清除全部模式
 
         Returns:
             bool: 是否清除成功
         """
         try:
-            cache_record = self.db.query(VideoCache).filter(
+            query = self.db.query(VideoCache).filter(
                 VideoCache.platform == platform,
-                VideoCache.video_id == video_id
-            ).first()
+                VideoCache.video_id == video_id,
+            )
+            if download_mode is not None:
+                query = query.filter(VideoCache.download_mode == download_mode)
+            cache_records = query.all()
 
-            if cache_record:
-                self.db.delete(cache_record)
+            if cache_records:
+                for cache_record in cache_records:
+                    self.db.delete(cache_record)
                 self.db.commit()
                 logger.info(f"清除缓存: {platform}:{video_id}")
                 return True

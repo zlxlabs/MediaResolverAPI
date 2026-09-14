@@ -69,6 +69,7 @@ class CobaltProvider(BaseProvider):
         platform: str,
         video_id: str,
         original_url: str,
+        download_mode: str = "video",
         **kwargs
     ) -> Dict:
         """
@@ -112,9 +113,12 @@ class CobaltProvider(BaseProvider):
             self.log_info(f"Sending request to Cobalt API: {self.api_base}")
 
             async with httpx.AsyncClient(timeout=60.0) as client:
+                payload = {"url": original_url}
+                if download_mode == "audio":
+                    payload["downloadMode"] = "audio"
                 response = await client.post(
                     self.api_base,
-                    json={"url": original_url},
+                    json=payload,
                     headers={
                         "Accept": "application/json",
                         "Content-Type": "application/json"
