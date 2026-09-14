@@ -21,7 +21,7 @@ permissions:
 
 jobs:
   gate:
-    uses: zlxlabs/gate/.github/workflows/gate-v2.yml@e74743bb621c5a373956545c730dbe81b5304eaa
+    uses: zlxlabs/gate/.github/workflows/gate-v2.yml@v2
     with:
       tier: internal
       runner: self
