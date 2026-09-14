@@ -107,6 +107,10 @@ class TestVideoIdExtraction:
     def test_twitter_profile_url_is_not_a_video(self, parser):
         assert parser.parse_url("https://x.com/0xCodez") == (None, None)
 
+    def test_twitter_status_id_not_taken_from_query(self, parser):
+        assert parser.parse_url("https://x.com/home?next=/someone/status/2098782845183410287") == (None, None)
+        assert parser.parse_url("https://x.com/home#status/2098782845183410287") == (None, None)
+
 
 # T2: Short URL detection
 class TestShortUrlDetection:

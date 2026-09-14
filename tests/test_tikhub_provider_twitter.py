@@ -269,3 +269,91 @@ def test_parser_malformed_metadata_interop_with_tikhub_provider():
     assert info.video_url == "https://video.twimg.com/only_variant.mp4"
     assert info.duration is None
     assert info.create_time is None
+
+
+def test_parser_caps_at_1080p():
+    payload = load("tweet_video")
+    payload["data"]["media"]["video"][0]["variants"] = [
+        {
+            "content_type": "video/mp4",
+            "url": "https://video.twimg.com/amplify_video/fake/avc1/1280x720/twitter_720.mp4",
+            "bitrate": 2176000,
+        },
+        {
+            "content_type": "video/mp4",
+            "url": "https://video.twimg.com/amplify_video/fake/avc1/1920x1080/twitter_1080.mp4",
+            "bitrate": 10368000,
+        },
+        {
+            "content_type": "video/mp4",
+            "url": "https://video.twimg.com/amplify_video/fake/avc1/3840x2160/twitter_2160.mp4",
+            "bitrate": 25000000,
+        },
+    ]
+    info = TwitterService("k", "b")._parse_response(payload)
+    assert info is not None
+    assert info.video_url.endswith("twitter_1080.mp4")
+    assert info.width == 1920
+    assert info.height == 1080
+    assert info.quality == "1080p"
+
+
+def test_parser_falls_back_above_1080_when_no_1080():
+    payload = load("tweet_video")
+    payload["data"]["media"]["video"][0]["variants"] = [
+        {
+            "content_type": "video/mp4",
+            "url": "https://video.twimg.com/amplify_video/fake/avc1/3840x2160/twitter_2160.mp4",
+            "bitrate": 25000000,
+        },
+    ]
+    info = TwitterService("k", "b")._parse_response(payload)
+    assert info is not None
+    assert info.video_url.endswith("twitter_2160.mp4")
+    assert info.width == 3840
+    assert info.height == 2160
+
+    # 超过 1080 的多档中，退而求其次选短边最小的那档（1440p 优于 2160p）
+    payload["data"]["media"]["video"][0]["variants"].append({
+        "content_type": "video/mp4",
+        "url": "https://video.twimg.com/amplify_video/fake/avc1/2560x1440/twitter_1440.mp4",
+        "bitrate": 15000000,
+    })
+    info = TwitterService("k", "b")._parse_response(payload)
+    assert info is not None
+    assert info.video_url.endswith("twitter_1440.mp4")
+    assert info.width == 2560
+    assert info.height == 1440
+
+
+def test_parser_unknown_resolution_pool_order():
+    # <=1080p 优于 unknown；unknown 优于 >1080p
+    payload = load("tweet_video")
+    payload["data"]["media"]["video"][0].pop("original_info", None)
+
+    # 1. unknown vs >1080p -> unknown wins
+    payload["data"]["media"]["video"][0]["variants"] = [
+        {
+            "content_type": "video/mp4",
+            "url": "https://video.twimg.com/amplify_video/fake/no_dim_unknown.mp4",
+            "bitrate": 5000000,
+        },
+        {
+            "content_type": "video/mp4",
+            "url": "https://video.twimg.com/amplify_video/fake/avc1/3840x2160/twitter_2160.mp4",
+            "bitrate": 25000000,
+        },
+    ]
+    info = TwitterService("k", "b")._parse_response(payload)
+    assert info is not None
+    assert info.video_url.endswith("no_dim_unknown.mp4")
+
+    # 2. 720p vs unknown -> 720p wins (<=1080p priority)
+    payload["data"]["media"]["video"][0]["variants"].append({
+        "content_type": "video/mp4",
+        "url": "https://video.twimg.com/amplify_video/fake/avc1/1280x720/twitter_720.mp4",
+        "bitrate": 2000000,
+    })
+    info = TwitterService("k", "b")._parse_response(payload)
+    assert info is not None
+    assert info.video_url.endswith("twitter_720.mp4")

@@ -96,8 +96,8 @@ TikHub 会不定期下线端点（已踩：Instagram 旧端点 404、小红书 `
 - **Instagram** `InstagramService._parse_response`：自动识别 v1（`data.*`）/ v2（`data.data.*`）。
 - **YouTube** `YouTubeService._adaptive_video_streams`：兼容 `data.videos.items`（预解析直链）与
   `data.streamingData.formats`（muxed 合流，跳过 signatureCipher 无直链的格式）+ `videoDetails` 基础信息。
-- **X (Twitter)** `TwitterService._parse_response`：只取本帖 `media.video[0].variants`（无则取
-  `entities.media` 第一条 `type==video` 的 `video_info.variants`），跳过 HLS，按 bitrate 选最高码率 MP4。
+- **X (Twitter)** `TwitterService._parse_response`：遍历本帖全部 media.video，短边不超过 1080 的最高档（无则取
+  `entities.media` 第一条 `type==video` 的 `video_info.variants`），跳过 HLS，无 <=1080 档时退而取刚超过 1080 里短边最小档。
 
 ## 5. 路由层 by_url 兜底（Issue 5）
 

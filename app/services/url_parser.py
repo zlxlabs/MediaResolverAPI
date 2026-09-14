@@ -355,8 +355,9 @@ class URLParser:
         return None
 
     def _extract_twitter_id(self, url: str) -> Optional[str]:
-        """提取 X/Twitter status ID；不解析 status 下的 video 分轨索引。"""
-        match = re.search(r"/(?:i/)?status/(\d+)(?=[/?#]|$)", url)
+        """提取 X/Twitter status ID；仅在 path 提取，不解析 query/fragment 或 video 分轨索引。"""
+        path = urlparse(url).path or ""
+        match = re.search(r"/(?:i/)?status/(\d+)(?:/|$)", path)
         return match.group(1) if match else None
 
     async def resolve_short_url(self, url: str) -> Optional[str]:

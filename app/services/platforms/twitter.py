@@ -25,24 +25,41 @@ class TwitterService(BasePlatformService):
         if not isinstance(data, dict):
             return None
 
-        playable = [
-            (variant, video)
-            for video in self._tweet_videos(data)
-            for variant in self._mp4_variants(video)
-        ]
-        if not playable:
+        candidates = []
+        for video in self._tweet_videos(data):
+            for variant in self._mp4_variants(video):
+                video_url = str(variant.get("url") or "")
+                w, h = self._resolution(video_url, video)
+                short_side = min(w, h) if (w > 0 and h > 0) else 0
+                bitrate = self._variant_bitrate(variant)
+                candidates.append((variant, video, w, h, short_side, bitrate))
+
+        if not candidates:
             entity_video = self._entity_video(data)
             if entity_video:
-                playable = [
-                    (variant, entity_video)
-                    for variant in self._mp4_variants(entity_video)
-                ]
-        if not playable:
+                for variant in self._mp4_variants(entity_video):
+                    video_url = str(variant.get("url") or "")
+                    w, h = self._resolution(video_url, entity_video)
+                    short_side = min(w, h) if (w > 0 and h > 0) else 0
+                    bitrate = self._variant_bitrate(variant)
+                    candidates.append((variant, entity_video, w, h, short_side, bitrate))
+
+        if not candidates:
             return None
 
-        selected, video = max(playable, key=lambda item: self._variant_bitrate(item[0]))
-        video_url = str(selected["url"])
-        width, height = self._resolution(video_url, video)
+        pool_le_1080 = [c for c in candidates if 1 <= c[4] <= 1080]
+        if pool_le_1080:
+            selected = max(pool_le_1080, key=lambda c: (c[4], c[5]))
+        else:
+            pool_unknown = [c for c in candidates if c[4] == 0]
+            if pool_unknown:
+                selected = max(pool_unknown, key=lambda c: c[5])
+            else:
+                pool_gt_1080 = [c for c in candidates if c[4] > 1080]
+                selected = min(pool_gt_1080, key=lambda c: (c[4], -c[5]))
+
+        variant, video, width, height, _short_side, _bitrate = selected
+        video_url = str(variant["url"])
         duration_ms = video.get("duration") or video.get("duration_millis")
         duration = None
         if duration_ms is not None:
