@@ -49,6 +49,24 @@ class TwitterService(BasePlatformService):
         if not candidates:
             return None
 
+        variants = [
+            {
+                "url": str(candidate[0]["url"]),
+                "bitrate": candidate[5] if candidate[5] > 0 else None,
+                "width": candidate[2],
+                "height": candidate[3],
+                "quality": f"{candidate[3]}p" if candidate[3] > 0 else None,
+            }
+            for candidate in sorted(
+                candidates,
+                key=lambda candidate: (
+                    candidate[5] <= 0,
+                    candidate[5] if candidate[5] > 0 else 0,
+                    candidate[4],
+                ),
+            )
+        ]
+
         if quality is None:
             selected = self._select_default_variant(candidates)
         else:
@@ -97,6 +115,7 @@ class TwitterService(BasePlatformService):
             height=height,
             duration=duration,
             quality=f"{height}p",
+            variants=variants,
             view_count=self._parse_count(data.get("views")),
             like_count=self._parse_count(data.get("likes")),
             comment_count=self._parse_count(data.get("replies")),
