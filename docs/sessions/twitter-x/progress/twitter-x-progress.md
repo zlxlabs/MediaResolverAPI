@@ -57,3 +57,13 @@
 关键决策与已否决方案：最终实现只改任务卡允许文件，未引入指定清晰度/音频字段、真实上游请求、引用帖视频、HLS 或 status 分轨解析。
 
 下一步唯一动作：在本段提交后重跑 Verify-Command 与整仓 `pytest`，然后写入 delegate 报告。
+
+## 里程碑 7：本地 review 收紧
+
+当前阶段：implementing
+
+本段结论：按仓库 fail-fast 约定删除 TwitterService 中异常 bitrate 与日期的防御式 catch，保留任务要求的实体视频回退和缺失视频返回 None 语义。
+
+关键决策与已否决方案：OCR 前置扫描主腿启动后约 60 秒无结果并以退出码 130 停止，未把空结果当作通过；未引入新的重试或 fallback 机制。
+
+下一步唯一动作：提交本次 review 收紧并重新跑目标测试、整仓 pytest。

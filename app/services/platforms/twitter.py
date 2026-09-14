@@ -96,10 +96,7 @@ class TwitterService(BasePlatformService):
 
     @staticmethod
     def _variant_bitrate(variant: Dict[str, Any]) -> int:
-        try:
-            return int(variant.get("bitrate") or 0)
-        except (TypeError, ValueError):
-            return 0
+        return int(variant.get("bitrate") or 0)
 
     def _resolution(self, video_url: str, video: Dict[str, Any]) -> tuple[int, int]:
         match = re.search(r"/(\d+)x(\d+)(?:/|$)", urlparse(video_url).path)
@@ -117,8 +114,5 @@ class TwitterService(BasePlatformService):
     def _parse_created_at(value: Any):
         if not value:
             return None
-        try:
-            parsed = parsedate_to_datetime(str(value))
-        except (TypeError, ValueError):
-            return None
+        parsed = parsedate_to_datetime(str(value))
         return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
