@@ -16,6 +16,7 @@ from ..platforms.youtube import YouTubeService
 from ..platforms.xiaohongshu import XiaohongshuService
 from ..platforms.instagram import InstagramService
 from ..platforms.wechat_channels import WechatChannelsService
+from ..platforms.twitter import TwitterService
 
 
 class TikHubAdapter:
@@ -34,6 +35,7 @@ class TikHubAdapter:
         "xiaohongshu": XiaohongshuService,
         "instagram": InstagramService,
         "wechat_channels": WechatChannelsService,
+        "twitter": TwitterService,
     }
 
     def __init__(self, api_key: str, api_base: str):

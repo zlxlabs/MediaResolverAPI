@@ -1,6 +1,6 @@
 # 通用多级降级引擎（Generic Fallback Engine）
 
-> 状态：已实现上线。六大平台（抖音 / 小红书 / 快手 / TikTok / Instagram / YouTube）
+> 状态：已实现上线。八个平台（抖音 / 小红书 / 快手 / TikTok / Instagram / YouTube / 微信视频号 / X）
 > 的 TikHub 多级端点降级统一到一个配置驱动的引擎，每个平台只配置差异部分。
 > 微信视频号同样走该引擎，但是 TikHub 单源单端点。
 
@@ -54,7 +54,7 @@ TikHub 会不定期下线端点（已踩：Instagram 旧端点 404、小红书 `
 
 1. **终态短路只用于 TikHub 单源平台**（抖音 / 小红书 / 快手）。`VideoResolver` 遇任何
    `TerminalError` 会停掉**所有** provider 降级（不再试 Cobalt）。有 Cobalt 兜底的平台
-   （TikTok / Instagram / YouTube）**链内一律不判终态**——误判终态会让 Cobalt 永远跑不到。
+   （TikTok / Instagram / YouTube / X）**链内一律不判终态**——误判终态会让 Cobalt 永远跑不到。
    分类器对这些平台把终态信号降级为 `retryable`，链走完后落 Cobalt。
 
 2. **单端 `max_retries=0` + 整链 `asyncio.timeout(total_budget)`**：防止 HTTPClient
@@ -72,6 +72,7 @@ TikHub 会不定期下线端点（已踩：Instagram 旧端点 404、小红书 `
 | Instagram | `v2/fetch_post_info → v1/fetch_post_by_url` | `code_or_url` / `post_url`（均喂原始 url） | ❌（非视频/轮播≠不可用） | Cobalt |
 | YouTube | `web/get_video_info → web/get_video_info_v2` | `video_id` | ❌（有 Cobalt 兜底） | Cobalt |
 | 微信视频号 | `wechat_channels/v2/fetch_video_detail`（单端点 POST） | `object_id`（空则 `share_url`） | ❌（无终态异常类，链内不判终态） | 无（TikHub 单源） |
+| X (Twitter) | `twitter/web/fetch_tweet_detail`（单端点 GET） | `tweet_id` | ❌（有 Cobalt 兜底，永不出终态） | Cobalt |
 
 ### 超时参数（秒）
 
@@ -82,6 +83,7 @@ TikHub 会不定期下线端点（已踩：Instagram 旧端点 404、小红书 `
 | TikTok | 18 | 60 | 3 端点（3×18<60，保证走完） |
 | YouTube | 25 | 55 | 2 端点 |
 | 微信视频号 | 25 | 30 | 单端点（1×25<30，保证能跑完） |
+| X (Twitter) | 25 | 30 | 单端点（1×25<30，保证能跑完） |
 
 ### 解析器自适应（schema differences）
 
@@ -94,14 +96,16 @@ TikHub 会不定期下线端点（已踩：Instagram 旧端点 404、小红书 `
 - **Instagram** `InstagramService._parse_response`：自动识别 v1（`data.*`）/ v2（`data.data.*`）。
 - **YouTube** `YouTubeService._adaptive_video_streams`：兼容 `data.videos.items`（预解析直链）与
   `data.streamingData.formats`（muxed 合流，跳过 signatureCipher 无直链的格式）+ `videoDetails` 基础信息。
+- **X (Twitter)** `TwitterService._parse_response`：遍历本帖全部 media.video，短边不超过 1080 的最高档（无则取
+  `entities.media` 第一条 `type==video` 的 `video_info.variants`），跳过 HLS，无 <=1080 档时退而取刚超过 1080 里短边最小档。
 
 ## 5. 路由层 by_url 兜底（Issue 5）
 
 `app/api/resolve.py`：平台已识别但 `video_id` 提取失败（如新链接格式）时，对降级链含
-吃 url 端点的平台（`URL_FALLBACK_PLATFORMS = {kuaishou, instagram}`）不再 400，而是放行，
+吃 url 端点的平台（`URL_FALLBACK_PLATFORMS = {kuaishou, instagram, wechat_channels}`）不再 400，而是放行，
 让链的 by_url 端点用原始 url 兜底（kuaishou `web/fetch_one_video?share_text=` /
 instagram `v2 code_or_url` + `v1 post_url`）。空 `video_id` 跳过缓存查找，解析后用
-`video_info.video_id` 回填（与抖音 hybrid 路径一致）。tiktok/youtube（链只吃 id）维持 400。
+`video_info.video_id` 回填（与抖音 hybrid 路径一致）。tiktok/youtube/twitter（链只吃 id）维持 400。
 
 ## 6. 测试范式
 

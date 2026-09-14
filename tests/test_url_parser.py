@@ -92,6 +92,25 @@ class TestVideoIdExtraction:
         assert platform is None
         assert vid is None
 
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://x.com/0xCodez/status/2098782845183410287?s=20",
+            "https://twitter.com/0xCodez/status/2098782845183410287",
+            "https://mobile.twitter.com/0xCodez/status/2098782845183410287",
+            "https://x.com/i/status/2098782845183410287",
+        ],
+    )
+    def test_twitter_status_url(self, parser, url):
+        assert parser.parse_url(url) == ("twitter", "2098782845183410287")
+
+    def test_twitter_profile_url_is_not_a_video(self, parser):
+        assert parser.parse_url("https://x.com/0xCodez") == (None, None)
+
+    def test_twitter_status_id_not_taken_from_query(self, parser):
+        assert parser.parse_url("https://x.com/home?next=/someone/status/2098782845183410287") == (None, None)
+        assert parser.parse_url("https://x.com/home#status/2098782845183410287") == (None, None)
+
 
 # T2: Short URL detection
 class TestShortUrlDetection:
@@ -106,6 +125,7 @@ class TestShortUrlDetection:
             ("https://pin.it/abc", True),
             ("https://xhslink.com/abc", True),
             ("https://xhslink.cn/o/8Gx4uVk2CR1", True),
+            ("https://t.co/abc", True),
             ("https://www.youtube.com/watch?v=abc", False),
             ("https://www.tiktok.com/@user/video/123", False),
         ],

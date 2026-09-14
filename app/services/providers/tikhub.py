@@ -29,6 +29,7 @@ from ..platforms.tiktok import TikTokService
 from ..platforms.instagram import InstagramService
 from ..platforms.youtube import YouTubeService
 from ..platforms.wechat_channels import WechatChannelsService
+from ..platforms.twitter import TwitterService
 
 
 class TikHubProvider(BaseProvider):
@@ -49,7 +50,7 @@ class TikHubProvider(BaseProvider):
     # 原 PLATFORM_ENDPOINTS/PLATFORM_PARAMS 已随通用 GET 路径删除（评审 Issue 3）。
     SUPPORTED_PLATFORMS = frozenset({
         "douyin", "tiktok", "kuaishou", "youtube", "xiaohongshu", "instagram",
-        "wechat_channels",
+        "wechat_channels", "twitter",
     })
 
     # 抖音终态 reason（私密/部分可见）—— 再降级也拿不到，立即短路
@@ -142,6 +143,13 @@ class TikHubProvider(BaseProvider):
     WECHAT_CHANNELS_PER_ENDPOINT_TIMEOUT = 25
     WECHAT_CHANNELS_TOTAL_BUDGET = 30.0
     WECHAT_CHANNELS_SHARE_URL_BASE = "https://weixin.qq.com/sph"
+
+    # X/Twitter 单端点；有 Cobalt 兜底，因此分类器不出终态。
+    TWITTER_CHAIN: List[Tuple[str, str, str]] = [
+        ("web_detail", "/api/v1/twitter/web/fetch_tweet_detail", "tweet_id"),
+    ]
+    TWITTER_PER_ENDPOINT_TIMEOUT = 25
+    TWITTER_TOTAL_BUDGET = 30.0
 
     @staticmethod
     def _classify_youtube(response: Dict) -> str:
@@ -354,6 +362,10 @@ class TikHubProvider(BaseProvider):
         # 微信视频号走单端点链（POST fetch_video_detail）
         if platform == "wechat_channels":
             return await self._fetch_wechat_channels(video_id, original_url)
+
+        # X/Twitter 走单端点链（fetch_tweet_detail）。
+        if platform == "twitter":
+            return await self._fetch_twitter(video_id, original_url)
 
         # 全平台均已走通用引擎多级降级链；到此说明 SUPPORTED_PLATFORMS 加了平台
         # 却漏接 dispatch 分支 —— 显式报错而非静默返回 None（防隐藏路径）。
@@ -715,6 +727,14 @@ class TikHubProvider(BaseProvider):
         node = WechatChannelsService.extract_data(response)
         return "ok" if node else "retryable"
 
+    @staticmethod
+    def _classify_twitter(response: Dict) -> str:
+        """X/Twitter 有 Cobalt 兜底，永不返回 terminal。"""
+        if not isinstance(response, dict):
+            return "retryable"
+        data = response.get("data")
+        return "ok" if isinstance(data, dict) and data else "retryable"
+
     async def _fetch_wechat_channels(self, video_id: str, original_url: str) -> Dict:
         """
         微信视频号单端点链（薄封装，骨架见 _run_chain）。
@@ -747,6 +767,31 @@ class TikHubProvider(BaseProvider):
     def _wechat_channels_has_playable(self, data: Dict) -> bool:
         """用 WechatChannelsService._parse_response 校验，不另写一套判断。"""
         info = WechatChannelsService(self.api_key, self.api_base)._parse_response(data)
+        return bool(info and info.video_url)
+
+    async def _fetch_twitter(self, video_id: str, original_url: str) -> Dict:
+        """X/Twitter 单端点链，使用 status ID 查询 tweet detail。"""
+        chain = list(self.TWITTER_CHAIN)
+
+        def build_params(endpoint: Tuple) -> Dict:
+            _name, _path, param = endpoint
+            return {param: video_id}
+
+        return await self._run_chain(
+            chain=chain,
+            build_params=build_params,
+            classify=self._classify_twitter,
+            has_playable=self._twitter_has_playable,
+            terminal_exc=TerminalError,
+            total_budget=self.TWITTER_TOTAL_BUDGET,
+            per_timeout=self.TWITTER_PER_ENDPOINT_TIMEOUT,
+            target=video_id or original_url,
+            label="Twitter",
+        )
+
+    def _twitter_has_playable(self, data: Dict) -> bool:
+        """复用 TwitterService 解析器校验本帖是否含可播放 MP4。"""
+        info = TwitterService(self.api_key, self.api_base)._parse_response(data)
         return bool(info and info.video_url)
 
     async def fetch_wechat_channels_media(self, sph_code: str) -> dict:

@@ -85,6 +85,7 @@ class VideoResolver:
             # (tikhub 内部已有 app_v2 → web_v3 多级降级)
             "xiaohongshu": [self.tikhub_provider],
             "youtube": [self.tikhub_provider, self.cobalt_provider],
+            "twitter": [self.tikhub_provider, self.cobalt_provider],
 
             # 抖音和快手可能不被 Cobalt 支持，只使用 TikHub
             "douyin": [self.tikhub_provider],
@@ -103,6 +104,7 @@ class VideoResolver:
             "douyin": settings.PROVIDER_PRIORITY_DOUYIN,
             "kuaishou": settings.PROVIDER_PRIORITY_KUAISHOU,
             "wechat_channels": settings.PROVIDER_PRIORITY_WECHAT_CHANNELS,
+            "twitter": settings.PROVIDER_PRIORITY_TWITTER,
         }
 
         for platform, priority_config in platform_config_map.items():

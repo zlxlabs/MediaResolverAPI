@@ -106,6 +106,7 @@ class Settings(BaseSettings):
     PROVIDER_PRIORITY_DOUYIN: str = ""
     PROVIDER_PRIORITY_KUAISHOU: str = ""
     PROVIDER_PRIORITY_WECHAT_CHANNELS: str = ""
+    PROVIDER_PRIORITY_TWITTER: str = ""
 
     model_config = {
         "env_file": ".env",

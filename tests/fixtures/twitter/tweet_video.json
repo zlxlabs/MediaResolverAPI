@@ -1,0 +1,48 @@
+{
+  "code": 200,
+  "data": {
+    "id": "2098782845183410287",
+    "text": "workshop about agent swarms",
+    "display_text": "workshop about agent swarms",
+    "likes": 1847,
+    "retweets": 299,
+    "replies": 63,
+    "quotes": 9,
+    "bookmarks": 4450,
+    "views": "504166",
+    "created_at": "Sat Sep 12 14:36:38 +0000 2026",
+    "status": "active",
+    "author": {
+      "name": "Codez",
+      "screen_name": "0xCodez",
+      "rest_id": "2054190711243710464"
+    },
+    "media": {
+      "video": [
+        {
+          "id": "2098781203050405894",
+          "duration": 1595446,
+          "original_info": {"width": 1920, "height": 1080},
+          "variants": [
+            {"content_type": "application/x-mpegURL", "url": "https://video.twimg.com/amplify_video/fake/pl/twitter.m3u8"},
+            {"content_type": "video/mp4", "bitrate": 256000, "url": "https://video.twimg.com/amplify_video/fake/avc1/480x270/twitter_270.mp4"},
+            {"content_type": "video/mp4", "bitrate": 832000, "url": "https://video.twimg.com/amplify_video/fake/avc1/640x360/twitter_360.mp4"},
+            {"content_type": "video/mp4", "bitrate": 2176000, "url": "https://video.twimg.com/amplify_video/fake/avc1/1280x720/twitter_720.mp4"},
+            {"content_type": "video/mp4", "bitrate": 10368000, "url": "https://video.twimg.com/amplify_video/fake/avc1/1920x1080/twitter_1080.mp4"}
+          ]
+        }
+      ]
+    },
+    "quoted": {
+      "media": {
+        "video": [
+          {
+            "variants": [
+              {"content_type": "video/mp4", "bitrate": 99999999, "url": "https://video.twimg.com/amplify_video/fake/quoted_must_not_win.mp4"}
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "code": 200,
+  "data": {
+    "id": "2098782845183410287",
+    "text": "photo post",
+    "author": {"name": "Codez", "screen_name": "0xCodez"},
+    "media": {"photo": [{"url": "https://pbs.twimg.com/media/fake.jpg"}]},
+    "entities": {"media": [{"type": "photo", "media_url_https": "https://pbs.twimg.com/media/fake.jpg"}]}
+  }
+}

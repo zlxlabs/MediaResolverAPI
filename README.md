@@ -17,10 +17,11 @@ risk-tier: internal
 | Pinterest | ✅ | Cobalt |
 | Facebook | ✅ | Cobalt |
 | 微信视频号 (WeChat Channels) | ✅ | TikHub |
+| X (Twitter) | ✅ | TikHub（单端点）→ Cobalt |
 
 > 含多个数据源的平台会按优先级依次尝试，前者失败自动降级到后者。
 >
-> **多级端点降级（通用引擎）**：六大平台均在 TikHub 内部按「同一 ID 串行打多个端点、命中即停、终态短路、总预算兜底」的统一引擎做多级降级，单端点被 TikHub 下线不再等于平台解析全挂。引擎设计与各平台链配置见 [docs/generic-fallback-engine.md](docs/generic-fallback-engine.md)。
+> **多级端点降级（通用引擎）**：TikHub 支持的平台均在内部按「同一 ID 串行打多个端点、命中即停、终态短路、总预算兜底」的统一引擎做多级降级，单端点被 TikHub 下线不再等于平台解析全挂。引擎设计与各平台链配置见 [docs/generic-fallback-engine.md](docs/generic-fallback-engine.md)。
 >
 > - **抖音**：`web/fetch_one_video → web/fetch_one_video_v2 → app/v3/fetch_one_video_v3`；私密/部分可见终态短路；短链展开或 ID 提取失败回退 `hybrid/video_data`。详见 [docs/douyin-fallback-design.md](docs/douyin-fallback-design.md)。
 > - **小红书**：`app_v2/get_video_note_detail（仅 note_id）→ web_v3/fetch_note_detail（note_id + xsec_token）`；token 缺失时跳过 `web_v3`；图文/删除终态短路。TikHub 单源。详见 [docs/xiaohongshu-fallback-design.md](docs/xiaohongshu-fallback-design.md)。
@@ -29,6 +30,7 @@ risk-tier: internal
 > - **Instagram**：`v2/fetch_post_info（code_or_url）→ v1/fetch_post_by_url（post_url）`；非视频/轮播不判终态（子节点可能含视频），落 Cobalt。ID 提取失败时由路由层放行原始 url 兜底。
 > - **YouTube**：`web/get_video_info（预解析直链）→ web/get_video_info_v2（streamingData 合流）`；解析器自适应两套 schema。有 Cobalt 兜底。
 > - **微信视频号**：TikHub 单源单端点（`wechat_channels/v2/fetch_video_detail`），无 Cobalt 兜底，故链内不判终态。平台标识是 `wechat_channels`（不是 `wechat`）。
+> - **X (Twitter)**：TikHub 单端点（`twitter/web/fetch_tweet_detail`）按 status ID 获取元数据，失败后降级 Cobalt；只返回本帖最高码率 MP4，忽略 HLS 与引用帖视频。平台标识是 `twitter`（同时支持 `x.com` 与 `twitter.com`）。
 
 ---
 
@@ -197,7 +199,7 @@ curl -X POST http://localhost:8000/api/resolve \
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `success` | bool | 是否解析成功 |
-| `data.platform` | string | 平台标识：`douyin` `tiktok` `kuaishou` `youtube` `xiaohongshu` `instagram` `pinterest` `facebook` `wechat_channels` |
+| `data.platform` | string | 平台标识：`douyin` `tiktok` `kuaishou` `youtube` `xiaohongshu` `instagram` `pinterest` `facebook` `wechat_channels` `twitter` |
 | `data.video_id` | string | 平台视频 ID |
 | `data.title` | string | 视频标题 |
 | `data.description` | string | 视频描述原文 |
@@ -267,7 +269,8 @@ curl http://localhost:8000/api/platforms \
     "youtube": ["tikhub", "cobalt"],
     "douyin": ["tikhub"],
     "kuaishou": ["tikhub"],
-    "wechat_channels": ["tikhub"]
+    "wechat_channels": ["tikhub"],
+    "twitter": ["tikhub", "cobalt"]
   }
 }
 ```

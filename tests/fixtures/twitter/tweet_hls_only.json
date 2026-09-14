@@ -1,0 +1,17 @@
+{
+  "code": 200,
+  "data": {
+    "id": "2098782845183410287",
+    "text": "hls only",
+    "author": {"name": "Codez", "screen_name": "0xCodez"},
+    "media": {
+      "video": [
+        {
+          "variants": [
+            {"content_type": "application/x-mpegURL", "url": "https://video.twimg.com/amplify_video/fake/pl/twitter.m3u8"}
+          ]
+        }
+      ]
+    }
+  }
+}
