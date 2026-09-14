@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy.orm import Session
 from loguru import logger
 
-from ..models.video_cache import VideoCache
+from ..models.video_cache import VideoCache, ensure_video_cache_schema
 from .platforms.base import VideoInfo
 from ..core.config import settings
 
@@ -27,8 +27,11 @@ class CacheService:
             db: 数据库会话
         """
         self.db = db
+        ensure_video_cache_schema(self.db.get_bind())
 
-    def get_cached_video(self, platform: str, video_id: str) -> tuple[Optional[VideoInfo], Optional[str]]:
+    def get_cached_video(
+        self, platform: str, video_id: str, download_mode: str = "video"
+    ) -> tuple[Optional[VideoInfo], Optional[str]]:
         """
         获取缓存的视频信息和翻译结果
 
@@ -45,7 +48,8 @@ class CacheService:
         try:
             cache_record = self.db.query(VideoCache).filter(
                 VideoCache.platform == platform,
-                VideoCache.video_id == video_id
+                VideoCache.video_id == video_id,
+                VideoCache.download_mode == download_mode,
             ).first()
 
             if not cache_record:
@@ -72,6 +76,7 @@ class CacheService:
                 height=cached_data.get("height", 0),
                 duration=cached_data.get("duration"),
                 quality=cached_data.get("quality"),
+                media_type=cached_data.get("media_type", "video"),
                 view_count=cached_data.get("view_count"),
                 like_count=cached_data.get("like_count"),
                 comment_count=cached_data.get("comment_count"),
@@ -90,7 +95,14 @@ class CacheService:
             logger.error(f"获取缓存失败: {e}")
             return None, None
 
-    def cache_video(self, platform: str, video_id: str, video_info: VideoInfo, translated_desc: Optional[str] = None) -> bool:
+    def cache_video(
+        self,
+        platform: str,
+        video_id: str,
+        video_info: VideoInfo,
+        translated_desc: Optional[str] = None,
+        download_mode: str = "video",
+    ) -> bool:
         """
         缓存视频信息和翻译结果
 
@@ -110,7 +122,8 @@ class CacheService:
             # 检查是否已存在缓存记录
             existing_cache = self.db.query(VideoCache).filter(
                 VideoCache.platform == platform,
-                VideoCache.video_id == video_id
+                VideoCache.video_id == video_id,
+                VideoCache.download_mode == download_mode,
             ).first()
 
             # 准备缓存数据
@@ -130,6 +143,7 @@ class CacheService:
                 new_cache = VideoCache(
                     platform=platform,
                     video_id=video_id,
+                    download_mode=download_mode,
                     video_data=cache_data,
                     translated_desc=translated_desc,
                     provider=video_info.provider or "tikhub"
@@ -145,7 +159,7 @@ class CacheService:
             self.db.rollback()
             return False
 
-    def clear_cache(self, platform: str, video_id: str) -> bool:
+    def clear_cache(self, platform: str, video_id: str, download_mode: str = "video") -> bool:
         """
         清除特定的缓存记录
 
@@ -159,7 +173,8 @@ class CacheService:
         try:
             cache_record = self.db.query(VideoCache).filter(
                 VideoCache.platform == platform,
-                VideoCache.video_id == video_id
+                VideoCache.video_id == video_id,
+                VideoCache.download_mode == download_mode,
             ).first()
 
             if cache_record:
