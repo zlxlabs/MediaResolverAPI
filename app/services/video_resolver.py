@@ -144,6 +144,7 @@ class VideoResolver:
         force_refresh: bool = False,
         use_hybrid: bool = False,
         download_mode: str = "video",
+        quality: Optional[str] = None,
     ) -> Tuple[VideoInfo, str]:
         """
         解析视频信息
@@ -214,6 +215,8 @@ class VideoResolver:
                 }
                 if download_mode == "audio":
                     provider_kwargs["download_mode"] = download_mode
+                if quality is not None:
+                    provider_kwargs["quality"] = quality
                 raw_data = await provider.fetch_video_info(**provider_kwargs)
 
                 # 使用对应的适配器转换数据
@@ -226,6 +229,8 @@ class VideoResolver:
                 }
                 if download_mode == "audio":
                     adapt_kwargs["download_mode"] = download_mode
+                if quality is not None:
+                    adapt_kwargs["quality"] = quality
                 video_info = self._adapt_data(**adapt_kwargs)
 
                 if not video_info:
@@ -330,6 +335,7 @@ class VideoResolver:
         video_id: str,
         original_url: str,
         download_mode: str = "video",
+        quality: Optional[str] = None,
     ) -> Optional[VideoInfo]:
         """
         使用对应的适配器转换原始数据
@@ -347,7 +353,11 @@ class VideoResolver:
         try:
             if provider_name == "tikhub":
                 return self.tikhub_adapter.adapt(
-                    raw_data, platform, video_id, download_mode=download_mode
+                    raw_data,
+                    platform,
+                    video_id,
+                    download_mode=download_mode,
+                    quality=quality,
                 )
             elif provider_name == "cobalt":
                 return self.cobalt_adapter.adapt(

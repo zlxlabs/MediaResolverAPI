@@ -5,7 +5,7 @@ Cobalt 是一个通用的视频下载服务，支持多个平台
 作为 TikHub 的备用方案
 """
 
-from typing import Dict
+from typing import Dict, Optional
 from loguru import logger
 
 from .base import BaseProvider, ProviderError, VideoNotFoundError
@@ -70,6 +70,7 @@ class CobaltProvider(BaseProvider):
         video_id: str,
         original_url: str,
         download_mode: str = "video",
+        quality: Optional[str] = None,
         **kwargs
     ) -> Dict:
         """
@@ -116,6 +117,8 @@ class CobaltProvider(BaseProvider):
                 payload = {"url": original_url}
                 if download_mode == "audio":
                     payload["downloadMode"] = "audio"
+                if quality is not None:
+                    payload["videoQuality"] = quality[:-1]
                 response = await client.post(
                     self.api_base,
                     json=payload,

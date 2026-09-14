@@ -85,7 +85,9 @@ class XiaohongshuService(BasePlatformService):
                 return self._parse_count_text(value)
         return 0
 
-    def _parse_response(self, response_data: Dict[str, Any]) -> Optional[VideoInfo]:
+    def _parse_response(
+        self, response_data: Dict[str, Any], quality: Optional[str] = None
+    ) -> Optional[VideoInfo]:
         """解析小红书 API 响应（三结构自适应）为 VideoInfo；无视频流返回 None。"""
         try:
             node = self.extract_note(response_data)
@@ -105,6 +107,41 @@ class XiaohongshuService(BasePlatformService):
                 return None
 
             h264 = h264_streams[0]
+            if quality is not None:
+                cap = int(quality[:-1])
+                candidates = []
+                for stream in h264_streams:
+                    width = self._to_int(self._pick(stream, "width", "weight", default=0))
+                    height = self._to_int(self._pick(stream, "height", default=0))
+                    video_url = self._pick(stream, "masterUrl", "master_url", default="")
+                    if width > 0 and height > 0 and video_url:
+                        candidates.append((stream, min(width, height)))
+                if candidates:
+                    at_or_below = [item for item in candidates if item[1] <= cap]
+                    if at_or_below:
+                        h264 = max(
+                            at_or_below,
+                            key=lambda item: (
+                                item[1],
+                                self._to_int(
+                                    self._pick(
+                                        item[0], "bitrate", "bit_rate", default=0
+                                    )
+                                ),
+                            ),
+                        )[0]
+                    else:
+                        h264 = min(
+                            [item for item in candidates if item[1] > cap],
+                            key=lambda item: (
+                                item[1],
+                                -self._to_int(
+                                    self._pick(
+                                        item[0], "bitrate", "bit_rate", default=0
+                                    )
+                                ),
+                            ),
+                        )[0]
             video_url = self._pick(h264, "masterUrl", "master_url", default="")
             if not video_url:
                 logger.info("小红书 H264 流缺少 master_url")

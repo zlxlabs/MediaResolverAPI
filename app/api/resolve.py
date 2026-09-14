@@ -251,6 +251,8 @@ async def resolve_url(
         }
         if request.download_mode == "audio":
             resolver_kwargs["download_mode"] = request.download_mode
+        if request.quality is not None:
+            resolver_kwargs["quality"] = request.quality
         video_info, provider_name = await resolver.resolve(**resolver_kwargs)
         log_data["provider"] = provider_name
 

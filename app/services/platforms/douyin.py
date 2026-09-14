@@ -69,7 +69,9 @@ class DouyinService(BasePlatformService):
             return data
         return None
 
-    def _parse_response(self, response_data: Dict[str, Any]) -> Optional[VideoInfo]:
+    def _parse_response(
+        self, response_data: Dict[str, Any], quality: Optional[str] = None
+    ) -> Optional[VideoInfo]:
         """
         解析抖音API响应数据（schema 自适应，通吃 web/app/hybrid 三种结构）
 
@@ -96,10 +98,46 @@ class DouyinService(BasePlatformService):
             author_id = self._safe_get(author, "unique_id", "")
 
             # 视频文件信息
-            bit_rate = self._safe_get(aweme_detail, "video.bit_rate.0")
-            if not bit_rate:
+            bit_rate_list = self._safe_get(aweme_detail, "video.bit_rate", [])
+            if not bit_rate_list:
                 logger.error("抖音响应数据中缺少视频下载信息")
                 return None
+
+            if quality is None:
+                bit_rate = bit_rate_list[0]
+            else:
+                cap = int(quality[:-1])
+                candidates = []
+                for item in bit_rate_list:
+                    play_addr = item.get("play_addr") if isinstance(item, dict) else None
+                    if not isinstance(play_addr, dict) or not play_addr.get("url_list"):
+                        continue
+                    width = self._parse_count(play_addr.get("width")) or 0
+                    height = self._parse_count(play_addr.get("height")) or 0
+                    if width > 0 and height > 0:
+                        candidates.append((item, min(width, height)))
+
+                if candidates:
+                    at_or_below = [item for item in candidates if item[1] <= cap]
+                    if at_or_below:
+                        bit_rate = max(
+                            at_or_below,
+                            key=lambda item: (
+                                item[1],
+                                self._parse_count(item[0].get("bit_rate")) or 0,
+                            ),
+                        )[0]
+                    else:
+                        bit_rate = min(
+                            [item for item in candidates if item[1] > cap],
+                            key=lambda item: (
+                                item[1],
+                                -(self._parse_count(item[0].get("bit_rate")) or 0),
+                            ),
+                        )[0]
+                else:
+                    # 无可用分辨率元数据时 quality 按平台约定 no-op。
+                    bit_rate = bit_rate_list[0]
 
             video_url = self._safe_get(bit_rate, "play_addr.url_list.0", "")
             width = self._safe_get(bit_rate, "play_addr.width", 0)

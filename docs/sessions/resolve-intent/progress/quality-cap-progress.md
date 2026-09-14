@@ -18,3 +18,10 @@
 - 本段结论：YouTube/Twitter 显式 quality 已按短边分辨率实现“≤cap 取最高档、全超 cap 取最小超档、同档比码率”；不传 quality 继续走原默认排序，Twitter 显式 `2160p` 可越过默认 `1080p`。
 - 关键决策与已否决方案：全仓采用短边 `min(width, height)` 作为 `p` 档基准；没有可用分辨率元数据时显式 quality 走该平台原默认路径，不猜测 URL 或码率代表分辨率。
 - 下一步唯一动作：把 quality 穿过 resolver/adapter/provider，并实现 Douyin 多档与其余平台 no-op 行为。
+
+## 里程碑 4：全链路穿线与平台适配
+
+- 当前阶段：implementing
+- 本段结论：quality 已从 API 穿过 VideoResolver、TikHubAdapter 到 YouTube/Twitter/Douyin 等现有解析器；Cobalt 将 `720p` 映射为上游接受的 `videoQuality: "720"`。Douyin fixture 的多档分辨率可封顶，TikTok/Kuaishou/Xiaohongshu 当前 fixture 无可选多档，Instagram 通过适配器保持 no-op。
+- 关键决策与已否决方案：不修改 Instagram/Wechat Channels 禁止文件，也不把 Cobalt 的未知实际档位伪填进响应 quality；不传 quality 时 resolver/provider kwargs 仍保持卡 1 的原形状。
+- 下一步唯一动作：补齐 README 契约、执行红验并跑最终全量测试。

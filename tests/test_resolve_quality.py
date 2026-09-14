@@ -1,19 +1,28 @@
 """resolve quality 请求参数校验契约测试。"""
 
-import pytest
 import json
+import httpx
+import pytest
 from pathlib import Path
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+import app.api.resolve as resolve_mod
 from app.api.resolve import ResolveRequest
 from app.models.video_cache import VideoCache, ensure_video_cache_schema
+from app.services.adapters.tikhub_adapter import TikHubAdapter
 from app.services.cache import CacheService
 from app.services.platforms.base import VideoInfo
+from app.services.platforms.douyin import DouyinService
+from app.services.platforms.kuaishou import KuaishouService
+from app.services.platforms.tiktok import TikTokService
 from app.services.platforms.twitter import TwitterService
+from app.services.platforms.xiaohongshu import XiaohongshuService
 from app.services.platforms.youtube import YouTubeService
+from app.services.providers.cobalt import CobaltProvider
+from app.services.video_resolver import VideoResolver
 
 
 YOUTUBE_URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
@@ -22,6 +31,11 @@ QUALITY_FIXTURES = Path(__file__).parent / "fixtures" / "quality"
 
 def _load_quality(name: str) -> dict:
     return json.loads((QUALITY_FIXTURES / f"{name}.json").read_text(encoding="utf-8"))
+
+
+def _load_platform(platform: str, name: str) -> dict:
+    path = Path(__file__).parent / "fixtures" / platform / f"{name}.json"
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 @pytest.mark.parametrize("quality", ["720p", "1080p", "2160p"])
@@ -231,3 +245,156 @@ def test_twitter_quality_2160p_overrides_default_1080p_cap():
     assert capped_info is not None
     assert default_info.video_url.endswith("twitter-1080.mp4")
     assert capped_info.video_url.endswith("twitter-2160.mp4")
+
+
+@pytest.mark.asyncio
+async def test_cobalt_quality_is_mapped_to_upstream_video_quality(monkeypatch):
+    seen = []
+    payload = {"status": "redirect", "url": "https://cdn.example/video.mp4"}
+
+    class FakeResponse:
+        status_code = 200
+        text = json.dumps(payload)
+        headers = {"content-type": "application/json"}
+
+        def json(self):
+            return payload
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, _url, **kwargs):
+            seen.append(kwargs["json"])
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: FakeClient())
+    provider = CobaltProvider()
+    provider.api_base = "https://cobalt.example"
+
+    await provider.fetch_video_info(
+        "twitter", "id", "https://x.com/u/status/id", quality="720p"
+    )
+
+    assert seen == [
+        {
+            "url": "https://x.com/u/status/id",
+            "videoQuality": "720",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_resolver_passes_quality_through_tikhub_and_adapter(monkeypatch):
+    resolver = VideoResolver()
+    calls = []
+
+    async def tikhub_fetch(*args, **kwargs):
+        calls.append(kwargs)
+        return _load_quality("youtube_multi")
+
+    monkeypatch.setattr(resolver.tikhub_provider, "fetch_video_info", tikhub_fetch)
+
+    info, provider = await resolver.resolve(
+        "youtube",
+        "quality-youtube",
+        YOUTUBE_URL,
+        quality="720p",
+    )
+
+    assert provider == "tikhub"
+    assert info.video_url.endswith("youtube-720-high.mp4")
+    assert calls[0]["quality"] == "720p"
+
+
+def test_api_quality_e2e_uses_quality_specific_cache_entry(
+    authed_client, db, monkeypatch
+):
+    monkeypatch.setattr(resolve_mod.url_parser, "is_short_url", lambda _url: False)
+    monkeypatch.setattr(
+        resolve_mod.url_parser,
+        "parse_url",
+        lambda _url: ("youtube", "quality-youtube"),
+    )
+    resolver = VideoResolver()
+    calls = []
+
+    async def tikhub_fetch(*args, **kwargs):
+        calls.append(kwargs.get("quality"))
+        return _load_quality("youtube_multi")
+
+    monkeypatch.setattr(resolver.tikhub_provider, "fetch_video_info", tikhub_fetch)
+    monkeypatch.setattr(resolve_mod, "get_video_resolver", lambda: resolver)
+
+    response_720 = authed_client.post(
+        "/api/resolve",
+        json={"url": YOUTUBE_URL, "translate": False, "quality": "720p"},
+    )
+    response_1080 = authed_client.post(
+        "/api/resolve",
+        json={"url": YOUTUBE_URL, "translate": False, "quality": "1080p"},
+    )
+    cached_720 = authed_client.post(
+        "/api/resolve",
+        json={"url": YOUTUBE_URL, "translate": False, "quality": "720p"},
+    )
+
+    assert response_720.status_code == 200
+    assert response_720.json()["data"]["video_url"].endswith("youtube-720-high.mp4")
+    assert response_1080.status_code == 200
+    assert response_1080.json()["data"]["video_url"].endswith("youtube-1080.mp4")
+    assert cached_720.json()["data"]["video_url"].endswith("youtube-720-high.mp4")
+    assert calls == ["720p", "1080p"]
+    assert {
+        record.quality
+        for record in db.query(VideoCache).filter(VideoCache.video_id == "quality-youtube")
+    } == {"720p", "1080p"}
+
+
+def test_douyin_fixture_quality_cap_selects_available_lower_stream():
+    raw = _load_platform("douyin", "app_v3")
+    default_info = DouyinService("key", "base")._parse_response(raw)
+    capped_info = DouyinService("key", "base")._parse_response(raw, quality="540p")
+
+    assert default_info is not None
+    assert capped_info is not None
+    assert default_info.quality == "adapt_lowest_720_1"
+    assert capped_info.quality == "adapt_540_1"
+    assert capped_info.width == 576
+    assert capped_info.height == 1024
+
+
+@pytest.mark.parametrize(
+    ("service", "platform", "fixture"),
+    [
+        (TikTokService, "tiktok", "app_v3_video"),
+        (KuaishouService, "kuaishou", "web_v2_video"),
+        (XiaohongshuService, "xiaohongshu", "app_v2_video"),
+    ],
+)
+def test_quality_is_noop_for_single_stream_fixtures(service, platform, fixture):
+    raw = _load_platform(platform, fixture)
+    parser = service("key", "base")
+    default_info = parser._parse_response(raw)
+    requested_info = parser._parse_response(raw, quality="720p")
+
+    assert default_info is not None
+    assert requested_info is not None
+    assert requested_info.video_url == default_info.video_url
+    assert requested_info.width == default_info.width
+    assert requested_info.height == default_info.height
+
+
+def test_quality_is_noop_for_instagram_adapter():
+    raw = _load_platform("instagram", "v2_video")
+    adapter = TikHubAdapter("key", "base")
+    default_info = adapter.adapt(raw, "instagram", "id")
+    requested_info = adapter.adapt(raw, "instagram", "id", quality="720p")
+
+    assert default_info is not None
+    assert requested_info is not None
+    assert requested_info.video_url == default_info.video_url
+    assert requested_info.quality == default_info.quality
