@@ -251,12 +251,14 @@ class YouTubeService(BasePlatformService):
             cap = int(quality[:-1])
             streams_with_resolution = []
             for stream in videos:
+                width = self._parse_count(stream.get("width")) or 0
                 height = self._parse_count(stream.get("height")) or 0
-                if not height:
+                resolution = min(width, height) if width > 0 and height > 0 else height
+                if not resolution:
                     match = re.search(r"(\d+)p", str(stream.get("quality") or ""))
-                    height = int(match.group(1)) if match else 0
-                if height > 0:
-                    streams_with_resolution.append((stream, height))
+                    resolution = int(match.group(1)) if match else 0
+                if resolution > 0:
+                    streams_with_resolution.append((stream, resolution))
 
             # An explicit cap is a no-op if the provider has no usable
             # resolution metadata; this is the same default selection path.

@@ -19,16 +19,16 @@
         },
         {
           "url": "https://cdn.example/youtube-720-low.mp4",
-          "width": 1280,
-          "height": 720,
+          "width": 720,
+          "height": 1280,
           "quality": "720p",
           "hasAudio": true,
           "bitrate": 1000000
         },
         {
           "url": "https://cdn.example/youtube-720-high.mp4",
-          "width": 1280,
-          "height": 720,
+          "width": 720,
+          "height": 1280,
           "quality": "720p",
           "hasAudio": true,
           "bitrate": 2000000
