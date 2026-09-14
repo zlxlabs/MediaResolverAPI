@@ -49,7 +49,13 @@ class TikHubAdapter:
         self.api_key = api_key
         self.api_base = api_base
 
-    def adapt(self, raw_data: Dict, platform: str, video_id: str) -> Optional[VideoInfo]:
+    def adapt(
+        self,
+        raw_data: Dict,
+        platform: str,
+        video_id: str,
+        download_mode: str = "video",
+    ) -> Optional[VideoInfo]:
         """
         将 TikHub 原始响应数据转换为 VideoInfo 对象
 
@@ -77,7 +83,12 @@ class TikHubAdapter:
             service = service_class(self.api_key, self.api_base)
 
             # 调用平台服务的 _parse_response 方法解析数据
-            video_info = service._parse_response(raw_data)
+            if platform == "youtube":
+                video_info = service._parse_response(
+                    raw_data, download_mode=download_mode
+                )
+            else:
+                video_info = service._parse_response(raw_data)
 
             if not video_info:
                 logger.error(f"Failed to parse TikHub response for platform: {platform}")

@@ -18,3 +18,10 @@
 - 本段结论：YouTube audio 模式只读取 v2 `streamingData.adaptiveFormats`，过滤 `audio/*` 且必须有直链，按 bitrate 选择最高轨。默认 video 路径仍沿用原有 `videos.items` / `streamingData.formats` 选择逻辑。
 - 关键决策与已否决方案：现有 web fixture 没有音频轨、v2 fixture 只有纯视频 adaptive 轨；因此不从 web schema 猜音频，也不接受只有 `signatureCipher` 的轨。
 - 下一步唯一动作：把 download_mode 穿过 resolver、TikHub/Cobalt adapter 与端点错误映射。
+
+## 里程碑 4：provider 路由与 API 契约
+
+- 当前阶段：implementing
+- 本段结论：resolver 已实现 audio 静态路由与四平台 fail-fast 400，Twitter 等五平台 audio 只调用 Cobalt；YouTube/TikHub 与 Cobalt adapter 会填充 media_type，Cobalt audio 请求体透传 `downloadMode`。
+- 关键决策与已否决方案：默认 video 请求不增加 Cobalt 字段；audio 失败不退回 video；无音频平台在任何 provider 调用前抛出 `audio_not_available`。
+- 下一步唯一动作：新增集中测试 fixture，覆盖端到端 audio、路由、缓存迁移与 422。

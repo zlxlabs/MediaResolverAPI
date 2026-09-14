@@ -42,7 +42,14 @@ class CobaltAdapter:
         "twitter": r"(?:x|twitter)\.com/(?!i/status/)([^/]+)/status/",
     }
 
-    def adapt(self, raw_data: Dict, platform: str, video_id: str, original_url: str) -> Optional[VideoInfo]:
+    def adapt(
+        self,
+        raw_data: Dict,
+        platform: str,
+        video_id: str,
+        original_url: str,
+        download_mode: str = "video",
+    ) -> Optional[VideoInfo]:
         """
         将 Cobalt 原始响应数据转换为 VideoInfo 对象
 
@@ -78,8 +85,11 @@ class CobaltAdapter:
                     logger.error("Cobalt picker response has no items")
                     return None
 
-                # Find the first video type item
-                video_item = next((item for item in picker_items if item.get("type") == "video"), None)
+                item_type = "audio" if download_mode == "audio" else "video"
+                video_item = next(
+                    (item for item in picker_items if item.get("type") == item_type),
+                    None,
+                )
                 if not video_item:
                     logger.error("No video found in Cobalt picker response")
                     return None
@@ -129,6 +139,7 @@ class CobaltAdapter:
                 height=0,  # Cobalt 不提供
                 duration=None,  # Cobalt 不提供
                 quality="unknown",  # Cobalt 不提供
+                media_type="audio" if download_mode == "audio" else "video",
                 view_count=None,  # Cobalt 不提供
                 like_count=None,  # Cobalt 不提供
                 comment_count=None,  # Cobalt 不提供
