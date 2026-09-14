@@ -247,6 +247,40 @@ def test_twitter_quality_2160p_overrides_default_1080p_cap():
     assert capped_info.video_url.endswith("twitter-2160.mp4")
 
 
+def _twitter_fixture_with_unknown_variant(known_above_cap_only=False):
+    fixture = _load_quality("twitter_multi")
+    variants = fixture["data"]["media"]["video"][0]["variants"]
+    if known_above_cap_only:
+        del variants[:4]
+    variants.append(
+        {
+            "content_type": "video/mp4",
+            "bitrate": 6000000,
+            "url": "https://video.twimg.com/fake/twitter-unknown.mp4",
+        }
+    )
+    return fixture
+
+
+def test_twitter_quality_prefers_unknown_over_known_above_cap():
+    info = TwitterService("key", "base")._parse_response(
+        _twitter_fixture_with_unknown_variant(known_above_cap_only=True),
+        quality="1080p",
+    )
+
+    assert info is not None
+    assert info.video_url.endswith("twitter-unknown.mp4")
+
+
+def test_twitter_quality_prefers_known_at_cap_over_unknown():
+    info = TwitterService("key", "base")._parse_response(
+        _twitter_fixture_with_unknown_variant(), quality="720p"
+    )
+
+    assert info is not None
+    assert info.video_url.endswith("twitter-720-high.mp4")
+
+
 @pytest.mark.asyncio
 async def test_cobalt_quality_is_mapped_to_upstream_video_quality(monkeypatch):
     seen = []
