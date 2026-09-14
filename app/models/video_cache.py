@@ -3,10 +3,10 @@
 """
 
 from datetime import datetime, timedelta, timezone
-from sqlalchemy import Column, Integer, String, DateTime, JSON, Index, Text, event
+from sqlalchemy import Column, Integer, String, DateTime, JSON, Index, Text
 from sqlalchemy.sql import func
 
-from ..core.database import Base, engine
+from ..core.database import Base
 from ..core.config import settings
 
 
@@ -100,10 +100,3 @@ def ensure_video_cache_schema(bind) -> None:
         return
     with bind.connect() as connection:
         _migrate_video_cache_connection(connection.connection)
-
-
-@event.listens_for(engine, "connect")
-def _migrate_video_cache_on_connect(dbapi_connection, _connection_record):
-    """应用启动首次取连接时自动迁移存量缓存表。"""
-    if engine.dialect.name == "sqlite":
-        _migrate_video_cache_connection(dbapi_connection)

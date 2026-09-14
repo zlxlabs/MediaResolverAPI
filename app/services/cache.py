@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy.orm import Session
 from loguru import logger
 
-from ..models.video_cache import VideoCache, ensure_video_cache_schema
+from ..models.video_cache import VideoCache
 from .platforms.base import VideoInfo
 from ..core.config import settings
 
@@ -27,7 +27,6 @@ class CacheService:
             db: 数据库会话
         """
         self.db = db
-        ensure_video_cache_schema(self.db.get_bind())
 
     def get_cached_video(
         self, platform: str, video_id: str, download_mode: str = "video"
@@ -159,26 +158,32 @@ class CacheService:
             self.db.rollback()
             return False
 
-    def clear_cache(self, platform: str, video_id: str, download_mode: str = "video") -> bool:
+    def clear_cache(
+        self, platform: str, video_id: str, download_mode: Optional[str] = None
+    ) -> bool:
         """
-        清除特定的缓存记录
+        清除视频缓存记录；未指定模式时清除该视频的全部下载意图。
 
         Args:
             platform: 平台名称
             video_id: 视频ID
+            download_mode: 下载意图；指定时只清除该模式，否则清除全部模式
 
         Returns:
             bool: 是否清除成功
         """
         try:
-            cache_record = self.db.query(VideoCache).filter(
+            query = self.db.query(VideoCache).filter(
                 VideoCache.platform == platform,
                 VideoCache.video_id == video_id,
-                VideoCache.download_mode == download_mode,
-            ).first()
+            )
+            if download_mode is not None:
+                query = query.filter(VideoCache.download_mode == download_mode)
+            cache_records = query.all()
 
-            if cache_record:
-                self.db.delete(cache_record)
+            if cache_records:
+                for cache_record in cache_records:
+                    self.db.delete(cache_record)
                 self.db.commit()
                 logger.info(f"清除缓存: {platform}:{video_id}")
                 return True

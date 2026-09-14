@@ -10,7 +10,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import app.api.resolve as resolve_mod
-from app.models.video_cache import VideoCache
+from app.models.video_cache import VideoCache, ensure_video_cache_schema
 from app.services.cache import CacheService
 from app.services.platforms.base import VideoInfo
 from app.services.platforms.youtube import YouTubeService
@@ -291,6 +291,7 @@ def test_old_cache_table_is_migrated_and_hits_video_mode():
             ),
         )
 
+    ensure_video_cache_schema(engine)
     session = sessionmaker(autocommit=False, autoflush=False, bind=engine)()
     try:
         cache = CacheService(session)
@@ -316,6 +317,35 @@ def test_old_cache_table_is_migrated_and_hits_video_mode():
         assert index_columns == ["platform", "video_id", "download_mode"]
     finally:
         session.close()
+
+
+def test_init_db_runs_cache_migration_after_create_all(monkeypatch):
+    import app.core.database as database
+
+    calls = []
+    monkeypatch.setattr(
+        database.Base.metadata, "create_all", lambda bind: calls.append("create_all")
+    )
+    monkeypatch.setattr(
+        "app.models.video_cache.ensure_video_cache_schema",
+        lambda bind: calls.append("migrate"),
+    )
+
+    database.init_db()
+
+    assert calls == ["create_all", "migrate"]
+
+
+def test_clear_cache_without_mode_removes_video_and_audio_entries(db):
+    cache = CacheService(db)
+    assert cache.cache_video("youtube", "same-id", _video_info())
+    assert cache.cache_video(
+        "youtube", "same-id", _video_info(media_type="audio"), download_mode="audio"
+    )
+
+    assert cache.clear_cache("youtube", "same-id") is True
+    assert cache.get_cached_video("youtube", "same-id", "video") == (None, None)
+    assert cache.get_cached_video("youtube", "same-id", "audio") == (None, None)
 
 
 def test_invalid_download_mode_is_422(authed_client):

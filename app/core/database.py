@@ -40,3 +40,6 @@ def init_db():
     初始化数据库，创建所有表
     """
     Base.metadata.create_all(bind=engine)
+    from ..models.video_cache import ensure_video_cache_schema
+
+    ensure_video_cache_schema(engine)
