@@ -364,7 +364,7 @@ def test_api_twitter_variants_survive_cache_round_trip(
 
     async def tikhub_fetch(*args, **kwargs):
         calls.append(kwargs)
-        return _load_platform("twitter", "tweet_video")
+        return _load_quality("twitter_multi")
 
     monkeypatch.setattr(resolver.tikhub_provider, "fetch_video_info", tikhub_fetch)
     monkeypatch.setattr(resolve_mod, "get_video_resolver", lambda: resolver)
@@ -388,36 +388,16 @@ def test_api_twitter_variants_survive_cache_round_trip(
     assert first.status_code == 200
     assert cached.status_code == 200
     first_variants = first.json()["data"]["variants"]
-    assert first_variants == [
-        {
-            "url": "https://video.twimg.com/amplify_video/fake/avc1/480x270/twitter_270.mp4",
-            "bitrate": 256000,
-            "width": 480,
-            "height": 270,
-            "quality": "270p",
-        },
-        {
-            "url": "https://video.twimg.com/amplify_video/fake/avc1/640x360/twitter_360.mp4",
-            "bitrate": 832000,
-            "width": 640,
-            "height": 360,
-            "quality": "360p",
-        },
-        {
-            "url": "https://video.twimg.com/amplify_video/fake/avc1/1280x720/twitter_720.mp4",
-            "bitrate": 2176000,
-            "width": 1280,
-            "height": 720,
-            "quality": "720p",
-        },
-        {
-            "url": "https://video.twimg.com/amplify_video/fake/avc1/1920x1080/twitter_1080.mp4",
-            "bitrate": 10368000,
-            "width": 1920,
-            "height": 1080,
-            "quality": "1080p",
-        },
+    expected_keys = ("url", "bitrate", "width", "height", "quality")
+    expected_values = [
+        ("https://video.twimg.com/fake/640x360/twitter-360.mp4", 500000, 640, 360, "360p"),
+        ("https://video.twimg.com/fake/1280x720/twitter-720-low.mp4", 1000000, 1280, 720, "720p"),
+        ("https://video.twimg.com/fake/1280x720/twitter-720-high.mp4", 2000000, 1280, 720, "720p"),
+        ("https://video.twimg.com/fake/1920x1080/twitter-1080.mp4", 3000000, 1920, 1080, "1080p"),
+        ("https://video.twimg.com/fake/2560x1440/twitter-1440.mp4", 4000000, 2560, 1440, "1440p"),
+        ("https://video.twimg.com/fake/3840x2160/twitter-2160.mp4", 5000000, 3840, 2160, "2160p"),
     ]
+    assert first_variants == [dict(zip(expected_keys, values)) for values in expected_values]
     assert cached.json()["data"]["variants"] == first_variants
     assert len(calls) == 1
 
