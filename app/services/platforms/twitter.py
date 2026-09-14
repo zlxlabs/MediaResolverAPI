@@ -16,7 +16,9 @@ class TwitterService(BasePlatformService):
         """Twitter data is fetched by TikHubProvider; use the provider chain."""
         return None
 
-    def _parse_response(self, response_data: Dict[str, Any]) -> Optional[VideoInfo]:
+    def _parse_response(
+        self, response_data: Dict[str, Any], quality: Optional[str] = None
+    ) -> Optional[VideoInfo]:
         """Parse the highest-bitrate playable MP4 attached to the tweet itself."""
         if not isinstance(response_data, dict):
             return None
@@ -47,16 +49,26 @@ class TwitterService(BasePlatformService):
         if not candidates:
             return None
 
-        pool_le_1080 = [c for c in candidates if 1 <= c[4] <= 1080]
-        if pool_le_1080:
-            selected = max(pool_le_1080, key=lambda c: (c[4], c[5]))
+        if quality is None:
+            selected = self._select_default_variant(candidates)
         else:
-            pool_unknown = [c for c in candidates if c[4] == 0]
-            if pool_unknown:
-                selected = max(pool_unknown, key=lambda c: c[5])
+            cap = int(quality[:-1])
+            known = [c for c in candidates if c[4] > 0]
+            if not known:
+                # No resolution metadata means the explicit cap is a no-op;
+                # retain Twitter's existing default pool selection.
+                selected = self._select_default_variant(candidates)
             else:
-                pool_gt_1080 = [c for c in candidates if c[4] > 1080]
-                selected = min(pool_gt_1080, key=lambda c: (c[4], -c[5]))
+                pool_at_or_below = [c for c in known if c[4] <= cap]
+                if pool_at_or_below:
+                    selected = max(pool_at_or_below, key=lambda c: (c[4], c[5]))
+                elif pool_unknown := [c for c in candidates if c[4] == 0]:
+                    selected = max(pool_unknown, key=lambda c: c[5])
+                else:
+                    selected = min(
+                        [c for c in known if c[4] > cap],
+                        key=lambda c: (c[4], -c[5]),
+                    )
 
         variant, video, width, height, _short_side, _bitrate = selected
         video_url = str(variant["url"])
@@ -94,6 +106,19 @@ class TwitterService(BasePlatformService):
             publish_time=data.get("created_at"),
             raw_data=response_data,
         )
+
+    @staticmethod
+    def _select_default_variant(candidates):
+        pool_le_1080 = [c for c in candidates if 1 <= c[4] <= 1080]
+        if pool_le_1080:
+            return max(pool_le_1080, key=lambda c: (c[4], c[5]))
+
+        pool_unknown = [c for c in candidates if c[4] == 0]
+        if pool_unknown:
+            return max(pool_unknown, key=lambda c: c[5])
+
+        pool_gt_1080 = [c for c in candidates if c[4] > 1080]
+        return min(pool_gt_1080, key=lambda c: (c[4], -c[5]))
 
     @staticmethod
     def _tweet_videos(data: Dict[str, Any]) -> list[Dict[str, Any]]:

@@ -200,7 +200,9 @@ class TikTokService(BasePlatformService):
             logger.error(f"Failed to save error response: {e}")
             return ""
 
-    def _parse_response(self, response_data: Dict[str, Any]) -> Optional[VideoInfo]:
+    def _parse_response(
+        self, response_data: Dict[str, Any], quality: Optional[str] = None
+    ) -> Optional[VideoInfo]:
         """
         Parse TikTok API response data.
 
@@ -248,15 +250,62 @@ class TikTokService(BasePlatformService):
             # Video file info
             # Priority 1: Use play_addr_h264 (H264 codec, usually higher quality)
             play_addr_h264 = self._safe_get(data_source, "video.play_addr_h264")
-            if play_addr_h264:
+            bit_rate_list = self._safe_get(data_source, "video.bit_rate", [])
+            selected_bit_rate = None
+            if quality is not None and isinstance(bit_rate_list, list):
+                cap = int(quality[:-1])
+                candidates = []
+                for item in bit_rate_list:
+                    play_addr = item.get("play_addr") if isinstance(item, dict) else None
+                    if not isinstance(play_addr, dict) or not play_addr.get("url_list"):
+                        continue
+                    width = self._parse_count(play_addr.get("width")) or 0
+                    height = self._parse_count(play_addr.get("height")) or 0
+                    if width > 0 and height > 0:
+                        candidates.append((item, min(width, height)))
+                if candidates:
+                    at_or_below = [item for item in candidates if item[1] <= cap]
+                    if at_or_below:
+                        selected_bit_rate = max(
+                            at_or_below,
+                            key=lambda item: (
+                                item[1],
+                                self._parse_count(item[0].get("bit_rate")) or 0,
+                            ),
+                        )[0]
+                    else:
+                        selected_bit_rate = min(
+                            [item for item in candidates if item[1] > cap],
+                            key=lambda item: (
+                                item[1],
+                                -(self._parse_count(item[0].get("bit_rate")) or 0),
+                            ),
+                        )[0]
+
+            if quality is not None and selected_bit_rate is None:
+                logger.warning(
+                    "TikTok quality cap ignored: bit_rate list has no usable "
+                    "resolution metadata; using default video source"
+                )
+
+            if selected_bit_rate:
+                video_url = self._safe_get(selected_bit_rate, "play_addr.url_list.0", "")
+                width = self._safe_get(selected_bit_rate, "play_addr.width", 0)
+                height = self._safe_get(selected_bit_rate, "play_addr.height", 0)
+                quality_label = self._safe_get(selected_bit_rate, "gear_name", "")
+                selected_bitrate = selected_bit_rate.get("bit_rate", 0)
+                logger.info(
+                    f"Using capped bit_rate: {quality_label}, {width}x{height}, "
+                    f"bitrate={selected_bitrate}"
+                )
+            elif play_addr_h264:
                 video_url = self._safe_get(play_addr_h264, "url_list.0", "")
                 width = self._safe_get(play_addr_h264, "width", 0)
                 height = self._safe_get(play_addr_h264, "height", 0)
-                quality = "h264_original"
+                quality_label = "h264_original"
                 logger.info(f"Using play_addr_h264: {width}x{height}")
             else:
                 # Priority 2: Select highest bit_rate from bit_rate array
-                bit_rate_list = self._safe_get(data_source, "video.bit_rate", [])
                 if not bit_rate_list:
                     logger.error("TikTok response missing video download info")
 
@@ -269,9 +318,9 @@ class TikTokService(BasePlatformService):
                 video_url = self._safe_get(best_bit_rate, "play_addr.url_list.0", "")
                 width = self._safe_get(best_bit_rate, "play_addr.width", 0)
                 height = self._safe_get(best_bit_rate, "play_addr.height", 0)
-                quality = self._safe_get(best_bit_rate, "gear_name", "")
+                quality_label = self._safe_get(best_bit_rate, "gear_name", "")
                 selected_bitrate = best_bit_rate.get("bit_rate", 0)
-                logger.info(f"Using best bit_rate: {quality}, {width}x{height}, bitrate={selected_bitrate}")
+                logger.info(f"Using best bit_rate: {quality_label}, {width}x{height}, bitrate={selected_bitrate}")
 
             # Statistics
             statistics = self._safe_get(data_source, "statistics", {})
@@ -294,7 +343,7 @@ class TikTokService(BasePlatformService):
                 video_url=video_url,
                 width=width,
                 height=height,
-                quality=quality,
+                quality=quality_label,
                 view_count=view_count,
                 like_count=like_count,
                 comment_count=comment_count,

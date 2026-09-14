@@ -8,7 +8,7 @@ import time
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from loguru import logger
 from sqlalchemy.orm import Session
 
@@ -68,6 +68,17 @@ class ResolveRequest(BaseModel):
     download_mode: Literal["video", "audio"] = Field(
         default="video", description="Download intent"
     )
+    quality: Optional[str] = Field(
+        default=None,
+        pattern=r"^\d+p$",
+        description="Maximum requested video resolution, for example 720p",
+    )
+
+    @model_validator(mode="after")
+    def reject_quality_for_audio(self):
+        if self.download_mode == "audio" and self.quality is not None:
+            raise ValueError("quality cannot be combined with download_mode=audio")
+        return self
 
 
 class VideoInfoResponse(BaseModel):
@@ -177,6 +188,7 @@ async def resolve_url(
         log_data["video_id"] = video_id
 
         cache_service = CacheService(db)
+        cache_quality = request.quality or ""
         translated_desc = None
         translation_result = TranslationResult(
             TranslationStatus.skipped_not_requested, None
@@ -185,7 +197,7 @@ async def resolve_url(
         # Step 3: Check cache（仅在已知 video_id 时；hybrid / by_url 兜底要解析后才拿到 id）
         if not use_hybrid and video_id and not request.force_refresh:
             cached_info, cached_translation = cache_service.get_cached_video(
-                platform, video_id, request.download_mode
+                platform, video_id, request.download_mode, cache_quality
             )
             if cached_info:
                 logger.info(f"Cache hit: {platform}:{video_id}")
@@ -213,6 +225,7 @@ async def resolve_url(
                             cached_info,
                             translated_desc,
                             request.download_mode,
+                            cache_quality,
                         )
                 else:
                     translation_result = TranslationResult(
@@ -238,6 +251,8 @@ async def resolve_url(
         }
         if request.download_mode == "audio":
             resolver_kwargs["download_mode"] = request.download_mode
+        if request.quality is not None:
+            resolver_kwargs["quality"] = request.quality
         video_info, provider_name = await resolver.resolve(**resolver_kwargs)
         log_data["provider"] = provider_name
 
@@ -261,6 +276,7 @@ async def resolve_url(
             video_info,
             translated_desc,
             request.download_mode,
+            cache_quality,
         )
 
         # Step 7: Return response

@@ -51,7 +51,10 @@ class YouTubeService(BasePlatformService):
             return None
 
     def _parse_response(
-        self, response_data: Dict[str, Any], download_mode: str = "video"
+        self,
+        response_data: Dict[str, Any],
+        download_mode: str = "video",
+        quality: Optional[str] = None,
     ) -> Optional[VideoInfo]:
         """
         解析YouTube API响应数据
@@ -107,7 +110,7 @@ class YouTubeService(BasePlatformService):
             else:
                 # 视频文件信息 - 选择最佳质量的有音频视频（自适应两套 schema）
                 videos = self._adaptive_video_streams(data)
-                best_video = self._select_best_video(videos)
+                best_video = self._select_best_video(videos, quality=quality)
 
                 if not best_video:
                     logger.error("YouTube响应数据中没有可用的视频流")
@@ -212,7 +215,9 @@ class YouTubeService(BasePlatformService):
         )
         return selected
 
-    def _select_best_video(self, videos: list) -> Optional[Dict[str, Any]]:
+    def _select_best_video(
+        self, videos: list, quality: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
         """
         选择最佳质量的视频流
         优先级: 1. 清晰度 (1080p > 4K > 2K > 720p > ...)  2. 有音频优先
@@ -230,14 +235,62 @@ class YouTubeService(BasePlatformService):
         # Log all available video streams
         self._log_available_streams(videos)
 
-        # Sort by: 1) quality priority (higher first), 2) has audio (True first)
-        sorted_videos = sorted(
-            videos,
-            key=lambda v: (self._get_quality_score(v), self._safe_get(v, "hasAudio", False)),
-            reverse=True
-        )
+        if quality is None:
+            # Default behavior is intentionally unchanged: the existing
+            # quality score keeps 1080p ahead of 4K and prefers muxed streams.
+            sorted_videos = sorted(
+                videos,
+                key=lambda v: (
+                    self._get_quality_score(v),
+                    self._safe_get(v, "hasAudio", False),
+                ),
+                reverse=True,
+            )
+            best_video = sorted_videos[0]
+        else:
+            cap = int(quality[:-1])
+            streams_with_resolution = []
+            for stream in videos:
+                width = self._parse_count(stream.get("width")) or 0
+                height = self._parse_count(stream.get("height")) or 0
+                resolution = min(width, height) if width > 0 and height > 0 else height
+                if not resolution:
+                    match = re.search(r"(\d+)p", str(stream.get("quality") or ""))
+                    resolution = int(match.group(1)) if match else 0
+                if resolution > 0:
+                    streams_with_resolution.append((stream, resolution))
 
-        best_video = sorted_videos[0]
+            # An explicit cap is a no-op if the provider has no usable
+            # resolution metadata; this is the same default selection path.
+            if not streams_with_resolution:
+                return self._select_best_video(videos)
+
+            def bitrate(stream: Dict[str, Any]) -> int:
+                return self._parse_count(
+                    stream.get("bitrate") or stream.get("averageBitrate")
+                ) or 0
+
+            at_or_below = [
+                item for item in streams_with_resolution if item[1] <= cap
+            ]
+            if at_or_below:
+                best_video, _ = max(
+                    at_or_below,
+                    key=lambda item: (
+                        item[1],
+                        bitrate(item[0]),
+                        self._safe_get(item[0], "hasAudio", False),
+                    ),
+                )
+            else:
+                above_cap = [
+                    item for item in streams_with_resolution if item[1] > cap
+                ]
+                best_video, _ = min(
+                    above_cap,
+                    key=lambda item: (item[1], -bitrate(item[0])),
+                )
+
         has_audio = self._safe_get(best_video, "hasAudio", False)
 
         # Count streams with audio for logging

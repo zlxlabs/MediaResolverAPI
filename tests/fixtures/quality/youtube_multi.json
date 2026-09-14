@@ -1,0 +1,63 @@
+{
+  "data": {
+    "id": "quality-youtube",
+    "title": "quality youtube fixture",
+    "description": "",
+    "channel": {"name": "channel", "id": "channel-id"},
+    "viewCount": "0",
+    "likeCount": "0",
+    "publishedTime": "",
+    "videos": {
+      "items": [
+        {
+          "url": "https://cdn.example/youtube-360.mp4",
+          "width": 640,
+          "height": 360,
+          "quality": "360p",
+          "hasAudio": true,
+          "bitrate": 500000
+        },
+        {
+          "url": "https://cdn.example/youtube-720-low.mp4",
+          "width": 720,
+          "height": 1280,
+          "quality": "720p",
+          "hasAudio": true,
+          "bitrate": 1000000
+        },
+        {
+          "url": "https://cdn.example/youtube-720-high.mp4",
+          "width": 720,
+          "height": 1280,
+          "quality": "720p",
+          "hasAudio": true,
+          "bitrate": 2000000
+        },
+        {
+          "url": "https://cdn.example/youtube-1080.mp4",
+          "width": 1920,
+          "height": 1080,
+          "quality": "1080p",
+          "hasAudio": true,
+          "bitrate": 3000000
+        },
+        {
+          "url": "https://cdn.example/youtube-1440.mp4",
+          "width": 2560,
+          "height": 1440,
+          "quality": "1440p",
+          "hasAudio": true,
+          "bitrate": 4000000
+        },
+        {
+          "url": "https://cdn.example/youtube-2160.mp4",
+          "width": 3840,
+          "height": 2160,
+          "quality": "2160p",
+          "hasAudio": true,
+          "bitrate": 5000000
+        }
+      ]
+    }
+  }
+}

@@ -69,7 +69,9 @@ class KuaishouService(BasePlatformService):
             node = None
         return node if isinstance(node, dict) and node else None
 
-    def _parse_response(self, response_data: Dict[str, Any]) -> Optional[VideoInfo]:
+    def _parse_response(
+        self, response_data: Dict[str, Any], quality: Optional[str] = None
+    ) -> Optional[VideoInfo]:
         """
         解析快手API响应数据
 
@@ -124,8 +126,44 @@ class KuaishouService(BasePlatformService):
                 logger.error("快手响应数据中缺少representation字段")
                 return None
 
-            # 取第一个representation
+            # 默认行为仍取第一个 representation；显式 quality 仅在有逐档
+            # 分辨率元数据时按短边选择。
             first_repr = representation[0]
+            if quality is not None:
+                cap = int(quality[:-1])
+                candidates = []
+                for item in representation:
+                    width = self._parse_count(self._safe_get(item, "width")) or 0
+                    height = self._parse_count(self._safe_get(item, "height")) or 0
+                    if width > 0 and height > 0 and self._safe_get(item, "url", ""):
+                        candidates.append((item, min(width, height)))
+                if candidates:
+                    at_or_below = [item for item in candidates if item[1] <= cap]
+                    if at_or_below:
+                        first_repr = max(
+                            at_or_below,
+                            key=lambda item: (
+                                item[1],
+                                self._parse_count(
+                                    self._safe_get(item[0], "bitrate")
+                                ) or 0,
+                            ),
+                        )[0]
+                    else:
+                        first_repr = min(
+                            [item for item in candidates if item[1] > cap],
+                            key=lambda item: (
+                                item[1],
+                                -(self._parse_count(
+                                    self._safe_get(item[0], "bitrate")
+                                ) or 0),
+                            ),
+                        )[0]
+                else:
+                    logger.warning(
+                        "Kuaishou quality cap ignored: representation has no "
+                        "usable resolution metadata; using first representation"
+                    )
             video_url = self._safe_get(first_repr, "url", "")
             width = self._safe_get(first_repr, "width", 0)
             height = self._safe_get(first_repr, "height", 0)

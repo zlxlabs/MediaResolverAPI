@@ -13,6 +13,11 @@ from .platforms.base import VideoInfo
 from ..core.config import settings
 
 
+def _normalize_quality(quality: Optional[str]) -> str:
+    """将缺省质量统一为缓存键中的空串。"""
+    return quality or ""
+
+
 class CacheService:
     """
     缓存服务类
@@ -29,7 +34,11 @@ class CacheService:
         self.db = db
 
     def get_cached_video(
-        self, platform: str, video_id: str, download_mode: str = "video"
+        self,
+        platform: str,
+        video_id: str,
+        download_mode: str = "video",
+        quality: Optional[str] = None,
     ) -> tuple[Optional[VideoInfo], Optional[str]]:
         """
         获取缓存的视频信息和翻译结果
@@ -44,11 +53,13 @@ class CacheService:
         if not settings.CACHE_ENABLED:
             return None, None
 
+        quality = _normalize_quality(quality)
         try:
             cache_record = self.db.query(VideoCache).filter(
                 VideoCache.platform == platform,
                 VideoCache.video_id == video_id,
                 VideoCache.download_mode == download_mode,
+                VideoCache.quality == quality,
             ).first()
 
             if not cache_record:
@@ -101,6 +112,7 @@ class CacheService:
         video_info: VideoInfo,
         translated_desc: Optional[str] = None,
         download_mode: str = "video",
+        quality: Optional[str] = None,
     ) -> bool:
         """
         缓存视频信息和翻译结果
@@ -117,12 +129,14 @@ class CacheService:
         if not settings.CACHE_ENABLED:
             return False
 
+        quality = _normalize_quality(quality)
         try:
             # 检查是否已存在缓存记录
             existing_cache = self.db.query(VideoCache).filter(
                 VideoCache.platform == platform,
                 VideoCache.video_id == video_id,
                 VideoCache.download_mode == download_mode,
+                VideoCache.quality == quality,
             ).first()
 
             # 准备缓存数据
@@ -143,6 +157,7 @@ class CacheService:
                     platform=platform,
                     video_id=video_id,
                     download_mode=download_mode,
+                    quality=quality,
                     video_data=cache_data,
                     translated_desc=translated_desc,
                     provider=video_info.provider or "tikhub"

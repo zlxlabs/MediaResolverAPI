@@ -55,6 +55,7 @@ class TikHubAdapter:
         platform: str,
         video_id: str,
         download_mode: str = "video",
+        quality: Optional[str] = None,
     ) -> Optional[VideoInfo]:
         """
         将 TikHub 原始响应数据转换为 VideoInfo 对象
@@ -85,8 +86,16 @@ class TikHubAdapter:
             # 调用平台服务的 _parse_response 方法解析数据
             if platform == "youtube":
                 video_info = service._parse_response(
-                    raw_data, download_mode=download_mode
+                    raw_data, download_mode=download_mode, quality=quality
                 )
+            elif platform in {
+                "douyin",
+                "tiktok",
+                "kuaishou",
+                "xiaohongshu",
+                "twitter",
+            }:
+                video_info = service._parse_response(raw_data, quality=quality)
             else:
                 video_info = service._parse_response(raw_data)
 

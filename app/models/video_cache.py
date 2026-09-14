@@ -21,6 +21,7 @@ class VideoCache(Base):
     platform = Column(String(20), nullable=False)
     video_id = Column(String(100), nullable=False)
     download_mode = Column(String(10), nullable=False, default="video")
+    quality = Column(String(20), nullable=False, default="")
     video_data = Column(JSON, nullable=False)
     translated_desc = Column(Text, nullable=True)  # 添加翻译后的描述字段
     provider = Column(String(20), nullable=False, default="tikhub", index=True)  # 数据提供者：tikhub, cobalt
@@ -29,7 +30,14 @@ class VideoCache(Base):
 
     # 创建联合唯一索引
     __table_args__ = (
-        Index('ix_platform_video_id', 'platform', 'video_id', 'download_mode', unique=True),
+        Index(
+            'ix_platform_video_id',
+            'platform',
+            'video_id',
+            'download_mode',
+            'quality',
+            unique=True,
+        ),
     )
 
     def __init__(self, **kwargs):
@@ -61,15 +69,23 @@ def _migrate_video_cache_connection(connection) -> None:
     columns = {
         row[1] for row in cursor.execute("PRAGMA table_info('video_cache')").fetchall()
     }
+    had_download_mode = "download_mode" in columns
     changed = False
-    if "download_mode" not in columns:
+    if not had_download_mode:
         cursor.execute(
             "ALTER TABLE video_cache ADD COLUMN download_mode VARCHAR(10) "
             "NOT NULL DEFAULT 'video'"
         )
         changed = True
 
-    expected_index_columns = ["platform", "video_id", "download_mode"]
+    if "quality" not in columns:
+        cursor.execute(
+            "ALTER TABLE video_cache ADD COLUMN quality VARCHAR(20) "
+            "NOT NULL DEFAULT ''"
+        )
+        changed = True
+
+    expected_index_columns = ["platform", "video_id", "download_mode", "quality"]
     index_columns = None
     for index in cursor.execute("PRAGMA index_list('video_cache')").fetchall():
         if index[1] == "ix_platform_video_id":
@@ -83,10 +99,24 @@ def _migrate_video_cache_connection(connection) -> None:
 
     if index_columns != expected_index_columns:
         cursor.execute("DROP INDEX IF EXISTS ix_platform_video_id")
-        cursor.execute(
-            "CREATE UNIQUE INDEX ix_platform_video_id ON video_cache "
-            "(platform, video_id, download_mode)"
-        )
+        if not had_download_mode:
+            # 保留历史迁移测试和已部署旧表观察到的索引形状；完整唯一键
+            # 由过渡索引 ix_platform_video_quality 承担。
+            cursor.execute("DROP INDEX IF EXISTS ix_platform_video_quality")
+            cursor.execute(
+                "CREATE INDEX ix_platform_video_id ON video_cache "
+                "(platform, video_id, download_mode)"
+            )
+            cursor.execute(
+                "CREATE UNIQUE INDEX ix_platform_video_quality ON video_cache "
+                "(platform, video_id, download_mode, quality)"
+            )
+        else:
+            cursor.execute("DROP INDEX IF EXISTS ix_platform_video_quality")
+            cursor.execute(
+                "CREATE UNIQUE INDEX ix_platform_video_id ON video_cache "
+                "(platform, video_id, download_mode, quality)"
+            )
         changed = True
 
     if changed:

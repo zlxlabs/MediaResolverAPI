@@ -1,0 +1,69 @@
+## 里程碑 1：请求模型与组合校验
+
+- 当前阶段：implementing
+- 本段结论：ResolveRequest 已接受可选 `quality`，仅允许 `^\d+p$`；与 `download_mode=audio` 组合在 Pydantic 请求校验阶段返回 422。
+- 关键决策与已否决方案：保持 quality 的请求值原样用于后续缓存归一化；不在端点函数内静默忽略 audio + quality。
+- 下一步唯一动作：为 VideoCache 增加 quality 列并完成两步 SQLite 启动迁移。
+
+## 里程碑 2：缓存质量键与两步迁移
+
+- 当前阶段：implementing
+- 本段结论：VideoCache 与 CacheService 已将归一化 quality（缺省为空串）纳入读写键；SQLite 启动迁移可从原始旧表经 download_mode 再迁 quality，旧视频行仍命中缺省档。
+- 关键决策与已否决方案：卡 1 之前的旧索引保留历史名称作为过渡兼容索引，另建完整四列唯一索引；卡 1 结构则直接重建原唯一索引为四列，不丢存量行。
+- 下一步唯一动作：为 YouTube 与 Twitter 加入显式 quality 封顶选流并锁住默认路径不变。
+
+## 里程碑 3：YouTube 与 Twitter 封顶选流
+
+- 当前阶段：implementing
+- 本段结论：YouTube/Twitter 显式 quality 已按短边分辨率实现“≤cap 取最高档、全超 cap 取最小超档、同档比码率”；不传 quality 继续走原默认排序，Twitter 显式 `2160p` 可越过默认 `1080p`。
+- 关键决策与已否决方案：全仓采用短边 `min(width, height)` 作为 `p` 档基准；没有可用分辨率元数据时显式 quality 走该平台原默认路径，不猜测 URL 或码率代表分辨率。
+- 下一步唯一动作：把 quality 穿过 resolver/adapter/provider，并实现 Douyin 多档与其余平台 no-op 行为。
+
+## 里程碑 4：全链路穿线与平台适配
+
+- 当前阶段：implementing
+- 本段结论：quality 已从 API 穿过 VideoResolver、TikHubAdapter 到 YouTube/Twitter/Douyin 等现有解析器；Cobalt 将 `720p` 映射为上游接受的 `videoQuality: "720"`。Douyin fixture 的多档分辨率可封顶，TikTok/Kuaishou/Xiaohongshu 当前 fixture 无可选多档，Instagram 通过适配器保持 no-op。
+- 关键决策与已否决方案：不修改 Instagram/Wechat Channels 禁止文件，也不把 Cobalt 的未知实际档位伪填进响应 quality；不传 quality 时 resolver/provider kwargs 仍保持卡 1 的原形状。
+- 下一步唯一动作：补齐 README 契约、执行红验并跑最终全量测试。
+
+## 里程碑 5：契约文档与验证准备
+
+- 当前阶段：verifying
+- 本段结论：README 已记录 quality 格式、封顶/超档语义、短边比较基准、no-op 平台与 audio 组合 422；实现与专项测试已覆盖端点、缓存、解析器和 Cobalt 边界。
+- 关键决策与已否决方案：不新增 variants 菜单或平台共享选流抽象；不改变未传 quality 的默认分支。
+- 下一步唯一动作：完成两条核心断言红验并运行最终全量测试。
+
+## 里程碑 6：最终验证
+
+- 当前阶段：completed
+- 本段结论：两条核心红验均以 AssertionError 转红并精确恢复；最终全量测试首轮通过 412 项，工作区保持干净。
+- 关键决策与已否决方案：无新增决策；不部署生产，不修改禁止范围文件。
+- 下一步唯一动作：对本收尾提交再次运行卡定全量测试并交主脑验收。
+
+## 里程碑 7：统一短边比较基准
+
+- 当前阶段：verifying
+- 本段结论：收口自检发现 YouTube 显式分支原按 height 比较，与全仓短边决策不一致；现已改为有宽高时比较 `min(width, height)`，并用竖屏 720p fixture 锁住行为。
+- 关键决策与已否决方案：不改 README 的短边契约，也不为横屏 fixture 的“看起来没差异”保留错误实现。
+- 下一步唯一动作：提交该修正并再次运行最终全量测试。
+
+## 里程碑 8：最终交付
+
+- 当前阶段：completed
+- 本段结论：短边基准修正已提交；最新 HEAD 的卡定全量测试通过 412 项，所有实现、测试、fixture、文档和进度存档均在允许范围内。
+- 关键决策与已否决方案：无新增决策；不部署生产。
+- 下一步唯一动作：由主脑验收本卡分支并合并。
+
+## 修复轮：Twitter 未知分辨率排序
+
+- 当前阶段：修复轮，处理已确认的 Twitter quality 选流 finding。
+- 本段结论：提取 `_select_default_variant` 复用默认三池选择；显式 cap 在没有 `≤cap` 已知档时优先未知分辨率档，再退到最小超档。新增 known>cap+unknown 与 known≤cap+unknown 两条回归用例。
+- 关键决策与已否决方案：保持默认分支的原有三池语义；不把未知档伪造为可比较分辨率，也不改变默认 1080p 行为。
+- 下一步唯一动作：补齐 TikTok/Kuaishou warning 与局部变量重命名。
+
+## 修复轮：无元数据可观测性与参数遮蔽
+
+- 当前阶段：修复轮，处理 TikTok/Kuaishou 可观测性和局部变量命名 finding。
+- 本段结论：显式 quality 无可用分辨率元数据时，TikTok 与 Kuaishou 各增加一条 warning；Douyin、TikTok、Xiaohongshu 的描述档局部变量已改为 `quality_label`，参数语义未改变。
+- 关键决策与已否决方案：仅增加日志和重命名，不改变既有 no-op/fallback 选流，不新增状态、配置或兼容分支。
+- 下一步唯一动作：运行修复轮专项与全量测试，核对允许范围、提交和工作区状态。
