@@ -159,6 +159,11 @@ class KuaishouService(BasePlatformService):
                                 ) or 0),
                             ),
                         )[0]
+                else:
+                    logger.warning(
+                        "Kuaishou quality cap ignored: representation has no "
+                        "usable resolution metadata; using first representation"
+                    )
             video_url = self._safe_get(first_repr, "url", "")
             width = self._safe_get(first_repr, "width", 0)
             height = self._safe_get(first_repr, "height", 0)

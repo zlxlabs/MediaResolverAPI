@@ -149,7 +149,7 @@ class XiaohongshuService(BasePlatformService):
 
             width = self._to_int(self._pick(h264, "width", "weight", default=0))
             height = self._to_int(self._pick(h264, "height", default=0))
-            quality = self._pick(h264, "streamDesc", "stream_desc", default="")
+            quality_label = self._pick(h264, "streamDesc", "stream_desc", default="")
 
             # 基础信息（双名兼容）
             video_id = self._pick(node, "note_id", "noteId", "id", default="")
@@ -186,7 +186,7 @@ class XiaohongshuService(BasePlatformService):
                 video_url=video_url,
                 width=width,
                 height=height,
-                quality=quality,
+                quality=quality_label,
                 view_count=0,  # 小红书 API 不提供观看次数
                 like_count=like_count,
                 comment_count=comment_count,

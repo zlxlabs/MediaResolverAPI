@@ -60,3 +60,10 @@
 - 本段结论：提取 `_select_default_variant` 复用默认三池选择；显式 cap 在没有 `≤cap` 已知档时优先未知分辨率档，再退到最小超档。新增 known>cap+unknown 与 known≤cap+unknown 两条回归用例。
 - 关键决策与已否决方案：保持默认分支的原有三池语义；不把未知档伪造为可比较分辨率，也不改变默认 1080p 行为。
 - 下一步唯一动作：补齐 TikTok/Kuaishou warning 与局部变量重命名。
+
+## 修复轮：无元数据可观测性与参数遮蔽
+
+- 当前阶段：修复轮，处理 TikTok/Kuaishou 可观测性和局部变量命名 finding。
+- 本段结论：显式 quality 无可用分辨率元数据时，TikTok 与 Kuaishou 各增加一条 warning；Douyin、TikTok、Xiaohongshu 的描述档局部变量已改为 `quality_label`，参数语义未改变。
+- 关键决策与已否决方案：仅增加日志和重命名，不改变既有 no-op/fallback 选流，不新增状态、配置或兼容分支。
+- 下一步唯一动作：运行修复轮专项与全量测试，核对允许范围、提交和工作区状态。

@@ -282,21 +282,27 @@ class TikTokService(BasePlatformService):
                             ),
                         )[0]
 
+            if quality is not None and selected_bit_rate is None:
+                logger.warning(
+                    "TikTok quality cap ignored: bit_rate list has no usable "
+                    "resolution metadata; using default video source"
+                )
+
             if selected_bit_rate:
                 video_url = self._safe_get(selected_bit_rate, "play_addr.url_list.0", "")
                 width = self._safe_get(selected_bit_rate, "play_addr.width", 0)
                 height = self._safe_get(selected_bit_rate, "play_addr.height", 0)
-                quality = self._safe_get(selected_bit_rate, "gear_name", "")
+                quality_label = self._safe_get(selected_bit_rate, "gear_name", "")
                 selected_bitrate = selected_bit_rate.get("bit_rate", 0)
                 logger.info(
-                    f"Using capped bit_rate: {quality}, {width}x{height}, "
+                    f"Using capped bit_rate: {quality_label}, {width}x{height}, "
                     f"bitrate={selected_bitrate}"
                 )
             elif play_addr_h264:
                 video_url = self._safe_get(play_addr_h264, "url_list.0", "")
                 width = self._safe_get(play_addr_h264, "width", 0)
                 height = self._safe_get(play_addr_h264, "height", 0)
-                quality = "h264_original"
+                quality_label = "h264_original"
                 logger.info(f"Using play_addr_h264: {width}x{height}")
             else:
                 # Priority 2: Select highest bit_rate from bit_rate array
@@ -312,9 +318,9 @@ class TikTokService(BasePlatformService):
                 video_url = self._safe_get(best_bit_rate, "play_addr.url_list.0", "")
                 width = self._safe_get(best_bit_rate, "play_addr.width", 0)
                 height = self._safe_get(best_bit_rate, "play_addr.height", 0)
-                quality = self._safe_get(best_bit_rate, "gear_name", "")
+                quality_label = self._safe_get(best_bit_rate, "gear_name", "")
                 selected_bitrate = best_bit_rate.get("bit_rate", 0)
-                logger.info(f"Using best bit_rate: {quality}, {width}x{height}, bitrate={selected_bitrate}")
+                logger.info(f"Using best bit_rate: {quality_label}, {width}x{height}, bitrate={selected_bitrate}")
 
             # Statistics
             statistics = self._safe_get(data_source, "statistics", {})
@@ -337,7 +343,7 @@ class TikTokService(BasePlatformService):
                 video_url=video_url,
                 width=width,
                 height=height,
-                quality=quality,
+                quality=quality_label,
                 view_count=view_count,
                 like_count=like_count,
                 comment_count=comment_count,

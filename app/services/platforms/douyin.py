@@ -142,7 +142,7 @@ class DouyinService(BasePlatformService):
             video_url = self._safe_get(bit_rate, "play_addr.url_list.0", "")
             width = self._safe_get(bit_rate, "play_addr.width", 0)
             height = self._safe_get(bit_rate, "play_addr.height", 0)
-            quality = self._safe_get(bit_rate, "gear_name", "")
+            quality_label = self._safe_get(bit_rate, "gear_name", "")
 
             # 统计信息
             statistics = self._safe_get(aweme_detail, "statistics", {})
@@ -165,7 +165,7 @@ class DouyinService(BasePlatformService):
                 video_url=video_url,
                 width=width,
                 height=height,
-                quality=quality,
+                quality=quality_label,
                 view_count=view_count,
                 like_count=like_count,
                 comment_count=comment_count,
