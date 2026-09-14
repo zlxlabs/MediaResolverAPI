@@ -19,7 +19,9 @@ class YouTubeService(BasePlatformService):
         super().__init__(api_key, api_base)
         self.endpoint = f"{api_base}/api/v1/youtube/web/get_video_info"
 
-    async def get_video_info(self, video_id: str) -> Optional[VideoInfo]:
+    async def get_video_info(
+        self, video_id: str, download_mode: str = "video"
+    ) -> Optional[VideoInfo]:
         """
         获取YouTube视频信息
 
@@ -39,7 +41,7 @@ class YouTubeService(BasePlatformService):
 
                 if response.status_code == 200:
                     data = response.json()
-                    return self._parse_response(data)
+                    return self._parse_response(data, download_mode=download_mode)
                 else:
                     logger.error(f"YouTube API请求失败: {response.status_code} - {response.text}")
                     return None
@@ -48,7 +50,9 @@ class YouTubeService(BasePlatformService):
             logger.error(f"获取YouTube视频信息失败: {e}")
             return None
 
-    def _parse_response(self, response_data: Dict[str, Any]) -> Optional[VideoInfo]:
+    def _parse_response(
+        self, response_data: Dict[str, Any], download_mode: str = "video"
+    ) -> Optional[VideoInfo]:
         """
         解析YouTube API响应数据
 
@@ -88,18 +92,32 @@ class YouTubeService(BasePlatformService):
                 like_count = self._parse_count(self._safe_get(data, "likeCount"))
                 publish_time = self._safe_get(data, "publishedTime", "")
 
-            # 视频文件信息 - 选择最佳质量的有音频视频（自适应两套 schema）
-            videos = self._adaptive_video_streams(data)
-            best_video = self._select_best_video(videos)
+            if download_mode == "audio":
+                audio_streams = self._adaptive_audio_streams(data)
+                best_audio = self._select_best_audio(audio_streams)
+                if not best_audio:
+                    logger.error("YouTube响应数据中没有可用的纯音频流")
+                    return None
 
-            if not best_video:
-                logger.error("YouTube响应数据中没有可用的视频流")
-                return None
+                video_url = self._safe_get(best_audio, "url", "")
+                width = 0
+                height = 0
+                quality = ""
+                media_type = "audio"
+            else:
+                # 视频文件信息 - 选择最佳质量的有音频视频（自适应两套 schema）
+                videos = self._adaptive_video_streams(data)
+                best_video = self._select_best_video(videos)
 
-            video_url = self._safe_get(best_video, "url", "")
-            width = self._safe_get(best_video, "width", 0)
-            height = self._safe_get(best_video, "height", 0)
-            quality = self._safe_get(best_video, "quality", "")
+                if not best_video:
+                    logger.error("YouTube响应数据中没有可用的视频流")
+                    return None
+
+                video_url = self._safe_get(best_video, "url", "")
+                width = self._safe_get(best_video, "width", 0)
+                height = self._safe_get(best_video, "height", 0)
+                quality = self._safe_get(best_video, "quality", "")
+                media_type = "video"
 
             # 评论数（仅 current schema 有）
             comment_count = self._parse_count(self._safe_get(data, "commentCountText", ""))
@@ -115,6 +133,7 @@ class YouTubeService(BasePlatformService):
                 width=width,
                 height=height,
                 quality=quality,
+                media_type=media_type,
                 view_count=view_count,
                 like_count=like_count,
                 comment_count=comment_count,
@@ -157,6 +176,41 @@ class YouTubeService(BasePlatformService):
                 })
             return normalized
         return []
+
+    @staticmethod
+    def _adaptive_audio_streams(data: Dict[str, Any]) -> list:
+        """提取 v2 streamingData.adaptiveFormats 中可直接访问的纯音频轨。"""
+        streaming = data.get("streamingData")
+        if not isinstance(streaming, dict):
+            return []
+
+        audio_streams = []
+        for fmt in (streaming.get("adaptiveFormats") or []):
+            mime_type = str(fmt.get("mimeType") or "").lower()
+            if not mime_type.startswith("audio/") or not fmt.get("url"):
+                continue
+            audio_streams.append(fmt)
+        return audio_streams
+
+    def _select_best_audio(self, audio_streams: list) -> Optional[Dict[str, Any]]:
+        """选择可直接访问的最高码率纯音频轨。"""
+        if not audio_streams:
+            logger.warning("YouTube: No audio streams available in response")
+            return None
+
+        selected = max(
+            audio_streams,
+            key=lambda stream: self._parse_count(
+                stream.get("bitrate") or stream.get("averageBitrate")
+            ) or 0,
+        )
+        logger.info(
+            "YouTube: Selected audio stream -> {} {}bps [{}]",
+            selected.get("itag", "unknown"),
+            selected.get("bitrate") or selected.get("averageBitrate") or 0,
+            selected.get("mimeType", "unknown"),
+        )
+        return selected
 
     def _select_best_video(self, videos: list) -> Optional[Dict[str, Any]]:
         """
