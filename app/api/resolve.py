@@ -8,7 +8,7 @@ import time
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from loguru import logger
 from sqlalchemy.orm import Session
 
@@ -68,6 +68,17 @@ class ResolveRequest(BaseModel):
     download_mode: Literal["video", "audio"] = Field(
         default="video", description="Download intent"
     )
+    quality: Optional[str] = Field(
+        default=None,
+        pattern=r"^\d+p$",
+        description="Maximum requested video resolution, for example 720p",
+    )
+
+    @model_validator(mode="after")
+    def reject_quality_for_audio(self):
+        if self.download_mode == "audio" and self.quality is not None:
+            raise ValueError("quality cannot be combined with download_mode=audio")
+        return self
 
 
 class VideoInfoResponse(BaseModel):
