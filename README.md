@@ -163,7 +163,7 @@ curl -X POST http://localhost:8000/api/resolve \
 | `translate` | bool | - | `true` | 是否将视频描述翻译为中文 |
 | `force_refresh` | bool | - | `false` | 跳过缓存，强制重新解析 |
 | `download_mode` | `video` \| `audio` | - | `video` | 下载意图；`audio` 返回原生音频轨或音频直链，直链字段仍为 `video_url` |
-| `quality` | string | - | - | 可选清晰度封顶，格式为 `^\d+p$`（如 `720p`）；仅对视频意图有意义 |
+| `quality` | string | - | - | 可选清晰度封顶，格式为 `^\d+p$`（如 `720p`），格式非法返回 HTTP 422；仅对视频意图有意义 |
 
 `download_mode=audio` 的平台路由：
 
@@ -228,7 +228,7 @@ audio 模式不代表 MP3 或其他容器格式，服务不做转码；请使用
 | `data.width` | int | 视频宽度（像素） |
 | `data.height` | int | 视频高度（像素） |
 | `data.duration` | int \| null | 视频时长（秒） |
-| `data.quality` | string \| null | 视频质量 |
+| `data.quality` | string \| null | 选中流的实际清晰度档位；Cobalt 链没有逐档元数据时为 `"unknown"` |
 | `data.view_count` | int \| null | 播放量。视频号恒为 `null`（TikHub 的 `read_count` 恒为 0），不是偶尔缺失 |
 | `data.like_count` | int \| null | 点赞数 |
 | `data.comment_count` | int \| null | 评论数 |
@@ -258,6 +258,7 @@ audio 模式不代表 MP3 或其他容器格式，服务不做转码；请使用
 | 200 | 请求成功（检查 `success` 字段判断业务是否成功） |
 | 400 | URL 无法识别、短链解析失败，或平台没有音频路径（`audio_not_available`） |
 | 401 | API Key 无效或缺失 |
+| 422 | `quality` 格式非法（须为 `^\d+p$`，如 `720p`），或 `download_mode=audio` 与 `quality` 组合 |
 | 500 | 服务端内部错误 |
 
 ---
