@@ -351,7 +351,7 @@ def test_api_quality_e2e_uses_quality_specific_cache_entry(
 
 
 def test_api_twitter_variants_survive_cache_round_trip(
-    authed_client, monkeypatch
+    authed_client, db, monkeypatch
 ):
     monkeypatch.setattr(resolve_mod.url_parser, "is_short_url", lambda _url: False)
     monkeypatch.setattr(
@@ -388,6 +388,9 @@ def test_api_twitter_variants_survive_cache_round_trip(
     assert first.status_code == 200
     assert cached.status_code == 200
     first_variants = first.json()["data"]["variants"]
+    cached_payload = db.query(VideoCache).filter(
+        VideoCache.video_id == "twitter-variants"
+    ).one().video_data
     expected_keys = ("url", "bitrate", "width", "height", "quality")
     expected_values = [
         ("https://video.twimg.com/fake/640x360/twitter-360.mp4", 500000, 640, 360, "360p"),
@@ -398,6 +401,7 @@ def test_api_twitter_variants_survive_cache_round_trip(
         ("https://video.twimg.com/fake/3840x2160/twitter-2160.mp4", 5000000, 3840, 2160, "2160p"),
     ]
     assert first_variants == [dict(zip(expected_keys, values)) for values in expected_values]
+    assert cached_payload["variants"] == first_variants
     assert cached.json()["data"]["variants"] == first_variants
     assert len(calls) == 1
 
