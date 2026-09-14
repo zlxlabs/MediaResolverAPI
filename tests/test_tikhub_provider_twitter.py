@@ -8,6 +8,7 @@ import pytest
 from app.services.platforms.twitter import TwitterService
 from app.services.providers.base import ProviderError, TerminalError, VideoNotFoundError
 from app.services.providers.tikhub import TikHubProvider
+from app.services.video_resolver import VideoResolver
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "twitter"
@@ -55,6 +56,20 @@ def test_parser_maps_twitter_metadata():
 @pytest.mark.parametrize("fixture", ["empty", "tweet_photo", "tweet_hls_only", "tweet_quoted_only"])
 def test_parser_rejects_non_video_posts(fixture):
     assert TwitterService("k", "b")._parse_response(load(fixture)) is None
+
+
+def test_parser_uses_entities_video_when_primary_media_is_missing():
+    payload = load("tweet_video")
+    payload["data"].pop("media")
+    payload["data"]["entities"] = {
+        "media": [{
+            "type": "video",
+            "video_info": payload["data"]["quoted"]["media"]["video"][0],
+        }],
+    }
+    info = TwitterService("k", "b")._parse_response(payload)
+    assert info is not None
+    assert info.video_url.endswith("quoted_must_not_win.mp4")
 
 
 @pytest.mark.parametrize("fixture", ["empty", "tweet_photo", "tweet_video"])
@@ -125,6 +140,28 @@ async def test_twitter_http_error_is_not_terminal(monkeypatch):
         await provider.fetch_video_info("twitter", TWEET_ID, TWEET_URL)
     assert not isinstance(exc_info.value, TerminalError)
     assert len(calls) == 1
+
+
+async def test_resolver_falls_back_to_cobalt(monkeypatch):
+    resolver = VideoResolver()
+
+    async def tikhub_failure(*args, **kwargs):
+        raise VideoNotFoundError("no playable tweet")
+
+    async def cobalt_success(*args, **kwargs):
+        return {
+            "status": "redirect",
+            "url": "https://cdn.example/twitter_fallback.mp4",
+            "filename": "twitter_fallback.mp4",
+        }
+
+    monkeypatch.setattr(resolver.tikhub_provider, "fetch_video_info", tikhub_failure)
+    monkeypatch.setattr(resolver.cobalt_provider, "fetch_video_info", cobalt_success)
+    info, provider = await resolver.resolve("twitter", TWEET_ID, TWEET_URL)
+
+    assert provider == "cobalt"
+    assert info.platform == "twitter"
+    assert info.video_url.endswith("twitter_fallback.mp4")
 
 
 def test_resolve_and_platforms_are_wired(authed_client, monkeypatch):

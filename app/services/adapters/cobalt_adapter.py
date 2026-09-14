@@ -39,7 +39,7 @@ class CobaltAdapter:
         "youtube": r"@([^/]+)",
         "pinterest": r"pinterest\.com/([^/]+)/",
         "facebook": r"facebook\.com/([^/]+)/",
-        "twitter": r"(?:x|twitter)\.com/([^/]+)/status/",
+        "twitter": r"(?:x|twitter)\.com/(?!i/status/)([^/]+)/status/",
     }
 
     def adapt(self, raw_data: Dict, platform: str, video_id: str, original_url: str) -> Optional[VideoInfo]:

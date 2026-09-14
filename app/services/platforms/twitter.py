@@ -14,9 +14,7 @@ class TwitterService(BasePlatformService):
 
     async def get_video_info(self, video_id: str) -> Optional[VideoInfo]:
         """Twitter data is fetched by TikHubProvider; use the provider chain."""
-        raise NotImplementedError(
-            "TwitterService.get_video_info() should be called through VideoResolver"
-        )
+        return None
 
     def _parse_response(self, response_data: Dict[str, Any]) -> Optional[VideoInfo]:
         """Parse the first playable MP4 attached to the tweet itself."""

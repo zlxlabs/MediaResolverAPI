@@ -37,3 +37,13 @@
 关键决策与已否决方案：文档明确平台标识为 `twitter`，支持 x.com/twitter.com status URL，TikHub 主源、Cobalt 兜底；`URL_FALLBACK_PLATFORMS` 保持不包含 twitter。
 
 下一步唯一动作：执行至少两次有效红验、运行目标测试与整仓 pytest，检查 diff 预算和工作区清洁度。
+
+## 里程碑 5：目标测试闭环
+
+当前阶段：implementing
+
+本段结论：目标测试已覆盖 TikHub 选流、时长/统计、引用帖/HLS/图文拒绝、entities 视频备用形态、单端参数、永不终态、Cobalt 责任链与 TestClient 入口，共 56 项通过。
+
+关键决策与已否决方案：`has_playable` 与 adapter 均复用 `TwitterService._parse_response`；Cobalt fallback 使用桩响应验证，不请求真实网络。
+
+下一步唯一动作：完成反向红验后运行整仓 `pytest` 并整理最终报告。
