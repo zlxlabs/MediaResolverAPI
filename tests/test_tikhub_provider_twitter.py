@@ -30,6 +30,24 @@ def test_parser_picks_highest_mp4():
     assert info.height == 1080
 
 
+def test_parser_picks_highest_mp4_across_videos():
+    info = TwitterService("k", "b")._parse_response(load("tweet_multi_video"))
+    assert info is not None
+    assert info.video_url.endswith("multi_high.mp4")
+    assert info.quality == "1080p"
+
+
+def test_parser_skips_hls_only_first_video():
+    payload = load("tweet_multi_video")
+    payload["data"]["media"]["video"][0]["variants"] = [{
+        "content_type": "application/x-mpegURL",
+        "url": "https://video.twimg.com/amplify_video/fake/multi_first.m3u8",
+    }]
+    info = TwitterService("k", "b")._parse_response(payload)
+    assert info is not None
+    assert info.video_url.endswith("multi_high.mp4")
+
+
 def test_parser_duration_is_seconds():
     info = TwitterService("k", "b")._parse_response(load("tweet_video"))
     assert info is not None

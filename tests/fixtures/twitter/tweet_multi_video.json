@@ -1,0 +1,55 @@
+{
+  "code": 200,
+  "data": {
+    "id": "2098782845183410287",
+    "text": "multi video",
+    "display_text": "multi video",
+    "author": {
+      "name": "Codez",
+      "screen_name": "0xCodez"
+    },
+    "media": {
+      "video": [
+        {
+          "id": "first",
+          "variants": [
+            {
+              "content_type": "video/mp4",
+              "bitrate": 1000000,
+              "url": "https://video.twimg.com/amplify_video/fake/avc1/640x360/multi_low.mp4"
+            }
+          ]
+        },
+        {
+          "id": "second",
+          "original_info": {
+            "width": 1920,
+            "height": 1080
+          },
+          "variants": [
+            {
+              "content_type": "video/mp4",
+              "bitrate": 9000000,
+              "url": "https://video.twimg.com/amplify_video/fake/avc1/1920x1080/multi_high.mp4"
+            }
+          ]
+        }
+      ]
+    },
+    "quoted": {
+      "media": {
+        "video": [
+          {
+            "variants": [
+              {
+                "content_type": "video/mp4",
+                "bitrate": 99999999,
+                "url": "https://video.twimg.com/amplify_video/fake/quoted_must_not_win.mp4"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}
