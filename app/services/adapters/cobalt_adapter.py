@@ -39,6 +39,7 @@ class CobaltAdapter:
         "youtube": r"@([^/]+)",
         "pinterest": r"pinterest\.com/([^/]+)/",
         "facebook": r"facebook\.com/([^/]+)/",
+        "twitter": r"(?:x|twitter)\.com/([^/]+)/status/",
     }
 
     def adapt(self, raw_data: Dict, platform: str, video_id: str, original_url: str) -> Optional[VideoInfo]:
@@ -183,6 +184,7 @@ class CobaltAdapter:
             "xiaohongshu": "Xiaohongshu",
             "pinterest": "Pinterest",
             "facebook": "Facebook",
+            "twitter": "Twitter",
         }
         platform_name = platform_names.get(platform, platform.capitalize())
         return f"Video from {platform_name}"

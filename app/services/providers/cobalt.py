@@ -23,6 +23,7 @@ class CobaltProvider(BaseProvider):
     - xiaohongshu
     - pinterest
     - facebook
+    - twitter
 
     注意：Cobalt 返回的信息较少，主要用于获取视频下载链接
     """
@@ -35,6 +36,7 @@ class CobaltProvider(BaseProvider):
         "xiaohongshu",
         "pinterest",
         "facebook",
+        "twitter",
     ]
 
     def __init__(self):

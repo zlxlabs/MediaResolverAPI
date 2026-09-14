@@ -17,3 +17,13 @@
 关键决策与已否决方案：只读取 `data.media.video[0]`，无主帖视频才读取 `entities.media` 中第一条 `type==video` 的 `video_info`；跳过 HLS 与 quoted.media，TikHub 失败统一抛 VideoNotFoundError 交给 Cobalt。
 
 下一步唯一动作：接入 Cobalt、VideoResolver 默认链、配置覆盖与平台适配器，并验证端到端桩路由。
+
+## 里程碑 3：双 provider 接线
+
+当前阶段：implementing
+
+本段结论：TikHubAdapter、CobaltAdapter、CobaltProvider 与 VideoResolver 已接入 `twitter`；默认顺序为 `tikhub,cobalt`，并支持 `PROVIDER_PRIORITY_TWITTER` 覆盖，TestClient 已验证 `/api/platforms` 与 `/api/resolve` 桩路径。
+
+关键决策与已否决方案：Cobalt 仅提供通用直链和 Twitter 展示名，TikHub 继续负责完整 VideoInfo；未增加请求字段，也未把 twitter 放入 URL_FALLBACK_PLATFORMS。
+
+下一步唯一动作：补齐 API/README/CHANGELOG/通用引擎文档，并做反向红验与全量验证。

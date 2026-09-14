@@ -127,7 +127,7 @@ async def test_twitter_http_error_is_not_terminal(monkeypatch):
     assert len(calls) == 1
 
 
-def test_resolve_and_platforms_are_wired(client, monkeypatch):
+def test_resolve_and_platforms_are_wired(authed_client, monkeypatch):
     import app.services.providers.tikhub as tikhub_module
 
     async def fake_call(self, name, path, params, per_timeout):
@@ -137,11 +137,11 @@ def test_resolve_and_platforms_are_wired(client, monkeypatch):
 
     monkeypatch.setattr(tikhub_module.TikHubProvider, "_call_endpoint", fake_call)
 
-    platforms = client.get("/api/platforms")
+    platforms = authed_client.get("/api/platforms")
     assert platforms.status_code == 200
     assert platforms.json()["platforms"]["twitter"] == ["tikhub", "cobalt"]
 
-    response = client.post(
+    response = authed_client.post(
         "/api/resolve",
         json={"url": TWEET_URL, "translate": False},
     )
@@ -152,4 +152,3 @@ def test_resolve_and_platforms_are_wired(client, monkeypatch):
     assert payload["data"]["video_id"] == TWEET_ID
     assert payload["data"]["video_url"].endswith("twitter_1080.mp4")
     assert payload["data"]["provider"] == "tikhub"
-
