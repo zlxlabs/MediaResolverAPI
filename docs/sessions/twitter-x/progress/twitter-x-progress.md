@@ -97,3 +97,23 @@
 关键决策与已否决方案：仅在主帖没有任何可播 MP4 时回退 `entities.media`；不读取 `quoted.media`，不恢复只看 `video[0]` 的实现。
 
 下一步唯一动作：提交修复并完成反向断言红验与整仓 `pytest`。
+
+## 里程碑 11：畸形元数据 fail-soft 修复
+
+当前阶段：repairing
+
+本段结论：TwitterService 在解析 `bitrate`、`duration`、`created_at` 时统一增加 fail-soft 异常保护；非规范格式不抛出 ValueError，畸形 bitrate 视为 0、duration 视为 None、created_at 视为 None，只要存在合法 MP4 依然正常返回 VideoInfo；无可用 MP4 则返回 None，让 TikHub 能够优雅落入兜底链路。
+
+关键决策与已否决方案：int/date 解析失败按字段不可用处理，不让解析器整体崩溃抛出 ValueError；维持不读取 `quoted.media` 的约束；不修改全局异常结构。
+
+下一步唯一动作：执行反向红验断言并完成整仓测试与提交。
+
+## 里程碑 12：交付完成与反向红验
+
+当前阶段：complete
+
+本段结论：针对畸形 bitrate/duration/created_at 的反向变异红验均确认为断言失败（AssertionError），还原后 62 项目标测试与 366 项整仓测试全部通过，diff 行数控制在预算内。
+
+关键决策与已否决方案：不新增冗余抽象；直接在对应数值/时间解析边界做局部 fail-soft。
+
+下一步唯一动作：提交修改至分支并产出最终 delegate 报告。

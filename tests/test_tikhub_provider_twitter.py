@@ -207,3 +207,65 @@ def test_resolve_and_platforms_are_wired(authed_client, monkeypatch):
     assert payload["data"]["video_id"] == TWEET_ID
     assert payload["data"]["video_url"].endswith("twitter_1080.mp4")
     assert payload["data"]["provider"] == "tikhub"
+
+
+def test_parser_malformed_bitrate_falls_soft_and_prefers_valid():
+    payload = load("tweet_video")
+    payload["data"]["media"]["video"][0]["variants"] = [{
+        "content_type": "video/mp4",
+        "url": "https://video.twimg.com/fake_unknown_bitrate.mp4",
+        "bitrate": "unknown",
+    }]
+    info = TwitterService("k", "b")._parse_response(payload)
+    assert info is not None
+    assert info.video_url == "https://video.twimg.com/fake_unknown_bitrate.mp4"
+
+    payload["data"]["media"]["video"][0]["variants"].append({
+        "content_type": "video/mp4",
+        "url": "https://video.twimg.com/fake_valid_bitrate.mp4",
+        "bitrate": 832000,
+    })
+    info = TwitterService("k", "b")._parse_response(payload)
+    assert info is not None
+    assert info.video_url == "https://video.twimg.com/fake_valid_bitrate.mp4"
+    assert TwitterService._variant_bitrate({"bitrate": "unknown"}) == 0
+
+
+def test_parser_malformed_duration_falls_soft():
+    payload = load("tweet_video")
+    payload["data"]["media"]["video"][0]["duration"] = "unknown"
+    payload["data"]["media"]["video"][0].pop("duration_millis", None)
+    info = TwitterService("k", "b")._parse_response(payload)
+    assert info is not None
+    assert info.duration is None
+    assert info.video_url.endswith("twitter_1080.mp4")
+
+
+def test_parser_malformed_created_at_falls_soft():
+    payload = load("tweet_video")
+    payload["data"]["created_at"] = "unknown"
+    info = TwitterService("k", "b")._parse_response(payload)
+    assert info is not None
+    assert info.create_time is None
+    assert info.publish_time == "unknown"
+    assert info.video_url.endswith("twitter_1080.mp4")
+
+
+def test_parser_malformed_metadata_interop_with_tikhub_provider():
+    payload = load("tweet_video")
+    payload["data"]["created_at"] = "unknown"
+    payload["data"]["media"]["video"][0]["duration"] = "unknown"
+    payload["data"]["media"]["video"][0].pop("duration_millis", None)
+    payload["data"]["media"]["video"][0]["variants"] = [{
+        "content_type": "video/mp4",
+        "url": "https://video.twimg.com/only_variant.mp4",
+        "bitrate": "unknown",
+    }]
+    provider = TikHubProvider()
+    assert provider._twitter_has_playable(payload) is True
+
+    info = TwitterService("k", "b")._parse_response(payload)
+    assert info is not None
+    assert info.video_url == "https://video.twimg.com/only_variant.mp4"
+    assert info.duration is None
+    assert info.create_time is None
