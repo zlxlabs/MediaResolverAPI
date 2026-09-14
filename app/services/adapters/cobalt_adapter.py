@@ -91,7 +91,7 @@ class CobaltAdapter:
                     None,
                 )
                 if not video_item:
-                    logger.error("No video found in Cobalt picker response")
+                    logger.error(f"No {item_type} found in Cobalt picker response")
                     return None
 
                 video_url = video_item.get("url")
