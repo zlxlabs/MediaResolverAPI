@@ -17,7 +17,7 @@ class TwitterService(BasePlatformService):
         return None
 
     def _parse_response(self, response_data: Dict[str, Any]) -> Optional[VideoInfo]:
-        """Parse the first playable MP4 attached to the tweet itself."""
+        """Parse the highest-bitrate playable MP4 attached to the tweet itself."""
         if not isinstance(response_data, dict):
             return None
 
@@ -25,23 +25,22 @@ class TwitterService(BasePlatformService):
         if not isinstance(data, dict):
             return None
 
-        video = self._first_video(data)
-        if not video:
-            return None
-
-        variants = video.get("variants")
-        if not isinstance(variants, list):
-            return None
-        mp4_variants = [
-            variant for variant in variants
-            if isinstance(variant, dict)
-            and str(variant.get("content_type") or "").lower() == "video/mp4"
-            and variant.get("url")
+        playable = [
+            (variant, video)
+            for video in self._tweet_videos(data)
+            for variant in self._mp4_variants(video)
         ]
-        if not mp4_variants:
+        if not playable:
+            entity_video = self._entity_video(data)
+            if entity_video:
+                playable = [
+                    (variant, entity_video)
+                    for variant in self._mp4_variants(entity_video)
+                ]
+        if not playable:
             return None
 
-        selected = max(mp4_variants, key=self._variant_bitrate)
+        selected, video = max(playable, key=lambda item: self._variant_bitrate(item[0]))
         video_url = str(selected["url"])
         width, height = self._resolution(video_url, video)
         duration_ms = video.get("duration") or video.get("duration_millis")
@@ -75,13 +74,17 @@ class TwitterService(BasePlatformService):
         )
 
     @staticmethod
-    def _first_video(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def _tweet_videos(data: Dict[str, Any]) -> list[Dict[str, Any]]:
         media = data.get("media")
-        if isinstance(media, dict):
-            videos = media.get("video")
-            if isinstance(videos, list) and videos and isinstance(videos[0], dict):
-                return videos[0]
+        if not isinstance(media, dict):
+            return []
+        videos = media.get("video")
+        if not isinstance(videos, list):
+            return []
+        return [video for video in videos if isinstance(video, dict)]
 
+    @staticmethod
+    def _entity_video(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         entities = data.get("entities")
         if isinstance(entities, dict):
             entity_media = entities.get("media")
@@ -93,6 +96,18 @@ class TwitterService(BasePlatformService):
                     if isinstance(video_info, dict):
                         return video_info
         return None
+
+    @staticmethod
+    def _mp4_variants(video: Dict[str, Any]) -> list[Dict[str, Any]]:
+        variants = video.get("variants")
+        if not isinstance(variants, list):
+            return []
+        return [
+            variant for variant in variants
+            if isinstance(variant, dict)
+            and str(variant.get("content_type") or "").lower() == "video/mp4"
+            and variant.get("url")
+        ]
 
     @staticmethod
     def _variant_bitrate(variant: Dict[str, Any]) -> int:

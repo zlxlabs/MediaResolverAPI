@@ -6,7 +6,7 @@
 
 不能让下游自己调 TikHub（本服务的价值是统一 VideoInfo）；公开 X 视频是明确需求不能砍；URL 形态无法靠文档约定让现有解析器认 x.com。
 
-选定方案：平台名 twitter。TikHub 单端 fetch_tweet_detail?tweet_id= 主源，Cobalt 兜底。选本帖最高码率 mp4。分类器不出终态。
+选定方案：平台名 twitter。TikHub 单端 fetch_tweet_detail?tweet_id= 主源，Cobalt 兜底。遍历本帖全部 `media.video[*].variants`，选最高码率 mp4。分类器不出终态。
 
 不采用：只接 Cobalt（丢掉播放量/点赞/时长）；只接 TikHub（单端点无兜底）；引入 yt-dlp；平台名用 x（与 TikHub/Cobalt 标识不一致）。
 
@@ -14,7 +14,7 @@
 1. [实测] x.com / twitter.com / t.co 识别为 twitter，status 数字为 video_id。锁在 tests/test_url_parser.py。
 2. [实测] TikHub 链只打 fetch_tweet_detail，入参 tweet_id。锁在 tests/test_tikhub_provider_twitter.py param 断言。
 3. [实测] 有 Cobalt 兜底，分类器永不出终态。锁在 test_classify_never_terminal 与全失败 not TerminalError。
-4. [实测] 只选本帖 mp4 最高码率，忽略 HLS 与 quoted.media。锁在 parser 用例。
+4. [实测] 遍历本帖全部 `media.video[*].variants` 只选最高码率 mp4，忽略 HLS 与 quoted.media。锁在 parser 用例。
 5. [实测] GET /api/platforms 返回 twitter: [tikhub, cobalt]。锁在 platforms 用例。
 
 [推断] 生产 Cobalt 对任意公开 X 视频都稳定；本卡用桩覆盖接线。主脑验收可用本地密钥对 https://x.com/0xCodez/status/2098782845183410287 探活（非本卡完成条件）。

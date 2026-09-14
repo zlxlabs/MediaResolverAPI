@@ -87,3 +87,13 @@
 关键决策与已否决方案：选本帖全部 `data.media.video[*].variants` 的全局最高码率 MP4；不读取 `quoted.media`，不实现 `/video/N` 选择。
 
 下一步唯一动作：修改 TwitterService 的主帖选流遍历并通过新增回归测试。
+
+## 里程碑 10：多视频全局选流修复
+
+当前阶段：repairing
+
+本段结论：TwitterService 已遍历本帖全部 `data.media.video[*].variants`，从所有 `video/mp4` 中选择全局最高 bitrate；第一条仅 HLS 时仍能命中后续视频，目标测试 58 项通过。
+
+关键决策与已否决方案：仅在主帖没有任何可播 MP4 时回退 `entities.media`；不读取 `quoted.media`，不恢复只看 `video[0]` 的实现。
+
+下一步唯一动作：提交修复并完成反向断言红验与整仓 `pytest`。
