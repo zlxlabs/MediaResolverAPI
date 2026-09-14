@@ -27,6 +27,7 @@ class URLParser:
         'youtu.be',          # YouTube短链
         'pin.it',            # Pinterest短链
         'fb.watch',          # Facebook短链
+        't.co',              # X/Twitter短链
     }
 
     # 平台域名映射
@@ -63,6 +64,11 @@ class URLParser:
         # Facebook
         'facebook.com': 'facebook',
         'fb.watch': 'facebook',
+
+        # X (Twitter)
+        'x.com': 'twitter',
+        'twitter.com': 'twitter',
+        't.co': 'twitter',
     }
 
     def parse_url(self, url: str) -> Tuple[Optional[str], Optional[str]]:
@@ -186,6 +192,7 @@ class URLParser:
             'instagram': self._extract_instagram_id,
             'pinterest': self._extract_pinterest_id,
             'facebook': self._extract_facebook_id,
+            'twitter': self._extract_twitter_id,
         }
 
         extractor = extractors.get(platform)
@@ -346,6 +353,11 @@ class URLParser:
                 return shortcode
 
         return None
+
+    def _extract_twitter_id(self, url: str) -> Optional[str]:
+        """提取 X/Twitter status ID；不解析 status 下的 video 分轨索引。"""
+        match = re.search(r"/(?:i/)?status/(\d+)(?=[/?#]|$)", url)
+        return match.group(1) if match else None
 
     async def resolve_short_url(self, url: str) -> Optional[str]:
         """
