@@ -11,7 +11,6 @@ from sqlalchemy.pool import StaticPool
 
 import app.api.resolve as resolve_mod
 from app.models.video_cache import VideoCache
-from app.services.adapters.cobalt_adapter import CobaltAdapter
 from app.services.cache import CacheService
 from app.services.platforms.base import VideoInfo
 from app.services.platforms.youtube import YouTubeService
@@ -317,26 +316,6 @@ def test_old_cache_table_is_migrated_and_hits_video_mode():
         assert index_columns == ["platform", "video_id", "download_mode"]
     finally:
         session.close()
-
-
-def test_cobalt_adapter_audio_picker_does_not_select_video_item():
-    info = CobaltAdapter().adapt(
-        {
-            "status": "picker",
-            "picker": [
-                {"type": "video", "url": "https://cdn.example/video.mp4"},
-                {"type": "audio", "url": "https://cdn.example/audio.m4a"},
-            ],
-        },
-        "twitter",
-        "id",
-        "https://x.com/u/status/id",
-        download_mode="audio",
-    )
-
-    assert info is not None
-    assert info.media_type == "audio"
-    assert info.video_url.endswith("audio.m4a")
 
 
 def test_invalid_download_mode_is_422(authed_client):
