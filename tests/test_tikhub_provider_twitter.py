@@ -30,6 +30,81 @@ def test_parser_picks_highest_mp4():
     assert info.height == 1080
 
 
+def test_parser_exposes_all_mp4_variants_sorted_by_bitrate():
+    info = TwitterService("k", "b")._parse_response(load("tweet_video"))
+
+    assert info is not None
+    assert info.variants == [
+        {
+            "url": "https://video.twimg.com/amplify_video/fake/avc1/480x270/twitter_270.mp4",
+            "bitrate": 256000,
+            "width": 480,
+            "height": 270,
+            "quality": "270p",
+        },
+        {
+            "url": "https://video.twimg.com/amplify_video/fake/avc1/640x360/twitter_360.mp4",
+            "bitrate": 832000,
+            "width": 640,
+            "height": 360,
+            "quality": "360p",
+        },
+        {
+            "url": "https://video.twimg.com/amplify_video/fake/avc1/1280x720/twitter_720.mp4",
+            "bitrate": 2176000,
+            "width": 1280,
+            "height": 720,
+            "quality": "720p",
+        },
+        {
+            "url": "https://video.twimg.com/amplify_video/fake/avc1/1920x1080/twitter_1080.mp4",
+            "bitrate": 10368000,
+            "width": 1920,
+            "height": 1080,
+            "quality": "1080p",
+        },
+    ]
+
+
+def test_parser_sorts_invalid_bitrates_last_and_ties_by_short_side():
+    payload = load("tweet_video")
+    payload["data"]["media"]["video"][0]["variants"] = [
+        {
+            "content_type": "video/mp4",
+            "bitrate": 0,
+            "url": "https://video.twimg.com/fake/1920x1080/zero.mp4",
+        },
+        {
+            "content_type": "video/mp4",
+            "bitrate": 1000,
+            "url": "https://video.twimg.com/fake/1280x720/high.mp4",
+        },
+        {
+            "content_type": "video/mp4",
+            "bitrate": 1000,
+            "url": "https://video.twimg.com/fake/640x360/low.mp4",
+        },
+        {
+            "content_type": "video/mp4",
+            "bitrate": "unknown",
+            "url": "https://video.twimg.com/fake/480x270/unknown.mp4",
+        },
+    ]
+
+    info = TwitterService("k", "b")._parse_response(payload)
+
+    assert info is not None
+    assert [
+        (variant["bitrate"], variant["width"], variant["height"])
+        for variant in info.variants
+    ] == [
+        (1000, 640, 360),
+        (1000, 1280, 720),
+        (None, 480, 270),
+        (None, 1920, 1080),
+    ]
+
+
 def test_parser_picks_highest_mp4_across_videos():
     info = TwitterService("k", "b")._parse_response(load("tweet_multi_video"))
     assert info is not None
@@ -219,6 +294,13 @@ def test_parser_malformed_bitrate_falls_soft_and_prefers_valid():
     info = TwitterService("k", "b")._parse_response(payload)
     assert info is not None
     assert info.video_url == "https://video.twimg.com/fake_unknown_bitrate.mp4"
+    assert info.variants == [{
+        "url": "https://video.twimg.com/fake_unknown_bitrate.mp4",
+        "bitrate": None,
+        "width": 1920,
+        "height": 1080,
+        "quality": "1080p",
+    }]
 
     payload["data"]["media"]["video"][0]["variants"].append({
         "content_type": "video/mp4",

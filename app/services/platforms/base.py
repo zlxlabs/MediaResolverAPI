@@ -31,6 +31,7 @@ class VideoInfo:
     duration: Optional[int] = None
     quality: Optional[str] = None
     media_type: str = "video"
+    variants: Optional[list[Dict[str, Any]]] = None
 
     # 统计信息
     view_count: Optional[int] = None
@@ -64,6 +65,7 @@ class VideoInfo:
             'duration': self.duration,
             'quality': self.quality,
             'media_type': self.media_type,
+            'variants': self.variants,
             'view_count': self.view_count,
             'like_count': self.like_count,
             'comment_count': self.comment_count,

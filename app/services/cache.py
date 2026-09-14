@@ -87,6 +87,7 @@ class CacheService:
                 duration=cached_data.get("duration"),
                 quality=cached_data.get("quality"),
                 media_type=cached_data.get("media_type", "video"),
+                variants=cached_data.get("variants"),
                 view_count=cached_data.get("view_count"),
                 like_count=cached_data.get("like_count"),
                 comment_count=cached_data.get("comment_count"),

@@ -197,6 +197,7 @@ audio 模式不代表 MP3 或其他容器格式，服务不做转码；请使用
     "height": 1920,
     "duration": 30,
     "quality": "1080p",
+    "variants": null,
     "view_count": 100000,
     "like_count": 5000,
     "comment_count": 200,
@@ -229,6 +230,7 @@ audio 模式不代表 MP3 或其他容器格式，服务不做转码；请使用
 | `data.height` | int | 视频高度（像素） |
 | `data.duration` | int \| null | 视频时长（秒） |
 | `data.quality` | string \| null | 选中流的实际清晰度档位；Cobalt 链没有逐档元数据时为 `"unknown"` |
+| `data.variants` | array \| null | 仅 X（Twitter）video 模式透出全部 mp4 variants，按码率升序（`bitrate` 单位为 bps），供下游自行选择低码率流；其他平台和 audio 模式为 `null` |
 | `data.view_count` | int \| null | 播放量。视频号恒为 `null`（TikHub 的 `read_count` 恒为 0），不是偶尔缺失 |
 | `data.like_count` | int \| null | 点赞数 |
 | `data.comment_count` | int \| null | 评论数 |
