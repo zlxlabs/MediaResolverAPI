@@ -1,0 +1,45 @@
+{
+  "data": {
+    "id": "quality-twitter",
+    "text": "twitter quality fixture",
+    "author": {"name": "author", "screen_name": "author"},
+    "media": {
+      "video": [
+        {
+          "variants": [
+            {
+              "content_type": "video/mp4",
+              "bitrate": 500000,
+              "url": "https://video.twimg.com/fake/640x360/twitter-360.mp4"
+            },
+            {
+              "content_type": "video/mp4",
+              "bitrate": 1000000,
+              "url": "https://video.twimg.com/fake/1280x720/twitter-720-low.mp4"
+            },
+            {
+              "content_type": "video/mp4",
+              "bitrate": 2000000,
+              "url": "https://video.twimg.com/fake/1280x720/twitter-720-high.mp4"
+            },
+            {
+              "content_type": "video/mp4",
+              "bitrate": 3000000,
+              "url": "https://video.twimg.com/fake/1920x1080/twitter-1080.mp4"
+            },
+            {
+              "content_type": "video/mp4",
+              "bitrate": 4000000,
+              "url": "https://video.twimg.com/fake/2560x1440/twitter-1440.mp4"
+            },
+            {
+              "content_type": "video/mp4",
+              "bitrate": 5000000,
+              "url": "https://video.twimg.com/fake/3840x2160/twitter-2160.mp4"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

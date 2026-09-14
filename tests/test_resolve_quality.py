@@ -2,6 +2,7 @@
 
 import pytest
 import json
+from pathlib import Path
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -11,9 +12,16 @@ from app.api.resolve import ResolveRequest
 from app.models.video_cache import VideoCache, ensure_video_cache_schema
 from app.services.cache import CacheService
 from app.services.platforms.base import VideoInfo
+from app.services.platforms.twitter import TwitterService
+from app.services.platforms.youtube import YouTubeService
 
 
 YOUTUBE_URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+QUALITY_FIXTURES = Path(__file__).parent / "fixtures" / "quality"
+
+
+def _load_quality(name: str) -> dict:
+    return json.loads((QUALITY_FIXTURES / f"{name}.json").read_text(encoding="utf-8"))
 
 
 @pytest.mark.parametrize("quality", ["720p", "1080p", "2160p"])
@@ -158,3 +166,68 @@ def test_card1_cache_table_migrates_quality_and_hits_default(db):
         assert index_columns == ["platform", "video_id", "download_mode", "quality"]
     finally:
         session.close()
+
+
+@pytest.mark.parametrize(
+    ("quality", "expected"),
+    [
+        ("1080p", "youtube-1080.mp4"),
+        ("720p", "youtube-720-high.mp4"),
+        ("240p", "youtube-360.mp4"),
+    ],
+)
+def test_youtube_quality_cap_selects_expected_stream(quality, expected):
+    info = YouTubeService("key", "base")._parse_response(
+        _load_quality("youtube_multi"), quality=quality
+    )
+
+    assert info is not None
+    assert info.video_url.endswith(expected)
+
+
+def test_youtube_quality_can_select_above_default_1080p():
+    info = YouTubeService("key", "base")._parse_response(
+        _load_quality("youtube_multi"), quality="2160p"
+    )
+
+    assert info is not None
+    assert info.video_url.endswith("youtube-2160.mp4")
+
+
+def test_youtube_without_quality_keeps_1080p_default():
+    info = YouTubeService("key", "base")._parse_response(
+        _load_quality("youtube_multi")
+    )
+
+    assert info is not None
+    assert info.video_url.endswith("youtube-1080.mp4")
+
+
+@pytest.mark.parametrize(
+    ("quality", "expected"),
+    [
+        ("1080p", "twitter-1080.mp4"),
+        ("720p", "twitter-720-high.mp4"),
+        ("240p", "twitter-360.mp4"),
+    ],
+)
+def test_twitter_quality_cap_selects_expected_stream(quality, expected):
+    info = TwitterService("key", "base")._parse_response(
+        _load_quality("twitter_multi"), quality=quality
+    )
+
+    assert info is not None
+    assert info.video_url.endswith(expected)
+
+
+def test_twitter_quality_2160p_overrides_default_1080p_cap():
+    fixture = _load_quality("twitter_multi")
+    default_info = TwitterService("key", "base")._parse_response(fixture)
+    capped_info = TwitterService("key", "base")._parse_response(
+        fixture, quality="2160p"
+    )
+
+    assert default_info is not None
+    assert capped_info is not None
+    assert default_info.video_url.endswith("twitter-1080.mp4")
+    assert capped_info.video_url.endswith("twitter-2160.mp4")
