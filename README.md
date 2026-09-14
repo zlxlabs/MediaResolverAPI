@@ -150,7 +150,8 @@ curl -X POST http://localhost:8000/api/resolve \
   -d '{
     "url": "https://www.tiktok.com/@user/video/1234567890",
     "translate": true,
-    "force_refresh": false
+    "force_refresh": false,
+    "download_mode": "video"
   }'
 ```
 
@@ -161,6 +162,15 @@ curl -X POST http://localhost:8000/api/resolve \
 | `url` | string | ✅ | - | 社交媒体视频 URL（支持短链） |
 | `translate` | bool | - | `true` | 是否将视频描述翻译为中文 |
 | `force_refresh` | bool | - | `false` | 跳过缓存，强制重新解析 |
+| `download_mode` | `video` \| `audio` | - | `video` | 下载意图；`audio` 返回原生音频轨或音频直链，直链字段仍为 `video_url` |
+
+`download_mode=audio` 的平台路由：
+
+- YouTube：优先走 TikHub，从 v2 `streamingData.adaptiveFormats` 选择最高码率的纯音频轨；没有可用音频轨时落 Cobalt 并透传 `downloadMode: "audio"`。
+- Twitter、TikTok、Instagram、Pinterest、Facebook：只走 Cobalt，并透传 `downloadMode: "audio"`，不调用 TikHub。
+- 抖音、快手、小红书、微信视频号：没有音频路径，返回 HTTP 400，错误 detail 以 `audio_not_available` 开头，不调用任何数据源。
+
+audio 模式不代表 MP3 或其他容器格式，服务不做转码；请使用响应中的 `media_type` 判断 `video_url` 的媒体类型。
 
 #### 成功响应
 
@@ -177,6 +187,7 @@ curl -X POST http://localhost:8000/api/resolve \
     "author_name": "creator_name",
     "author_id": "creator_id",
     "video_url": "https://direct-download-link.mp4",
+    "media_type": "video",
     "width": 1080,
     "height": 1920,
     "duration": 30,
@@ -208,6 +219,7 @@ curl -X POST http://localhost:8000/api/resolve \
 | `data.author_name` | string | 作者昵称 |
 | `data.author_id` | string | 作者 ID |
 | `data.video_url` | string | 视频无水印直链。其他平台为第三方 CDN；视频号指向本服务的流式端点（见「视频号的下载方式」） |
+| `data.media_type` | `video` \| `audio` | `video_url` 的媒体类型；未指定 `download_mode` 时为 `video` |
 | `data.width` | int | 视频宽度（像素） |
 | `data.height` | int | 视频高度（像素） |
 | `data.duration` | int \| null | 视频时长（秒） |
@@ -239,7 +251,7 @@ curl -X POST http://localhost:8000/api/resolve \
 | 状态码 | 说明 |
 |--------|------|
 | 200 | 请求成功（检查 `success` 字段判断业务是否成功） |
-| 400 | URL 无法识别或短链解析失败 |
+| 400 | URL 无法识别、短链解析失败，或平台没有音频路径（`audio_not_available`） |
 | 401 | API Key 无效或缺失 |
 | 500 | 服务端内部错误 |
 

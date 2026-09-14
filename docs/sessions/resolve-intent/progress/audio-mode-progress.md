@@ -25,3 +25,10 @@
 - 本段结论：resolver 已实现 audio 静态路由与四平台 fail-fast 400，Twitter 等五平台 audio 只调用 Cobalt；YouTube/TikHub 与 Cobalt adapter 会填充 media_type，Cobalt audio 请求体透传 `downloadMode`。
 - 关键决策与已否决方案：默认 video 请求不增加 Cobalt 字段；audio 失败不退回 video；无音频平台在任何 provider 调用前抛出 `audio_not_available`。
 - 下一步唯一动作：新增集中测试 fixture，覆盖端到端 audio、路由、缓存迁移与 422。
+
+## 里程碑 5：测试与契约
+
+- 当前阶段：verifying
+- 本段结论：新增 13 项 audio 专项测试与精简 fixture，覆盖选轨、Cobalt 透传、平台路由、API 入口、缓存隔离、旧表迁移、旧 JSON 默认值和非法参数。README 已记录 download_mode、media_type、路由矩阵与 400 语义。
+- 关键决策与已否决方案：红验将在真修复提交后只注入判据对应的一处生产逻辑；不修改既有测试文件或测试配置。
+- 下一步唯一动作：运行全量测试并完成缓存隔离、YouTube audio 选轨两项红验后收口报告。
