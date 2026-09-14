@@ -25,3 +25,10 @@
 - 本段结论：新增 `VideoVariant` 和可选 `VideoInfoResponse.variants`，响应映射逐条绝对化 URL；`VideoInfo.variants is None` 时响应字段保持 `null`。
 - 关键决策与已否决方案：variants 只作为常驻附加字段，不增加请求参数或平台分支。
 - 下一步唯一动作：补解析层与 API/缓存回环测试，并先执行未改代码红验。
+
+## 2026-09-14 — Tests
+
+- 当前阶段：implementing — 测试
+- 本段结论：新增解析层完整 mp4、排序/非法码率测试，以及 API force-refresh 与缓存命中逐一相等的 X variants 断言；同时锁定非 Twitter 响应为 `null`。
+- 关键决策与已否决方案：无
+- 下一步唯一动作：完成 README 字段表与示例，并执行红验和全量测试。

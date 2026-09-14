@@ -341,12 +341,85 @@ def test_api_quality_e2e_uses_quality_specific_cache_entry(
     assert response_720.json()["data"]["video_url"].endswith("youtube-720-high.mp4")
     assert response_1080.status_code == 200
     assert response_1080.json()["data"]["video_url"].endswith("youtube-1080.mp4")
+    assert response_720.json()["data"]["variants"] is None
     assert cached_720.json()["data"]["video_url"].endswith("youtube-720-high.mp4")
     assert calls == ["720p", "1080p"]
     assert {
         record.quality
         for record in db.query(VideoCache).filter(VideoCache.video_id == "quality-youtube")
     } == {"720p", "1080p"}
+
+
+def test_api_twitter_variants_survive_cache_round_trip(
+    authed_client, monkeypatch
+):
+    monkeypatch.setattr(resolve_mod.url_parser, "is_short_url", lambda _url: False)
+    monkeypatch.setattr(
+        resolve_mod.url_parser,
+        "parse_url",
+        lambda _url: ("twitter", "twitter-variants"),
+    )
+    resolver = VideoResolver()
+    calls = []
+
+    async def tikhub_fetch(*args, **kwargs):
+        calls.append(kwargs)
+        return _load_platform("twitter", "tweet_video")
+
+    monkeypatch.setattr(resolver.tikhub_provider, "fetch_video_info", tikhub_fetch)
+    monkeypatch.setattr(resolve_mod, "get_video_resolver", lambda: resolver)
+
+    first = authed_client.post(
+        "/api/resolve",
+        json={
+            "url": "https://x.com/0xCodez/status/twitter-variants",
+            "translate": False,
+            "force_refresh": True,
+        },
+    )
+    cached = authed_client.post(
+        "/api/resolve",
+        json={
+            "url": "https://x.com/0xCodez/status/twitter-variants",
+            "translate": False,
+        },
+    )
+
+    assert first.status_code == 200
+    assert cached.status_code == 200
+    first_variants = first.json()["data"]["variants"]
+    assert first_variants == [
+        {
+            "url": "https://video.twimg.com/amplify_video/fake/avc1/480x270/twitter_270.mp4",
+            "bitrate": 256000,
+            "width": 480,
+            "height": 270,
+            "quality": "270p",
+        },
+        {
+            "url": "https://video.twimg.com/amplify_video/fake/avc1/640x360/twitter_360.mp4",
+            "bitrate": 832000,
+            "width": 640,
+            "height": 360,
+            "quality": "360p",
+        },
+        {
+            "url": "https://video.twimg.com/amplify_video/fake/avc1/1280x720/twitter_720.mp4",
+            "bitrate": 2176000,
+            "width": 1280,
+            "height": 720,
+            "quality": "720p",
+        },
+        {
+            "url": "https://video.twimg.com/amplify_video/fake/avc1/1920x1080/twitter_1080.mp4",
+            "bitrate": 10368000,
+            "width": 1920,
+            "height": 1080,
+            "quality": "1080p",
+        },
+    ]
+    assert cached.json()["data"]["variants"] == first_variants
+    assert len(calls) == 1
 
 
 def test_douyin_fixture_quality_cap_selects_available_lower_stream():
