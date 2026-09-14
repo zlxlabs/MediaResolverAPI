@@ -27,3 +27,13 @@
 关键决策与已否决方案：Cobalt 仅提供通用直链和 Twitter 展示名，TikHub 继续负责完整 VideoInfo；未增加请求字段，也未把 twitter 放入 URL_FALLBACK_PLATFORMS。
 
 下一步唯一动作：补齐 API/README/CHANGELOG/通用引擎文档，并做反向红验与全量验证。
+
+## 里程碑 4：接口与交付文档
+
+当前阶段：implementing
+
+本段结论：已更新 resolve 支持列表、README 平台表/响应枚举/平台列表示例、CHANGELOG Unreleased Added 与通用降级引擎的 X 行、超时和不变式说明。
+
+关键决策与已否决方案：文档明确平台标识为 `twitter`，支持 x.com/twitter.com status URL，TikHub 主源、Cobalt 兜底；`URL_FALLBACK_PLATFORMS` 保持不包含 twitter。
+
+下一步唯一动作：执行至少两次有效红验、运行目标测试与整仓 pytest，检查 diff 预算和工作区清洁度。

@@ -110,7 +110,7 @@ async def resolve_url(
     Resolve a social media URL into a direct download link with metadata.
 
     Supports: Douyin, TikTok, Kuaishou, YouTube, Xiaohongshu, Instagram, Pinterest,
-    Facebook, WeChat Channels.
+    Facebook, WeChat Channels, X (Twitter).
     """
     original_url = request.url.strip()
     logger.info(f"Resolve request: {original_url}")
