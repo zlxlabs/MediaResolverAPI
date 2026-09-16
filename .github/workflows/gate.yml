@@ -21,7 +21,7 @@ permissions:
 
 jobs:
   gate:
-    uses: zlxlabs/gate/.github/workflows/gate-v2.yml@v2
+    uses: zlxlabs/gate/.github/workflows/gate-v2.yml@ea7f1d8f7a4766c47220ad703ee96ff3d79451ff
     with:
       tier: internal
       runner: self
@@ -29,3 +29,6 @@ jobs:
       design_doc: ""
     secrets:
       FEISHU_CI_WEBHOOK: ${{ secrets.FEISHU_CI_WEBHOOK }}
+      # Silo 迁移配套：透传 zlxlabs org 级 SILO 凭据，供 gate 仓 callee 写读。
+      SILO_ACCESS_KEY: ${{ secrets.SILO_ACCESS_KEY }}
+      SILO_SECRET_KEY: ${{ secrets.SILO_SECRET_KEY }}
