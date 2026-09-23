@@ -25,3 +25,11 @@
 - 根因：R2 把单次尝试自身超时误并入「预算耗尽」，在 `_run_chain` 的 `TimeoutError` 处理里改抛 `VideoNotFoundError`；同时把「容器不得进日志」错误收窄成「只允许 int」，丢失安全字符串归因。
 - 本段结论：保留 `_should_retry` 的剩余预算 > `per_timeout + retry_backoff` 判定；预算没花完就耗尽仍为 `VideoNotFoundError`，单次尝试本身超时恢复为 `ProviderError(... timed out)`。`object_type` 仅允许精确 int 或 32 字符内、`[A-Za-z0-9_.:-]+` 安全字符串带值，容器、超长/不安全字符串、bool/float/None 只带类型名。
 - 验收锁定：重试耗尽三跳仍为 `VideoNotFoundError`；预算装不下下一次尝试时调用数为 1 且非 timed out；单次尝试超时为 `ProviderError`；跨边界容器归因不泄露凭据。
+
+## 段落 4：R4 testing finding 收口（repairing）
+
+- 当前阶段：repairing，修正总预算超时用例的命名/说明，并补齐 attempt 级 ProviderError 覆盖。
+- finding：原 `test_chain_attempt_timeout_raises_provider_error` 实际由 `_run_chain` 外层 `asyncio.timeout(total_budget)` 触发，名称把链级总预算超时说成了单次 HTTP 尝试超时，覆盖精度不足。
+- 本段结论：该用例改名为 `test_chain_budget_timeout_raises_provider_error_not_not_found`，docstring 明确「总预算在某次尝试中途触发」；新增 attempt 级用例采用方案 (ii)，直接 stub `_call_endpoint` 抛 `ProviderError("fetch_video_detail HTTP 500")`，因为本轮要锁的是 `_run_chain` 对 attempt 级 ProviderError 的归因与终态，直接桩路径确定且不引入 HTTPClient 传输层噪音。
+- 两条路径区分：attempt 级失败记 `decision: http_error`、最终为 `VideoNotFoundError` 且不含 `endpoint chain timed out`；链级总预算超时才抛 `ProviderError` 且含 `timed out`。
+- 红验结果：临时恢复 R2 的超时改判后，改名后的链级总预算用例按 `type(...) is ProviderError` 面值转红；新增 attempt 级用例保持绿，证明两条路径互不冒充。注入已逐块还原。

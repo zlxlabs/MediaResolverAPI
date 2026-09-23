@@ -444,8 +444,27 @@ async def test_chain_provider_error_not_retried(monkeypatch):
     assert len(calls) == 1 and "http_error" in str(ei.value)
 
 
-async def test_chain_attempt_timeout_raises_provider_error(monkeypatch):
-    """单次尝试超时属于上游故障，保留 ProviderError 的 timed out 语义。"""
+async def test_chain_attempt_provider_error_is_not_chain_timeout(monkeypatch):
+    """attempt 级 ProviderError 记为 http_error，不冒充链级超时。"""
+    calls = []
+
+    async def raise_http_error(self, name, path, params, per_timeout):
+        calls.append(name)
+        raise ProviderError(f"{name} HTTP 500")
+
+    monkeypatch.setattr(TikHubProvider, "_call_endpoint", raise_http_error)
+    with pytest.raises(VideoNotFoundError) as ei:
+        await TikHubProvider().fetch_video_info("wechat_channels", OBJECT_ID, SHARE_URL)
+    text = str(ei.value)
+    assert type(ei.value) is VideoNotFoundError
+    assert calls == ["fetch_video_detail"]
+    assert "decision': 'http_error'" in text
+    assert "fetch_video_detail HTTP 500" in text
+    assert "endpoint chain timed out" not in text
+
+
+async def test_chain_budget_timeout_raises_provider_error_not_not_found(monkeypatch):
+    """总预算在某次尝试中途触发 → ProviderError(timed out)，不得改判成 VideoNotFoundError。"""
     import asyncio as _aio
 
     async def slow_empty(self, name, path, params, per_timeout):
