@@ -18,3 +18,10 @@
   - 超时兜底三条件严格限定，首跳挂起与单端点链行为不变（两处既有 timeout 用例原样绿）。
   - 已否决：为让旧测试绿而保留 verb 分叉（R1 已否决）；把整包 `object_type` 打码后保留（容器一律不进日志）。
 - 下一步唯一动作：全量回归 + F1/F2 最小注入红验后提交。
+
+## 段落 3：R3 gate finding 收口（repairing）
+
+- 当前阶段：repairing，撤销 R2 超时改判并补齐 object_type 有界归因。
+- 根因：R2 把单次尝试自身超时误并入「预算耗尽」，在 `_run_chain` 的 `TimeoutError` 处理里改抛 `VideoNotFoundError`；同时把「容器不得进日志」错误收窄成「只允许 int」，丢失安全字符串归因。
+- 本段结论：保留 `_should_retry` 的剩余预算 > `per_timeout + retry_backoff` 判定；预算没花完就耗尽仍为 `VideoNotFoundError`，单次尝试本身超时恢复为 `ProviderError(... timed out)`。`object_type` 仅允许精确 int 或 32 字符内、`[A-Za-z0-9_.:-]+` 安全字符串带值，容器、超长/不安全字符串、bool/float/None 只带类型名。
+- 验收锁定：重试耗尽三跳仍为 `VideoNotFoundError`；预算装不下下一次尝试时调用数为 1 且非 timed out；单次尝试超时为 `ProviderError`；跨边界容器归因不泄露凭据。

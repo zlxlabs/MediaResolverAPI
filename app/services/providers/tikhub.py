@@ -501,15 +501,6 @@ class TikHubProvider(BaseProvider):
                         self.log_warning(f"{label} endpoint {name} ok but no playable url")
                         break
         except asyncio.TimeoutError:
-            # 重试链有 retryable 且未达上限 → 耗尽（VideoNotFoundError）而非超时。
-            if (
-                max_attempts_per_endpoint > 1
-                and len(attempts) < max_attempts_per_endpoint
-                and any(a.get("decision") == "retryable" for a in attempts)
-            ):
-                raise VideoNotFoundError(
-                    f"{label} all endpoints failed for '{target}' [attempts={attempts}]"
-                )
             self.log_error(
                 f"{label} chain timed out after {total_budget}s",
                 target=target, attempts=attempts,
@@ -808,7 +799,7 @@ class TikHubProvider(BaseProvider):
         Returns:
             ("ok", {}) — 有可播放 data 节点，交由解析器判定是否含 media
             ("retryable", {"reason": "data_missing"}) — 非 dict/缺 data/data 非 dict 或空
-            ("retryable", {"reason": "object_type_mismatch", "object_type": 实际值})
+            ("retryable", {"reason": "object_type_mismatch", "object_type": 安全标量})
             注：HTTP 4xx/5xx JSON 包走 EndpointHttpError 通道，_run_chain 记
             {"reason": "error_body", "http_status": ...}（状态码只在 _call_endpoint 可得）。
         """

@@ -86,8 +86,8 @@ class WechatChannelsService(BasePlatformService):
         Returns:
             None — 可播放节点存在（ok）。
             {"reason": "data_missing"} — 响应非 dict / 缺 data / data 非 dict 或空。
-            {"reason": "object_type_mismatch", "object_type": 实际值} — data 为 dict
-                但 object_type != 0。只带 object_type 标量，不带整包响应体。
+            {"reason": "object_type_mismatch", "object_type": 安全标量} — data 为 dict
+                但 object_type != 0。只带有界安全标量，不带整包响应体。
         """
         if not isinstance(response_data, dict):
             return {"reason": "data_missing"}
@@ -95,9 +95,14 @@ class WechatChannelsService(BasePlatformService):
         if not isinstance(data, dict) or not data:
             return {"reason": "data_missing"}
         if data.get("object_type") != 0:
-            # 只带 int 标量；非 int（含容器）不进日志，只记类型名。
             ot = data.get("object_type")
-            if isinstance(ot, int):
+            if type(ot) is int:
+                return {"reason": "object_type_mismatch", "object_type": ot}
+            if (
+                isinstance(ot, str)
+                and len(ot) <= 32
+                and re.fullmatch(r"[A-Za-z0-9_.:-]+", ot)
+            ):
                 return {"reason": "object_type_mismatch", "object_type": ot}
             return {"reason": "object_type_mismatch", "object_type_type": type(ot).__name__}
         return None

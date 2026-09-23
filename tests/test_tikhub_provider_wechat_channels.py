@@ -352,6 +352,35 @@ def test_wechat_failure_tri_states_are_distinct():
     assert len({r0["reason"], r1["reason"], r2["reason"]}) == 3
 
 
+@pytest.mark.parametrize(
+    ("object_type", "expected_value", "expected_type"),
+    [
+        ("1", "1", None),
+        ("video", "video", None),
+        ({"full_url": "SECRET"}, None, "dict"),
+        ("x" * 33, None, "str"),
+        ("bad value", None, "str"),
+        ('"quoted"', None, "str"),
+        (True, None, "bool"),
+        (1.5, None, "float"),
+        (None, None, "NoneType"),
+    ],
+)
+def test_wechat_object_type_keeps_only_bounded_safe_scalars(
+    object_type, expected_value, expected_type
+):
+    reason = WechatChannelsService.describe_failure(
+        {"data": {"object_type": object_type}}
+    )
+    assert reason["reason"] == "object_type_mismatch"
+    if expected_type is None:
+        assert reason["object_type"] == expected_value
+        assert "object_type_type" not in reason
+    else:
+        assert reason["object_type_type"] == expected_type
+        assert "object_type" not in reason
+
+
 async def test_chain_http_status_body_records_error_body(monkeypatch):
     from app.services.providers.tikhub import EndpointHttpError
     calls = []
@@ -415,9 +444,10 @@ async def test_chain_provider_error_not_retried(monkeypatch):
     assert len(calls) == 1 and "http_error" in str(ei.value)
 
 
-async def test_chain_budget_truncation_still_not_found(monkeypatch):
-    """F1：尝试耗时超预算被截断 → 仍是 VideoNotFoundError（含 retryable），非 timed out。"""
+async def test_chain_attempt_timeout_raises_provider_error(monkeypatch):
+    """单次尝试超时属于上游故障，保留 ProviderError 的 timed out 语义。"""
     import asyncio as _aio
+
     async def slow_empty(self, name, path, params, per_timeout):
         await _aio.sleep(0.4)
         return {"code": 200, "data": None}
@@ -425,10 +455,31 @@ async def test_chain_budget_truncation_still_not_found(monkeypatch):
     monkeypatch.setattr(TikHubProvider, "WECHAT_CHANNELS_RETRY_BACKOFF", 0)
     monkeypatch.setattr(TikHubProvider, "WECHAT_CHANNELS_TOTAL_BUDGET", 0.7)
     monkeypatch.setattr(TikHubProvider, "WECHAT_CHANNELS_PER_ENDPOINT_TIMEOUT", 0.05)
+    with pytest.raises(ProviderError) as ei:
+        await TikHubProvider().fetch_video_info("wechat_channels", OBJECT_ID, SHARE_URL)
+    assert type(ei.value) is ProviderError
+    assert "timed out" in str(ei.value)
+    assert not isinstance(ei.value, VideoNotFoundError)
+
+
+async def test_chain_budget_does_not_start_attempt_that_does_not_fit(monkeypatch):
+    """剩余预算装不下完整下一次尝试时，只执行当前尝试并走未找到。"""
+    calls = []
+
+    async def slow_empty(self, name, path, params, per_timeout):
+        calls.append(name)
+        await asyncio.sleep(0.2)
+        return {"code": 200, "data": None}
+
+    monkeypatch.setattr(TikHubProvider, "_call_endpoint", slow_empty)
+    monkeypatch.setattr(TikHubProvider, "WECHAT_CHANNELS_TOTAL_BUDGET", 0.7)
+    monkeypatch.setattr(TikHubProvider, "WECHAT_CHANNELS_PER_ENDPOINT_TIMEOUT", 0.6)
+    monkeypatch.setattr(TikHubProvider, "WECHAT_CHANNELS_RETRY_BACKOFF", 0)
     with pytest.raises(VideoNotFoundError) as ei:
         await TikHubProvider().fetch_video_info("wechat_channels", OBJECT_ID, SHARE_URL)
+    assert len(calls) == 1
     assert type(ei.value) is VideoNotFoundError
-    assert "timed out" not in str(ei.value) and "retryable" in str(ei.value)
+    assert "timed out" not in str(ei.value)
 
 
 async def test_adapter_and_platforms_endpoint(authed_client, monkeypatch):
