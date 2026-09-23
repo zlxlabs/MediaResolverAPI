@@ -169,8 +169,9 @@ async def test_chain_http_error_on_one_endpoint_continues(monkeypatch):
 
 # ------------------- 单端调用：HTTPStatusError 体 -------------------
 
-async def test_call_endpoint_returns_body_on_http_status_error(monkeypatch):
-    """4xx 错误体应取出来交给分类器，而非吞掉。"""
+async def test_call_endpoint_raises_endpoint_http_error_on_http_status_error(monkeypatch):
+    """4xx 错误体带状态码抛给链：body 交分类器判 retryable，而非吞掉。"""
+    from app.services.providers.tikhub import EndpointHttpError
     provider = TikHubProvider()
     err_body = load("detail_400")
 
@@ -195,9 +196,10 @@ async def test_call_endpoint_returns_body_on_http_status_error(monkeypatch):
     monkeypatch.setattr(
         "app.services.providers.tikhub.HTTPClient", lambda *a, **k: _FakeClient()
     )
-    body = await provider._call_endpoint("app_v2", "/p", {"note_id": NOTE_ID}, 25)
-    assert body == err_body
-    assert TikHubProvider._classify_xhs(body) == "retryable"
+    with pytest.raises(EndpointHttpError) as ei:
+        await provider._call_endpoint("app_v2", "/p", {"note_id": NOTE_ID}, 25)
+    assert ei.value.body == err_body and ei.value.status == 400
+    assert TikHubProvider._classify_xhs(ei.value.body) == "retryable"
 
 
 async def test_chain_total_budget_timeout(monkeypatch):

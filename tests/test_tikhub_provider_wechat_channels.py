@@ -114,7 +114,7 @@ def test_parse_response_none_without_media_or_non_video():
 # ----------------------------- 分类器 -----------------------------
 
 def test_classify_ok_for_video():
-    assert TikHubProvider._classify_wechat_channels(load("detail")) == "ok"
+    assert TikHubProvider._classify_wechat_channels(load("detail")) == ("ok", {})
 
 
 @pytest.mark.parametrize("payload", [
@@ -125,13 +125,14 @@ def test_classify_ok_for_video():
     "not-a-dict",
 ])
 def test_classify_retryable(payload):
-    assert TikHubProvider._classify_wechat_channels(payload) == "retryable"
+    decision, _reason = TikHubProvider._classify_wechat_channels(payload)
+    assert decision == "retryable"
 
 
 def test_classify_never_terminal():
-    assert TikHubProvider._classify_wechat_channels(load("empty")) != "terminal"
-    assert TikHubProvider._classify_wechat_channels(load("image_note")) != "terminal"
-    assert TikHubProvider._classify_wechat_channels(load("detail")) != "terminal"
+    for payload in (load("empty"), load("image_note"), load("detail")):
+        decision, _reason = TikHubProvider._classify_wechat_channels(payload)
+        assert decision != "terminal"
 
 
 # ----------------------------- has_playable 同源 -----------------------------
@@ -158,7 +159,8 @@ def test_has_playable_uses_parse_response(monkeypatch):
 def test_missing_media_is_ok_then_not_playable():
     """缺 media：extract_data 仍能定位节点（classify=ok），解析失败 → has_playable False。"""
     missing_media = {"data": {"id": OBJECT_ID, "object_type": 0, "title": "x"}}
-    assert TikHubProvider._classify_wechat_channels(missing_media) == "ok"
+    decision, _reason = TikHubProvider._classify_wechat_channels(missing_media)
+    assert decision == "ok"
     assert TikHubProvider()._wechat_channels_has_playable(missing_media) is False
 
 
@@ -192,7 +194,8 @@ async def test_chain_empty_raises_not_found_not_terminal(monkeypatch):
     with pytest.raises(VideoNotFoundError) as ei:
         await provider.fetch_video_info("wechat_channels", OBJECT_ID, SHARE_URL)
     assert not isinstance(ei.value, TerminalError)
-    assert [c["name"] for c in calls] == ["fetch_video_detail"]
+    # 瞬态 retryable 由引擎重试：单端点链 3 次尝试
+    assert [c["name"] for c in calls] == ["fetch_video_detail"] * 3
 
 
 async def test_chain_image_note_raises_not_found_not_terminal(monkeypatch):
@@ -302,6 +305,239 @@ async def test_chain_total_budget_timeout(monkeypatch):
     monkeypatch.setattr(TikHubProvider, "_call_endpoint", slow_call)
     with pytest.raises(ProviderError, match="timed out"):
         await provider.fetch_video_info("wechat_channels", OBJECT_ID, SHARE_URL)
+
+
+# ----------------------------- 瞬态重试 + 归因（#34 + #33） -----------------------------
+
+async def _nosleep(monkeypatch):
+    async def no_sleep(_delay):
+        return None
+    monkeypatch.setattr("app.services.providers.tikhub.asyncio.sleep", no_sleep)
+
+
+async def test_chain_transient_then_hit_records_three_attempts(monkeypatch):
+    responses = [load("empty"), load("empty"), load("detail")]
+    calls = []
+    async def flaky(self, name, path, params, per_timeout):
+        calls.append(name)
+        return responses[len(calls) - 1]
+    monkeypatch.setattr(TikHubProvider, "_call_endpoint", flaky)
+    await _nosleep(monkeypatch)
+    data = await TikHubProvider().fetch_video_info("wechat_channels", OBJECT_ID, SHARE_URL)
+    assert data == load("detail") and len(calls) == 3
+
+
+async def test_chain_exhausted_raises_not_found_with_attempts(monkeypatch):
+    calls = []
+    async def always_empty(self, name, path, params, per_timeout):
+        calls.append(name)
+        return load("empty")
+    monkeypatch.setattr(TikHubProvider, "_call_endpoint", always_empty)
+    await _nosleep(monkeypatch)
+    with pytest.raises(VideoNotFoundError) as ei:
+        await TikHubProvider().fetch_video_info("wechat_channels", OBJECT_ID, SHARE_URL)
+    assert type(ei.value) is VideoNotFoundError and len(calls) == 3
+    assert "attempts" in str(ei.value) and "data_missing" in str(ei.value)
+    assert str(ei.value).count("'decision': 'retryable'") == 3
+
+
+def test_wechat_failure_tri_states_are_distinct():
+    d0, r0 = TikHubProvider._classify_wechat_channels(load("empty"))
+    d1, r1 = TikHubProvider._classify_wechat_channels({"data": {"id": OBJECT_ID, "object_type": 1}})
+    r2 = TikHubProvider._error_body_reason(400, {"code": 400, "message": "invalid object_id"})
+    assert (d0, d1) == ("retryable", "retryable")
+    assert r0.get("reason") == "data_missing"
+    assert r1.get("reason") == "object_type_mismatch" and r1["object_type"] == 1
+    assert r2["reason"] == "error_body" and r2["http_status"] == 400
+    assert len({r0["reason"], r1["reason"], r2["reason"]}) == 3
+
+
+@pytest.mark.parametrize(
+    ("object_type", "expected_value", "expected_type"),
+    [
+        ("1", "1", None),
+        ("video", "video", None),
+        ({"full_url": "SECRET"}, None, "dict"),
+        ("x" * 33, None, "str"),
+        ("bad value", None, "str"),
+        ('"quoted"', None, "str"),
+        (True, None, "bool"),
+        (1.5, None, "float"),
+        (None, None, "NoneType"),
+    ],
+)
+def test_wechat_object_type_keeps_only_bounded_safe_scalars(
+    object_type, expected_value, expected_type
+):
+    reason = WechatChannelsService.describe_failure(
+        {"data": {"object_type": object_type}}
+    )
+    assert reason["reason"] == "object_type_mismatch"
+    if expected_type is None:
+        assert reason["object_type"] == expected_value
+        assert "object_type_type" not in reason
+    else:
+        assert reason["object_type_type"] == expected_type
+        assert "object_type" not in reason
+
+
+async def test_chain_http_status_body_records_error_body(monkeypatch):
+    from app.services.providers.tikhub import EndpointHttpError
+    calls = []
+    async def error_body(self, name, path, params, per_timeout):
+        calls.append(name)
+        raise EndpointHttpError(name, 400, {"code": 400, "message": "invalid object_id"})
+    monkeypatch.setattr(TikHubProvider, "_call_endpoint", error_body)
+    await _nosleep(monkeypatch)
+    with pytest.raises(VideoNotFoundError) as ei:
+        await TikHubProvider().fetch_video_info("wechat_channels", OBJECT_ID, SHARE_URL)
+    assert len(calls) == 3 and "error_body" in str(ei.value) and "400" in str(ei.value)
+
+
+async def test_chain_http_error_parse_failed_keeps_error_body_attribution(monkeypatch):
+    from app.services.providers.tikhub import EndpointHttpError
+    body = {
+        "code": 400,
+        "message": "missing media",
+        "data": {"id": OBJECT_ID, "object_type": 0},
+    }
+
+    async def error_body(self, name, path, params, per_timeout):
+        raise EndpointHttpError(name, 400, body)
+
+    monkeypatch.setattr(TikHubProvider, "_call_endpoint", error_body)
+    with pytest.raises(VideoNotFoundError) as ei:
+        await TikHubProvider().fetch_video_info("wechat_channels", OBJECT_ID, SHARE_URL)
+    text = str(ei.value)
+    assert "'decision': 'parse_failed'" in text
+    assert "'reason': 'error_body'" in text
+    assert "'http_status': 400" in text
+    assert "'upstream_message': 'missing media'" in text
+
+
+async def test_wechat_bool_object_type_is_mismatch_and_retries(monkeypatch):
+    payload = {"data": {"object_type": False, "id": "1"}}
+    assert WechatChannelsService.describe_failure(payload) == {
+        "reason": "object_type_mismatch",
+        "object_type_type": "bool",
+    }
+    assert WechatChannelsService.extract_data(payload) is None
+
+    provider, calls = _provider_with(monkeypatch, {"fetch_video_detail": payload})
+    await _nosleep(monkeypatch)
+    with pytest.raises(VideoNotFoundError) as ei:
+        await provider.fetch_video_info("wechat_channels", OBJECT_ID, SHARE_URL)
+    assert len(calls) == 3
+    text = str(ei.value)
+    assert text.count("'decision': 'retryable'") == 3
+    assert text.count("'object_type_type': 'bool'") == 3
+
+
+async def test_chain_desensitization_error_string_and_api(authed_client, monkeypatch):
+    import copy
+    import app.api.resolve as resolve_mod
+    from app.services.providers.tikhub import EndpointHttpError
+    secret_full = "https://secret-cdn.example.com/video-SECRET123.mp4"
+    secret_key = "SECRET-DECODE-KEY-xyz"
+    secret_token = "SECRET-URL-TOKEN-abc"
+    payload = copy.deepcopy(load("empty"))
+    payload["message"] = "upstream says invalid object_id marker-MSG42"
+    payload["data"] = {"full_url": secret_full, "decode_key": secret_key, "url_token": secret_token}
+    _d2, r2 = TikHubProvider._classify_wechat_channels(
+        {"code": 200, "data": {"id": "1", "object_type": payload["data"]}})
+    assert r2.get("reason") == "object_type_mismatch"
+    assert "object_type" not in r2 and r2.get("object_type_type") == "dict"
+    async def error_body(self, name, path, params, per_timeout):
+        raise EndpointHttpError(name, 400, payload)
+    monkeypatch.setattr(TikHubProvider, "_call_endpoint", error_body)
+    await _nosleep(monkeypatch)
+    with pytest.raises(VideoNotFoundError) as ei:
+        await TikHubProvider().fetch_video_info("wechat_channels", OBJECT_ID, SHARE_URL)
+    text = str(ei.value)
+    assert secret_full not in text and secret_key not in text and secret_token not in text
+    assert "marker-MSG42" in text
+    resolve_mod._video_resolver = None
+    resp = authed_client.post("/api/resolve", json={"url": SHARE_URL, "translate": False})
+    blob = resp.text
+    assert secret_full not in blob and secret_key not in blob and secret_token not in blob
+    assert "marker-MSG42" in blob
+    # F2 链路：200 + dict object_type 走三跳耗尽，异常串同样零凭据
+    payload2 = {"code": 200, "data": {"id": "1", "object_type": payload["data"]}}
+    async def mismatch2(self, name, path, params, per_timeout):
+        return payload2
+    monkeypatch.setattr(TikHubProvider, "_call_endpoint", mismatch2)
+    await _nosleep(monkeypatch)
+    with pytest.raises(VideoNotFoundError) as ei2:
+        await TikHubProvider().fetch_video_info("wechat_channels", OBJECT_ID, SHARE_URL)
+    assert secret_key not in str(ei2.value) and secret_full not in str(ei2.value)
+
+
+async def test_chain_provider_error_not_retried(monkeypatch):
+    calls = []
+    async def boom(self, name, path, params, per_timeout):
+        calls.append(name)
+        raise ProviderError("boom")
+    monkeypatch.setattr(TikHubProvider, "_call_endpoint", boom)
+    with pytest.raises(VideoNotFoundError) as ei:
+        await TikHubProvider().fetch_video_info("wechat_channels", OBJECT_ID, SHARE_URL)
+    assert len(calls) == 1 and "http_error" in str(ei.value)
+
+
+async def test_chain_attempt_provider_error_is_not_chain_timeout(monkeypatch):
+    """attempt 级 ProviderError 记为 http_error，不冒充链级超时。"""
+    calls = []
+
+    async def raise_http_error(self, name, path, params, per_timeout):
+        calls.append(name)
+        raise ProviderError(f"{name} HTTP 500")
+
+    monkeypatch.setattr(TikHubProvider, "_call_endpoint", raise_http_error)
+    with pytest.raises(VideoNotFoundError) as ei:
+        await TikHubProvider().fetch_video_info("wechat_channels", OBJECT_ID, SHARE_URL)
+    text = str(ei.value)
+    assert type(ei.value) is VideoNotFoundError
+    assert calls == ["fetch_video_detail"]
+    assert "decision': 'http_error'" in text
+    assert "fetch_video_detail HTTP 500" in text
+    assert "endpoint chain timed out" not in text
+
+
+async def test_chain_budget_timeout_raises_provider_error_not_not_found(monkeypatch):
+    """总预算在某次尝试中途触发 → ProviderError(timed out)，不得改判成 VideoNotFoundError。"""
+    import asyncio as _aio
+
+    async def slow_empty(self, name, path, params, per_timeout):
+        await _aio.sleep(0.4)
+        return {"code": 200, "data": None}
+    monkeypatch.setattr(TikHubProvider, "_call_endpoint", slow_empty)
+    monkeypatch.setattr(TikHubProvider, "WECHAT_CHANNELS_RETRY_BACKOFF", 0)
+    monkeypatch.setattr(TikHubProvider, "WECHAT_CHANNELS_TOTAL_BUDGET", 0.7)
+    monkeypatch.setattr(TikHubProvider, "WECHAT_CHANNELS_PER_ENDPOINT_TIMEOUT", 0.05)
+    with pytest.raises(ProviderError) as ei:
+        await TikHubProvider().fetch_video_info("wechat_channels", OBJECT_ID, SHARE_URL)
+    assert type(ei.value) is ProviderError
+    assert "timed out" in str(ei.value)
+    assert not isinstance(ei.value, VideoNotFoundError)
+
+
+async def test_chain_budget_does_not_start_attempt_that_does_not_fit(monkeypatch):
+    """剩余预算装不下完整下一次尝试时，只执行当前尝试并走未找到。"""
+    calls = []
+
+    async def slow_empty(self, name, path, params, per_timeout):
+        calls.append(name)
+        await asyncio.sleep(0.2)
+        return {"code": 200, "data": None}
+
+    monkeypatch.setattr(TikHubProvider, "_call_endpoint", slow_empty)
+    monkeypatch.setattr(TikHubProvider, "WECHAT_CHANNELS_TOTAL_BUDGET", 0.7)
+    monkeypatch.setattr(TikHubProvider, "WECHAT_CHANNELS_PER_ENDPOINT_TIMEOUT", 0.6)
+    monkeypatch.setattr(TikHubProvider, "WECHAT_CHANNELS_RETRY_BACKOFF", 0)
+    with pytest.raises(VideoNotFoundError) as ei:
+        await TikHubProvider().fetch_video_info("wechat_channels", OBJECT_ID, SHARE_URL)
+    assert len(calls) == 1
+    assert type(ei.value) is VideoNotFoundError
+    assert "timed out" not in str(ei.value)
 
 
 async def test_adapter_and_platforms_endpoint(authed_client, monkeypatch):

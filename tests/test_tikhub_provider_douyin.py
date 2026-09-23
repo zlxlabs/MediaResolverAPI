@@ -169,8 +169,9 @@ async def test_chain_http_error_on_one_endpoint_continues(monkeypatch):
 
 # ------------------- 单端调用：HTTPStatusError 终态体（codex #4） -------------------
 
-async def test_call_endpoint_returns_body_on_http_status_error(monkeypatch):
-    """4xx 错误体里若含 filter_list，应取出来交给分类器，而非吞掉。"""
+async def test_call_endpoint_raises_endpoint_http_error_on_http_status_error(monkeypatch):
+    """4xx 错误体带状态码抛给链：body 交分类器判终态（codex #4 本意保留）。"""
+    from app.services.providers.tikhub import EndpointHttpError
     provider = TikHubProvider()
     err_body = load("private_reason5")
 
@@ -193,9 +194,21 @@ async def test_call_endpoint_returns_body_on_http_status_error(monkeypatch):
     monkeypatch.setattr(
         "app.services.providers.tikhub.HTTPClient", lambda *a, **k: _FakeClient()
     )
-    body = await provider._call_endpoint("web_v1", "/p", {"aweme_id": "id"}, 25)
-    assert body == err_body
-    assert TikHubProvider._classify_douyin(body) == "terminal"
+    with pytest.raises(EndpointHttpError) as ei:
+        await provider._call_endpoint("web_v1", "/p", {"aweme_id": "id"}, 25)
+    assert ei.value.body == err_body and ei.value.status == 404
+    assert TikHubProvider._classify_douyin(ei.value.body) == "terminal"
+
+
+async def test_chain_endpoint_http_error_body_still_short_circuits_terminal(monkeypatch):
+    """链级：EndpointHttpError 的 body 仍交给分类器，终态短路 DouyinTerminalError。"""
+    from app.services.providers.tikhub import EndpointHttpError
+    provider = TikHubProvider()
+    async def raise_http_error(self, name, path, params, per_timeout):
+        raise EndpointHttpError(name, 404, load("private_reason5"))
+    monkeypatch.setattr(TikHubProvider, "_call_endpoint", raise_http_error)
+    with pytest.raises(DouyinTerminalError):
+        await provider.fetch_video_info("douyin", "id", "https://u")
 
 
 async def test_chain_total_budget_timeout(monkeypatch):

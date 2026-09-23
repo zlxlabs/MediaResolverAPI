@@ -1081,25 +1081,27 @@ async def test_fetch_wechat_channels_media_reads_fixture_and_is_uncached(monkeyp
 async def test_fetch_wechat_channels_media_retries_retryable_then_hits(monkeypatch):
     import json
     from app.services.providers.tikhub import TikHubProvider
-    from app.services.providers.base import VideoNotFoundError
 
     payload = json.loads(
         (Path(__file__).parent / "fixtures" / "wechat_channels" / "detail.json").read_text(
             encoding="utf-8"
         )
     )
+    empty = {"code": 200, "data": None}
     n = {"i": 0}
 
-    async def flaky(self, video_id, original_url):
+    async def flaky_call(self, name, path, params, per_timeout):
         n["i"] += 1
+        assert name == "fetch_video_detail"
+        assert params == {"share_url": "https://weixin.qq.com/sph/AOzokRxWHz", "raw": False}
         if n["i"] < 3:
-            raise VideoNotFoundError("retryable envelope")
+            return empty
         return payload
 
     async def no_sleep(_delay):
         return None
 
-    monkeypatch.setattr(TikHubProvider, "_fetch_wechat_channels", flaky)
+    monkeypatch.setattr(TikHubProvider, "_call_endpoint", flaky_call)
     monkeypatch.setattr("app.services.providers.tikhub.asyncio.sleep", no_sleep)
     out = await TikHubProvider().fetch_wechat_channels_media(SPH_CODE)
     assert n["i"] == 3
@@ -1113,14 +1115,14 @@ async def test_fetch_wechat_channels_media_retry_exhausted_raises(monkeypatch):
 
     n = {"i": 0}
 
-    async def always_miss(self, video_id, original_url):
+    async def always_empty(self, name, path, params, per_timeout):
         n["i"] += 1
-        raise VideoNotFoundError("still missing")
+        return {"code": 200, "data": None}
 
     async def no_sleep(_delay):
         return None
 
-    monkeypatch.setattr(TikHubProvider, "_fetch_wechat_channels", always_miss)
+    monkeypatch.setattr(TikHubProvider, "_call_endpoint", always_empty)
     monkeypatch.setattr("app.services.providers.tikhub.asyncio.sleep", no_sleep)
     with pytest.raises(VideoNotFoundError):
         await TikHubProvider().fetch_wechat_channels_media(SPH_CODE)
