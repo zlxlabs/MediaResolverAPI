@@ -575,12 +575,9 @@ class TikHubProvider(BaseProvider):
                 except Exception:
                     body = None
             if isinstance(body, dict):
-                # 视频号 POST 路径：状态码只在此处可得，带 body 抛给 _run_chain
-                # 跑 classify + has_playable，并记 http_status 证据（error_body 归因）。
-                # 其余 GET 路径保持原样直接返回 body（8 平台零回归，约束 2）。
-                if use_post:
-                    raise EndpointHttpError(name, status, body)
-                return body
+                # 状态码只在此处可得：带 body 抛给 _run_chain 跑 classify +
+                # has_playable，并记 http_status 证据供归因（与 verb 无关）。
+                raise EndpointHttpError(name, status, body)
             raise ProviderError(f"{name} HTTP {status}")
         except ProviderError:
             raise
