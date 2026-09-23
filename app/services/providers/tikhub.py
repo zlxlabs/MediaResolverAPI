@@ -484,7 +484,7 @@ class TikHubProvider(BaseProvider):
                             attempts.append(entry)
                             if not self._should_retry(
                                 attempt, max_attempts_per_endpoint,
-                                total_budget, start,
+                                total_budget, start, per_timeout, retry_backoff,
                             ):
                                 break
                             await asyncio.sleep(retry_backoff)
@@ -501,6 +501,15 @@ class TikHubProvider(BaseProvider):
                         self.log_warning(f"{label} endpoint {name} ok but no playable url")
                         break
         except asyncio.TimeoutError:
+            # 重试链有 retryable 且未达上限 → 耗尽（VideoNotFoundError）而非超时。
+            if (
+                max_attempts_per_endpoint > 1
+                and len(attempts) < max_attempts_per_endpoint
+                and any(a.get("decision") == "retryable" for a in attempts)
+            ):
+                raise VideoNotFoundError(
+                    f"{label} all endpoints failed for '{target}' [attempts={attempts}]"
+                )
             self.log_error(
                 f"{label} chain timed out after {total_budget}s",
                 target=target, attempts=attempts,
@@ -525,17 +534,20 @@ class TikHubProvider(BaseProvider):
     @staticmethod
     def _should_retry(
         attempt: int, max_attempts: int, total_budget: float, start: float,
+        per_timeout: float, retry_backoff: float,
     ) -> bool:
-        """重试前检查：达到上限或剩余预算不足则不再重试，按全链未命中走。"""
+        """重试前检查：须为下一次尝试的完整单端超时 + 退避留出余量。"""
         if attempt >= max_attempts:
             return False
         elapsed = asyncio.get_event_loop().time() - start
-        return (total_budget - elapsed) > 0
+        return (total_budget - elapsed) > (per_timeout + retry_backoff)
 
     @staticmethod
     def _error_body_reason(http_status: object, body: Dict) -> Dict:
-        """4xx/5xx JSON 错误包的脱敏原因摘要：只记状态码与上游 message 片段。"""
-        reason: Dict = {"reason": "error_body", "http_status": http_status}
+        """4xx/5xx JSON 错误包的脱敏原因摘要：只记 int 状态码与 str message 片段。"""
+        reason: Dict = {"reason": "error_body"}
+        if isinstance(http_status, int):
+            reason["http_status"] = http_status
         message = body.get("message") if isinstance(body, dict) else None
         if isinstance(message, str) and message:
             reason["upstream_message"] = message[:200]

@@ -95,7 +95,11 @@ class WechatChannelsService(BasePlatformService):
         if not isinstance(data, dict) or not data:
             return {"reason": "data_missing"}
         if data.get("object_type") != 0:
-            return {"reason": "object_type_mismatch", "object_type": data.get("object_type")}
+            # 只带 int 标量；非 int（含容器）不进日志，只记类型名。
+            ot = data.get("object_type")
+            if isinstance(ot, int):
+                return {"reason": "object_type_mismatch", "object_type": ot}
+            return {"reason": "object_type_mismatch", "object_type_type": type(ot).__name__}
         return None
 
     def _parse_response(self, response_data: Dict[str, Any]) -> Optional[VideoInfo]:
