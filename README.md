@@ -29,7 +29,7 @@ risk-tier: internal
 > - **TikTok**：`app/v3/fetch_one_video → _v2 → _v3`（同 `data.aweme_detail` schema）。有 Cobalt 兜底，故链内不判终态（误判会跳过 Cobalt），链走完落 Cobalt。
 > - **Instagram**：`v2/fetch_post_info（code_or_url）→ v1/fetch_post_by_url（post_url）`；非视频/轮播不判终态（子节点可能含视频），落 Cobalt。ID 提取失败时由路由层放行原始 url 兜底。
 > - **YouTube**：`web/get_video_info（预解析直链）→ web/get_video_info_v2（streamingData 合流）`；解析器自适应两套 schema。有 Cobalt 兜底。
-> - **微信视频号**：TikHub 单源单端点（`wechat_channels/v2/fetch_video_detail`），无 Cobalt 兜底，故链内不判终态。平台标识是 `wechat_channels`（不是 `wechat`）。
+> - **微信视频号**：TikHub 单源单端点（`wechat_channels/v2/fetch_video_detail`），无 Cobalt 兜底，故链内不判终态。瞬态 `retryable` 在单端点上重试，最多 3 次尝试、退避 0.3s；`attempts` 带脱敏原因（`data_missing` / `object_type_mismatch` / `error_body`）。平台标识是 `wechat_channels`（不是 `wechat`）。
 > - **X (Twitter)**：TikHub 单端点（`twitter/web/fetch_tweet_detail`）按 status ID 获取元数据，失败后降级 Cobalt；只返回本帖最高码率 MP4，忽略 HLS 与引用帖视频。平台标识是 `twitter`（同时支持 `x.com` 与 `twitter.com`）。
 
 ---

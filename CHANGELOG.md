@@ -26,6 +26,7 @@
 - `.env.example` 补齐缺失配置项：`TIKHUB_RATE_LIMIT`、`TIKTOK_FALLBACK_REGIONS`、`PROVIDER_PRIORITY_*`（8 平台）；`COBALT_API_BASE` 默认值与代码对齐（留空即禁用）。
 
 ### Fixed
+- 微信视频号瞬态失败不再一次判死：`retryable` 在单端点链上最多重试 3 次（退避 0.3s），解析侧与下载侧共用同一引擎实现（下载侧手搓循环已删除）；`attempts` 携带脱敏失败原因（`data_missing` / `object_type_mismatch` / `error_body`），耗尽仍抛 `VideoNotFoundError`。
 - README 平台表与 `data.platform` 枚举补充 Facebook，与运行时 `/api/platforms` 返回保持一致。
 
 ## [1.0.0]
