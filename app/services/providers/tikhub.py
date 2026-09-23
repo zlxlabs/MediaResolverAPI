@@ -20,6 +20,16 @@ from .base import (
     XhsTerminalError,
     KuaishouTerminalError,
 )
+
+
+class EndpointHttpError(ProviderError):
+    """非 2xx 且 body 为 dict 时的形状：带状态码与 body 交分类器判定。"""
+
+    def __init__(self, endpoint: str, status: object, body: Dict):
+        super().__init__(f"{endpoint} HTTP {status}")
+        self.endpoint = endpoint
+        self.status = status
+        self.body = body
 from ...core.config import settings
 from ...utils.http_client import HTTPClient
 from ..platforms.douyin import DouyinService
@@ -142,6 +152,8 @@ class TikHubProvider(BaseProvider):
     ]
     WECHAT_CHANNELS_PER_ENDPOINT_TIMEOUT = 25
     WECHAT_CHANNELS_TOTAL_BUDGET = 30.0
+    WECHAT_CHANNELS_MAX_ATTEMPTS_PER_ENDPOINT = 3
+    WECHAT_CHANNELS_RETRY_BACKOFF = 0.3
     WECHAT_CHANNELS_SHARE_URL_BASE = "https://weixin.qq.com/sph"
 
     # X/Twitter 单端点；有 Cobalt 兜底，因此分类器不出终态。
@@ -397,13 +409,15 @@ class TikHubProvider(BaseProvider):
         *,
         chain: List[Tuple],
         build_params: Callable[[Tuple], Dict],
-        classify: Callable[[Dict], str],
+        classify: Callable[[Dict], object],
         has_playable: Callable[[Dict], bool],
         terminal_exc: type,
         total_budget: float,
         per_timeout: float,
         target: str,
         label: str,
+        max_attempts_per_endpoint: int = 1,
+        retry_backoff: float = 0.0,
     ) -> Dict:
         """
         通用多级端点降级引擎：串行尝试 chain，命中即返回；终态立即短路；全失败抛错。
@@ -424,38 +438,68 @@ class TikHubProvider(BaseProvider):
             ProviderError: 总预算超时或认证失败。
         """
         attempts: List[Dict] = []
+        start = asyncio.get_event_loop().time()
         try:
             async with asyncio.timeout(total_budget):
                 for endpoint in chain:
                     name, path = endpoint[0], endpoint[1]
-                    try:
-                        data = await self._call_endpoint(
-                            name, path, build_params(endpoint), per_timeout
-                        )
-                    except ProviderError as e:
-                        attempts.append({"endpoint": name, "decision": "http_error", "error": str(e)})
-                        self.log_warning(f"{label} endpoint {name} http error: {e}")
-                        continue
+                    for attempt in range(1, max_attempts_per_endpoint + 1):
+                        try:
+                            data = await self._call_endpoint(
+                                name, path, build_params(endpoint), per_timeout
+                            )
+                            http_status = None
+                        except EndpointHttpError as e:
+                            # 非 2xx 但 body 为 dict：仍以该 body 跑 classify +
+                            # has_playable，保持既有分类与命中语义；attempts 记
+                            # http_status 证据供归因。
+                            data = e.body
+                            http_status = e.status
+                        except ProviderError as e:
+                            # http_error 与 parse_failed 只算一次尝试，不重试。
+                            attempts.append({
+                                "endpoint": name, "decision": "http_error",
+                                "attempt": attempt, "error": str(e),
+                            })
+                            self.log_warning(f"{label} endpoint {name} http error: {e}")
+                            break
 
-                    decision = classify(data)
-                    if decision == "terminal":
-                        self.log_info(
-                            f"{label} terminal response, short-circuit",
-                            endpoint=name, target=target,
-                        )
-                        raise terminal_exc(
-                            f"{label} content unavailable (terminal): {target}"
-                        )
-                    if decision == "retryable":
-                        attempts.append({"endpoint": name, "decision": "retryable"})
-                        continue
+                        decision, reason = self._normalize_decision(classify(data))
+                        if http_status is not None and decision == "retryable":
+                            reason = self._error_body_reason(http_status, data)
+                        if decision == "terminal":
+                            self.log_info(
+                                f"{label} terminal response, short-circuit",
+                                endpoint=name, target=target,
+                            )
+                            raise terminal_exc(
+                                f"{label} content unavailable (terminal): {target}"
+                            )
+                        if decision == "retryable":
+                            entry: Dict = {
+                                "endpoint": name, "decision": "retryable",
+                                "attempt": attempt,
+                            }
+                            entry.update(reason)
+                            attempts.append(entry)
+                            if not self._should_retry(
+                                attempt, max_attempts_per_endpoint,
+                                total_budget, start,
+                            ):
+                                break
+                            await asyncio.sleep(retry_backoff)
+                            continue
 
-                    # ok：解析校验，解析不出可播放直链也算可重试（codex #10）
-                    if has_playable(data):
-                        self.log_info(f"{label} endpoint hit", endpoint=name, target=target)
-                        return data
-                    attempts.append({"endpoint": name, "decision": "parse_failed"})
-                    self.log_warning(f"{label} endpoint {name} ok but no playable url")
+                        # ok：解析校验，解析不出可播放直链也算可重试（codex #10）
+                        if has_playable(data):
+                            self.log_info(f"{label} endpoint hit", endpoint=name, target=target)
+                            return data
+                        attempts.append({
+                            "endpoint": name, "decision": "parse_failed",
+                            "attempt": attempt,
+                        })
+                        self.log_warning(f"{label} endpoint {name} ok but no playable url")
+                        break
         except asyncio.TimeoutError:
             self.log_error(
                 f"{label} chain timed out after {total_budget}s",
@@ -469,6 +513,33 @@ class TikHubProvider(BaseProvider):
         raise VideoNotFoundError(
             f"{label} all endpoints failed for '{target}' [attempts={attempts}]"
         )
+
+    @staticmethod
+    def _normalize_decision(classified: object) -> Tuple[str, Dict]:
+        """classify 返回值归一化：str 等价 (decision, {})，tuple 取 (decision, reason)。"""
+        if isinstance(classified, tuple):
+            decision, reason = classified
+            return str(decision), dict(reason or {})
+        return str(classified), {}
+
+    @staticmethod
+    def _should_retry(
+        attempt: int, max_attempts: int, total_budget: float, start: float,
+    ) -> bool:
+        """重试前检查：达到上限或剩余预算不足则不再重试，按全链未命中走。"""
+        if attempt >= max_attempts:
+            return False
+        elapsed = asyncio.get_event_loop().time() - start
+        return (total_budget - elapsed) > 0
+
+    @staticmethod
+    def _error_body_reason(http_status: object, body: Dict) -> Dict:
+        """4xx/5xx JSON 错误包的脱敏原因摘要：只记状态码与上游 message 片段。"""
+        reason: Dict = {"reason": "error_body", "http_status": http_status}
+        message = body.get("message") if isinstance(body, dict) else None
+        if isinstance(message, str) and message:
+            reason["upstream_message"] = message[:200]
+        return reason
 
     async def _call_endpoint(
         self, name: str, path: str, params: Dict, per_timeout: float
@@ -504,7 +575,12 @@ class TikHubProvider(BaseProvider):
                 except Exception:
                     body = None
             if isinstance(body, dict):
-                return body  # 交给分类器判定 terminal/retryable
+                # 视频号 POST 路径：状态码只在此处可得，带 body 抛给 _run_chain
+                # 跑 classify + has_playable，并记 http_status 证据（error_body 归因）。
+                # 其余 GET 路径保持原样直接返回 body（8 平台零回归，约束 2）。
+                if use_post:
+                    raise EndpointHttpError(name, status, body)
+                return body
             raise ProviderError(f"{name} HTTP {status}")
         except ProviderError:
             raise
@@ -716,16 +792,21 @@ class TikHubProvider(BaseProvider):
         return bool(info and info.video_url)
 
     @staticmethod
-    def _classify_wechat_channels(response: Dict) -> str:
+    def _classify_wechat_channels(response: Dict) -> Tuple[str, Dict]:
         """
-        视频号两态分类。单源单端点，不出终态（无 WechatChannelsTerminalError）。
+        视频号三态分类（带脱敏原因摘要）。单源单端点，不出终态。
 
         Returns:
-            "retryable" : 定位不到可播放 data（空/非 dict/object_type != 0）
-            "ok"        : 有可播放 data 节点，交由解析器判定是否含 media
+            ("ok", {}) — 有可播放 data 节点，交由解析器判定是否含 media
+            ("retryable", {"reason": "data_missing"}) — 非 dict/缺 data/data 非 dict 或空
+            ("retryable", {"reason": "object_type_mismatch", "object_type": 实际值})
+            注：HTTP 4xx/5xx JSON 包走 EndpointHttpError 通道，_run_chain 记
+            {"reason": "error_body", "http_status": ...}（状态码只在 _call_endpoint 可得）。
         """
-        node = WechatChannelsService.extract_data(response)
-        return "ok" if node else "retryable"
+        reason = WechatChannelsService.describe_failure(response)
+        if reason is None:
+            return "ok", {}
+        return "retryable", reason
 
     @staticmethod
     def _classify_twitter(response: Dict) -> str:
@@ -762,6 +843,8 @@ class TikHubProvider(BaseProvider):
             per_timeout=self.WECHAT_CHANNELS_PER_ENDPOINT_TIMEOUT,
             target=video_id or original_url,
             label="WechatChannels",
+            max_attempts_per_endpoint=self.WECHAT_CHANNELS_MAX_ATTEMPTS_PER_ENDPOINT,
+            retry_backoff=self.WECHAT_CHANNELS_RETRY_BACKOFF,
         )
 
     def _wechat_channels_has_playable(self, data: Dict) -> bool:
@@ -801,36 +884,13 @@ class TikHubProvider(BaseProvider):
         (full_url, decode_key) 必须成对使用，跨次混用必然解密失败。
 
         下载端点使用 sph 短码拼回 share_url 查询，避免 object_id 查询的偶发错误包。
-        share_url 查询若返回瞬态错误，单端点链会记 retryable 后抛出
-        VideoNotFoundError；这里对这一瞬态做有限次重试并打 WARNING，
-        耗尽后仍把错误抛给调用方（端点转 5xx JSON），不静默当成功。
+        瞬态 retryable 由通用引擎在单端点链上重试（3 次尝试 + 0.3s 退避）；
+        这里只做单次调用，其后的终态转换原样保留。
         """
         if not sph_code:
             raise VideoNotFoundError("wechat_channels sph_code is empty")
         share_url = f"{self.WECHAT_CHANNELS_SHARE_URL_BASE}/{sph_code}"
-        data = None
-        last_exc: Optional[BaseException] = None
-        attempts = 3
-        for attempt in range(1, attempts + 1):
-            try:
-                data = await self._fetch_wechat_channels("", share_url)
-                break
-            except VideoNotFoundError as exc:
-                last_exc = exc
-                if attempt >= attempts:
-                    raise
-                self.log_warning(
-                    "wechat_channels media lookup retryable, retrying",
-                    sph_code=sph_code,
-                    attempt=attempt,
-                    max_attempts=attempts,
-                    error=str(exc),
-                )
-                await asyncio.sleep(0.3)
-        if data is None:
-            raise last_exc if last_exc else VideoNotFoundError(
-                f"wechat_channels media missing for sph_code={sph_code}"
-            )
+        data = await self._fetch_wechat_channels("", share_url)
         node = data.get("data") if isinstance(data, dict) else None
         media = node.get("media") if isinstance(node, dict) else None
         if not isinstance(media, dict):

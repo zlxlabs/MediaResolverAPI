@@ -79,6 +79,25 @@ class WechatChannelsService(BasePlatformService):
             return None
         return data
 
+    @staticmethod
+    def describe_failure(response_data: object) -> dict | None:
+        """失败三态判别（只读，不改 extract_data 语义）。
+
+        Returns:
+            None — 可播放节点存在（ok）。
+            {"reason": "data_missing"} — 响应非 dict / 缺 data / data 非 dict 或空。
+            {"reason": "object_type_mismatch", "object_type": 实际值} — data 为 dict
+                但 object_type != 0。只带 object_type 标量，不带整包响应体。
+        """
+        if not isinstance(response_data, dict):
+            return {"reason": "data_missing"}
+        data = response_data.get("data")
+        if not isinstance(data, dict) or not data:
+            return {"reason": "data_missing"}
+        if data.get("object_type") != 0:
+            return {"reason": "object_type_mismatch", "object_type": data.get("object_type")}
+        return None
+
     def _parse_response(self, response_data: Dict[str, Any]) -> Optional[VideoInfo]:
         """
         解析视频号 TikHub 响应（raw=false 的扁平结构）。
