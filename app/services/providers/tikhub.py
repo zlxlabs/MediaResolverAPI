@@ -465,8 +465,12 @@ class TikHubProvider(BaseProvider):
                             break
 
                         decision, reason = self._normalize_decision(classify(data))
+                        reason_extra = (
+                            self._error_body_reason(http_status, data)
+                            if http_status is not None else {}
+                        )
                         if http_status is not None and decision == "retryable":
-                            reason = self._error_body_reason(http_status, data)
+                            reason = reason_extra
                         if decision == "terminal":
                             self.log_info(
                                 f"{label} terminal response, short-circuit",
@@ -481,6 +485,7 @@ class TikHubProvider(BaseProvider):
                                 "attempt": attempt,
                             }
                             entry.update(reason)
+                            entry.update(reason_extra)
                             attempts.append(entry)
                             if not self._should_retry(
                                 attempt, max_attempts_per_endpoint,
@@ -494,10 +499,12 @@ class TikHubProvider(BaseProvider):
                         if has_playable(data):
                             self.log_info(f"{label} endpoint hit", endpoint=name, target=target)
                             return data
-                        attempts.append({
+                        entry = {
                             "endpoint": name, "decision": "parse_failed",
                             "attempt": attempt,
-                        })
+                        }
+                        entry.update(reason_extra)
+                        attempts.append(entry)
                         self.log_warning(f"{label} endpoint {name} ok but no playable url")
                         break
         except asyncio.TimeoutError:

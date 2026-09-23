@@ -75,7 +75,8 @@ class WechatChannelsService(BasePlatformService):
         data = response_data.get("data")
         if not isinstance(data, dict):
             return None
-        if data.get("object_type") != 0:
+        object_type = data.get("object_type")
+        if not (type(object_type) is int and object_type == 0):
             return None
         return data
 
@@ -94,8 +95,8 @@ class WechatChannelsService(BasePlatformService):
         data = response_data.get("data")
         if not isinstance(data, dict) or not data:
             return {"reason": "data_missing"}
-        if data.get("object_type") != 0:
-            ot = data.get("object_type")
+        ot = data.get("object_type")
+        if not (type(ot) is int and ot == 0):
             if type(ot) is int:
                 return {"reason": "object_type_mismatch", "object_type": ot}
             if (

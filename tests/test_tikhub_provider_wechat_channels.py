@@ -394,6 +394,45 @@ async def test_chain_http_status_body_records_error_body(monkeypatch):
     assert len(calls) == 3 and "error_body" in str(ei.value) and "400" in str(ei.value)
 
 
+async def test_chain_http_error_parse_failed_keeps_error_body_attribution(monkeypatch):
+    from app.services.providers.tikhub import EndpointHttpError
+    body = {
+        "code": 400,
+        "message": "missing media",
+        "data": {"id": OBJECT_ID, "object_type": 0},
+    }
+
+    async def error_body(self, name, path, params, per_timeout):
+        raise EndpointHttpError(name, 400, body)
+
+    monkeypatch.setattr(TikHubProvider, "_call_endpoint", error_body)
+    with pytest.raises(VideoNotFoundError) as ei:
+        await TikHubProvider().fetch_video_info("wechat_channels", OBJECT_ID, SHARE_URL)
+    text = str(ei.value)
+    assert "'decision': 'parse_failed'" in text
+    assert "'reason': 'error_body'" in text
+    assert "'http_status': 400" in text
+    assert "'upstream_message': 'missing media'" in text
+
+
+async def test_wechat_bool_object_type_is_mismatch_and_retries(monkeypatch):
+    payload = {"data": {"object_type": False, "id": "1"}}
+    assert WechatChannelsService.describe_failure(payload) == {
+        "reason": "object_type_mismatch",
+        "object_type_type": "bool",
+    }
+    assert WechatChannelsService.extract_data(payload) is None
+
+    provider, calls = _provider_with(monkeypatch, {"fetch_video_detail": payload})
+    await _nosleep(monkeypatch)
+    with pytest.raises(VideoNotFoundError) as ei:
+        await provider.fetch_video_info("wechat_channels", OBJECT_ID, SHARE_URL)
+    assert len(calls) == 3
+    text = str(ei.value)
+    assert text.count("'decision': 'retryable'") == 3
+    assert text.count("'object_type_type': 'bool'") == 3
+
+
 async def test_chain_desensitization_error_string_and_api(authed_client, monkeypatch):
     import copy
     import app.api.resolve as resolve_mod
