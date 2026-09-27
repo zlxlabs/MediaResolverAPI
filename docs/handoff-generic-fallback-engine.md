@@ -206,15 +206,15 @@ curl -s -G 'https://api.tikhub.io/api/v1/kuaishou/web/fetch_one_video' \
 
 ## 7. 部署与生产验证
 
-部署走 `docker-deploy` skill（先 build）。目标见 `docker/deploy_targets.json`：
-`fordeal:/home/lixing/docker/media-resolver-api`。
+部署走 `docker-deploy` skill（先 build）。目标部署目录由环境变量 `MEDIARESOLVERAPI_DEPLOY_DIR`
+提供（缺失即报错；真实路径不入仓）：
 
 ```bash
 # build + push ACR
-cd docker && bash push_to_acr.sh
+cd docker && MEDIARESOLVERAPI_DEPLOY_DIR=<deploy_dir> bash push_to_acr.sh
 # 服务器拉取重启
-scp docker/pull_and_deploy.sh fordeal:/home/lixing/docker/media-resolver-api/docker/
-ssh fordeal "cd /home/lixing/docker/media-resolver-api && bash docker/pull_and_deploy.sh"
+scp docker/pull_and_deploy.sh fordeal:<deploy_dir>/docker/
+ssh fordeal "cd <deploy_dir> && bash docker/pull_and_deploy.sh"
 ```
 
 **坑位：**
@@ -234,7 +234,7 @@ ssh fordeal "cd /home/lixing/docker/media-resolver-api && bash docker/pull_and_d
 ## 8. 环境与命令
 
 - Python 解释器：**`.venv/bin/python`**（项目根 `.venv`）。跑测试：`.venv/bin/python -m pytest -q`。
-- 项目根：`/home/zlx/projects/work/MediaResolverAPI`。
+- 项目根：`/path/to/MediaResolverAPI`。
 - 当前测试基线：**97 passed**（重构后不得减少）。
 - 大量命令/日志输出优先用 context-mode 的 `ctx_batch_execute`（避免污染上下文）。
 
