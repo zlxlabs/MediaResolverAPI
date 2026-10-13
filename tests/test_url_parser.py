@@ -179,3 +179,67 @@ class TestWechatChannelsIdentification:
         platform, vid = parser.parse_url(url)
         assert platform is None
         assert vid is None
+
+
+# X Space：/i/spaces/<13位字母数字> 路径形态，与推文 /status/<数字> 双向互斥（design 不变式 6）
+class TestTwitterSpaceIdentification:
+
+    SPACE_ID = "1AKEmvYqbrOKL"
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://x.com/i/spaces/1AKEmvYqbrOKL",
+            "https://www.x.com/i/spaces/1AKEmvYqbrOKL",
+            "https://twitter.com/i/spaces/1AKEmvYqbrOKL",
+            "https://mobile.twitter.com/i/spaces/1AKEmvYqbrOKL",
+        ],
+    )
+    def test_space_url_extracts_13_char_id(self, parser, url):
+        assert parser.parse_url(url) == ("twitter_space", self.SPACE_ID)
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://x.com/i/spaces/1AKEmvYqbrOKL/peek",
+            "https://x.com/i/spaces/1AKEmvYqbrOKL/",
+            "https://x.com/i/spaces/1AKEmvYqbrOKL?s=20",
+        ],
+    )
+    def test_space_url_tail_and_query_are_ignored(self, parser, url):
+        assert parser.parse_url(url) == ("twitter_space", self.SPACE_ID)
+
+    def test_space_url_is_not_parsed_as_tweet(self, parser):
+        """Space URL 不得落进 /status/ 提取器变成 twitter 平台。"""
+        platform, vid = parser.parse_url("https://x.com/i/spaces/1AKEmvYqbrOKL")
+        assert platform == "twitter_space"
+        assert platform != "twitter"
+
+    def test_tweet_url_is_not_parsed_as_space(self, parser):
+        """推文 URL 不得被 Space 提取器吃掉（双向互斥的另一侧）。"""
+        assert parser.parse_url("https://x.com/0xCodez/status/2098782845183410287") == (
+            "twitter",
+            "2098782845183410287",
+        )
+
+    @pytest.mark.parametrize(
+        "space_id",
+        ["1AKEmvYqbrOK", "1AKEmvYqbrOKLL", "1AKEmvYqbrOK_"],
+    )
+    def test_space_id_wrong_length_is_rejected(self, parser, space_id):
+        """非 13 位 ID 不是 Space 链接，也不得落进 status 提取器。"""
+        assert parser.parse_url(f"https://x.com/i/spaces/{space_id}") == (None, None)
+
+    def test_space_url_without_id_is_rejected(self, parser):
+        assert parser.parse_url("https://x.com/i/spaces/") == (None, None)
+
+    def test_space_path_on_other_domain_is_rejected(self, parser):
+        """/i/spaces/ 路径形态只在 x.com/twitter.com（含子域）生效。"""
+        url = "https://evil.example.com/i/spaces/1AKEmvYqbrOKL"
+        assert parser.parse_url(url) == (None, None)
+        assert parser.identify_platform(url) is None
+
+    def test_space_host_lookalike_is_rejected(self, parser):
+        """evil-x.com 这类形近域名不得靠后缀匹配混进来。"""
+        url = "https://evil-x.com/i/spaces/1AKEmvYqbrOKL"
+        assert parser.parse_url(url) == (None, None)

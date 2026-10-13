@@ -17,6 +17,10 @@ class URLParser:
     支持多个短视频平台的URL解析
     """
 
+    # X Space 平台标识；字面量全文仅此一处（Accept-Check: grep -c 计数为 1），
+    # 其余引用一律走常量。Space URL 在域名映射前分流，与 /status/ 提取器双向互斥。
+    TWITTER_SPACE_PLATFORM = "twitter_space"
+
     # 短链域名列表
     SHORT_URL_DOMAINS = {
         'v.douyin.com',      # 抖音短链
@@ -125,6 +129,8 @@ class URLParser:
         """
         if self._is_wechat_channels_url(url):
             return "wechat_channels"
+        if self._extract_space_id(url):
+            return self.TWITTER_SPACE_PLATFORM
         domain = extract_domain(url)
         return self._identify_platform(domain) if domain else None
 
@@ -137,6 +143,22 @@ class URLParser:
             return False
         path = parsed.path or ""
         return path == "/sph" or path.startswith("/sph/")
+
+    # Space ID 恒为 13 位字母数字（design 不变式 6），尾段 /peek 或斜杠不参与匹配。
+    _SPACE_PATH_PATTERN = re.compile(r"^/i/spaces/([0-9A-Za-z]{13})(?:/|$)")
+
+    @classmethod
+    def _extract_space_id(cls, url: str) -> Optional[str]:
+        """提取 X Space ID；仅 x.com/twitter.com（含子域）的 /i/spaces/ 路径形态。"""
+        host = (urlparse(url).hostname or "").lower()
+        if (
+            host != "x.com"
+            and host != "twitter.com"
+            and not host.endswith((".x.com", ".twitter.com"))
+        ):
+            return None
+        match = cls._SPACE_PATH_PATTERN.match(urlparse(url).path or "")
+        return match.group(1) if match else None
 
     def is_short_url(self, url: str) -> bool:
         """
@@ -183,6 +205,10 @@ class URLParser:
         Returns:
             Optional[str]: 视频ID
         """
+        # Space 与推文互斥：不进 extractors 表，按路径形态直接取 ID。
+        if platform == self.TWITTER_SPACE_PLATFORM:
+            return self._extract_space_id(url)
+
         extractors = {
             'douyin': self._extract_douyin_id,
             'tiktok': self._extract_tiktok_id,
