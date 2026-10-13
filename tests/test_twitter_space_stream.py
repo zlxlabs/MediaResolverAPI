@@ -14,6 +14,7 @@ import subprocess
 from pathlib import Path
 from urllib.parse import urljoin
 
+import httpx
 import pytest
 
 import app.api.stream as stream_mod
@@ -107,17 +108,24 @@ class FakeProcess:
         self.returncode = exit_code
         self.reap_code = reap_code
         self.kill_count = 0
+        self._exited = asyncio.Event()
+        if exit_code is not None:
+            self._exited.set()
 
     def kill(self) -> None:
         self.kill_count += 1
         self.returncode = -9
+        self._exited.set()
         self.stdout.set_eof()
         self.stderr.set_eof()
 
     async def wait(self, timeout: float | None = None) -> int | None:
-        """模拟 child-watcher 收尸：wait 后拿到确定退出码。"""
-        if self.returncode is None and self.reap_code is not None:
-            self.returncode = self.reap_code
+        """模拟真实 wait：未收尸且无确定退出码时阻塞（直到 kill/reap）。"""
+        if self.returncode is None:
+            if self.reap_code is not None:
+                self.returncode = self.reap_code
+            else:
+                await self._exited.wait()
         return self.returncode
 
 
@@ -422,6 +430,64 @@ class TestSegmentFailureAborts:
         resp = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
         assert "pscp.tv" not in resp.text
 
+    def test_zero_byte_segment_aborts_response(
+        self, authed_client, spawn_record, monkeypatch
+    ):
+        """200 + 空体段 = 段失败（round-6 major）：ADTS 零字节不可能是合法内容。"""
+        _patch_provider(monkeypatch, [_meta()])
+        _patch_segments(monkeypatch, [SEG_1, SEG_2])
+
+        async def fake_exec(*cmd, **kwargs):
+            spawn_record.append(cmd)
+            return FakeProcess(out_chunks=[b"f1", b"f2"], exit_code=0)
+
+        monkeypatch.setattr(stream_mod.asyncio, "create_subprocess_exec", fake_exec)
+
+        async def chunks(url, headers, chunk_size, client=None):
+            if url == SEG_1:
+                yield b"ok1"
+            else:
+                raise stream_mod.SegmentFetchError("segment HTTP 200 with empty body")
+
+        monkeypatch.setattr(stream_mod, "_stream_url_chunks", chunks)
+        try:
+            resp = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
+        except Exception as exc:
+            assert "empty body" in str(exc)
+            return
+        # 若返回了响应，绝不允许是「200 + 完整体」的假成功形态
+        assert resp.status_code != 200 or resp.content != b"f1f2"
+
+
+class TestEmptySegmentGuard:
+    """直测真实 _stream_url_chunks 的空体守卫（round-6 major）：200 + 0 字节 = 段失败。
+
+    用 httpx.MockTransport 驱动真实现，不经 monkeypatch 替身。
+    """
+
+    def _client(self, body: bytes):
+        return httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, content=body))
+        )
+
+    @pytest.mark.asyncio
+    async def test_zero_byte_200_rejected(self):
+        async with self._client(b"") as client:
+            gen = stream_mod._stream_url_chunks("https://s/1.aac", {}, 65536, client)
+            with pytest.raises(stream_mod.SegmentFetchError, match="empty body"):
+                async for _ in gen:
+                    pass
+
+    @pytest.mark.asyncio
+    async def test_nonempty_200_passes(self):
+        async with self._client(b"adtsdata") as client:
+            got = []
+            async for chunk in stream_mod._stream_url_chunks(
+                "https://s/1.aac", {}, 65536, client
+            ):
+                got.append(chunk)
+            assert b"".join(got) == b"adtsdata"
+
 
 class TestForwardLoopLifecycle:
     """直接驱动转发生成器，验证断连清理与双向 stall（与视频号 _iter_windows 测试同法）。"""
@@ -518,6 +584,23 @@ class TestForwardLoopLifecycle:
         with pytest.raises(RuntimeError, match="before stream completion"):
             await agen.__anext__()
         assert process.returncode == 1
+
+    @pytest.mark.asyncio
+    async def test_reap_timeout_unknown_state_fails_loud(self, monkeypatch):
+        """收尸不确定（returncode 仍 None）绝不放行为成功：超时即 kill + 上抛
+        （round-6 major correctness-ffmpeg-partial-output-success）。"""
+        monkeypatch.setattr(stream_mod, "_REAP_TIMEOUT_SECONDS", 0.1)
+        process = FakeProcess(out_chunks=[b"half"], exit_code=None, reap_code=None)
+        sink = bytearray()
+        drain, writer = await self._tasks(monkeypatch, process, sink)
+        agen = stream_mod._forward_ffmpeg_output(
+            process, writer, drain, b"first", sink, SPACE_ID
+        )
+        assert await agen.__anext__() == b"first"
+        assert await agen.__anext__() == b"half"
+        with pytest.raises(RuntimeError, match="did not exit"):
+            await agen.__anext__()
+        assert process.kill_count == 1
 
     @pytest.mark.asyncio
     async def test_read_hang_times_out_kills_and_raises(self, monkeypatch):

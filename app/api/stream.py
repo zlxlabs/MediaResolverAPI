@@ -615,6 +615,10 @@ class SegmentFetchError(RuntimeError):
     """段/播放列表抓取失败（message 已脱敏）。"""
 
 
+# 收尸等待上界：EOF 后进程应早已退出，5s 仍无确定退出码即按失败处理。
+_REAP_TIMEOUT_SECONDS = 5
+
+
 def _http_timeout() -> httpx.Timeout:
     return httpx.Timeout(
         connect=settings.HTTP_TIMEOUT_SECONDS,
@@ -683,11 +687,17 @@ async def _stream_url_chunks(
         async with client.stream("GET", url) as resp:
             if resp.status_code >= 400:
                 raise SegmentFetchError(f"segment HTTP {resp.status_code}")
+            sent = 0
             async for chunk in resp.aiter_bytes(chunk_size):
+                sent += len(chunk)
                 yield chunk
     finally:
         if owns_client:
             await client.aclose()
+    if sent == 0:
+        # ADTS 段零字节不可能是合法内容：200 + 空体按段失败处理（round-6 major），
+        # 与 404 同路径（pump 杀 ffmpeg 上抛），绝不静默跳过。
+        raise SegmentFetchError("segment HTTP 200 with empty body")
 
 
 async def _pump_segments(
@@ -821,12 +831,22 @@ async def _forward_ffmpeg_output(
         await drain
         await writer
         if process.returncode is None:
-            # stdout EOF 即进程已退出；显式等收尸拿确定退出码，
-            # 防 child-watcher 未跑完时 None 漏过检查把截断当成功。
+            # stdout EOF 即进程应已退出；显式等收尸拿确定退出码。
+            # 收尸超时即 kill + 上抛：未知状态绝不当成功（round-6 major）。
             try:
-                await asyncio.wait_for(process.wait(), timeout=5)
+                await asyncio.wait_for(process.wait(), timeout=_REAP_TIMEOUT_SECONDS)
             except asyncio.TimeoutError:
-                pass
+                if process.returncode is None:
+                    process.kill()
+                logger.error(
+                    "twitter_space stream ffmpeg reap timeout space_id={} sent={}",
+                    space_id,
+                    sent,
+                )
+                raise RuntimeError(
+                    "ffmpeg did not exit after stream completion; "
+                    "output is incomplete"
+                )
         if process.returncode not in (0, None):
             logger.error(
                 "twitter_space stream ffmpeg exited code={} space_id={} sent={} tail={}",
