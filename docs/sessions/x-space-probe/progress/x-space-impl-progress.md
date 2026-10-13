@@ -41,3 +41,10 @@
 - 本段结论：PR #43 gate primary（codex-sub）给 verdict=fail：3 major + 1 minor。处置：#4 raw_data 泄 playlist 进缓存（minor，实为锁定决策 4「绝不持久化」违规——cache.py:144 to_dict 落库含 raw_data）→ 修复：映射层递归脱敏所有字符串值（实测 requested_downloads[].url 也携带 playlist，字段枚举不可靠）；#1 中途异常退出静默收尾成 200 截断流（major）→ 修复：EOF 后 returncode 非 0 即抛 RuntimeError 中断响应（客户端看到传输中断而非假成功）；#2 读挂死永久占并发槽（major）→ 修复：stdout 读包 wait_for(HTTP_TIMEOUT_SECONDS)，超时 kill+抛错释放槽（复用既有上游超时旋钮，第二消费者成立）；#3 yt-dlp wait_for 超时后 to_thread 线程不可杀、持续卡顿会堆积（major）→ 与锁定决策 2「进程内库调用」直接冲突（子进程化才能真杀），上报主脑裁决，不自行改。修复后全量 497 passed；修复后真实环境复验：resolve 2.0s / 1MiB 4.4s / ffprobe aac-mp4 / 无 ffmpeg 残留 / 日志零泄漏。
 - 关键决策与已否决方案：否决「按字段枚举脱敏」（requested_downloads 逃逸）；否决「读超时新增配置」（复用 HTTP_TIMEOUT_SECONDS）；否决「#3 改子进程」（锁定决策 2，只上报）。
 - 下一步唯一动作：提交推送，等新 head 的 gate 结论，写报告。
+
+## M7 gate primary 二、三轮处置与收敛边界
+
+- 当前阶段：implementing（M7 完成，等 round-4 gate）
+- 本段结论：round-2（2032c0f）三 findings 全修：专用有界 ThreadPoolExecutor(4)（进程内库调用锁定内，隔离默认 executor 防 getaddrinfo 全死）、收尸竞态闭合（EOF 后显式 wait 拿确定退出码，测试锁定）、fixture 换合成 pscp.tv 形态凭证（SapzA 令牌零残留，红验复跑 1 注入→5 红→还原→30 绿）。round-3（6fd3682）：security-twitter-space-auth-bypass 为误报（router 级 verify_api_key 同文件顶部，新增显式 401 测试钉死）；correctness-ffmpeg-partial-output-success 重标——None 竞态与异常退出均已上抛，唯一残余「exit 0 但内容截断」无本地信号可判（D4 无时长元数据），已在判据处注释声明；thread-exhaustion 降级 minor（承认隔离，剩余为锁定决策 2 内已知限界）；committed-credential 转指 probe-report.md——不在本卡可写范围，URL 早已过期，归主脑裁决（保留历史证据 or 后续清洗）。
+- 关键决策与已否决方案：否决「给 exit-0 截断加检测」（无对账信号，只能假精确）；否决「修 probe-report.md」（不在 Scope-Globs，历史证据归主脑）。
+- 下一步唯一动作：等 round-4 gate 结论；若同泛化 finding 再现且无新事实，收敛停止、报告上报主脑裁决。
