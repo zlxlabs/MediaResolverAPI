@@ -49,7 +49,7 @@ _LOGIN_MARKERS = (
 _PLAYLIST_URL_RE = re.compile(r"https?://\S*pscp\.tv\S*")
 
 
-def _redact_playlist_url(text: str) -> str:
+def redact_playlist_url(text: str) -> str:
     """短命 playlist URL 不得进任何错误消息/API 响应（design 不变式 2）。"""
     return _PLAYLIST_URL_RE.sub("[redacted-playlist-url]", text)
 
@@ -113,7 +113,7 @@ class YtdlpProvider(BaseProvider):
 
     @staticmethod
     def _classify_download_error(message: str) -> ProviderError:
-        sanitized = _redact_playlist_url(message)
+        sanitized = redact_playlist_url(message)
         lowered = sanitized.lower()
         if any(marker in lowered for marker in _UNAVAILABLE_MARKERS):
             return VideoNotFoundError(f"twitter space replay unavailable: {sanitized}")
