@@ -13,6 +13,7 @@ from .pinterest import PinterestService
 from .facebook import FacebookService
 from .wechat_channels import WechatChannelsService
 from .twitter import TwitterService
+from .twitter_space import TwitterSpaceService
 
 __all__ = [
     "VideoInfo",
@@ -27,4 +28,5 @@ __all__ = [
     "FacebookService",
     "WechatChannelsService",
     "TwitterService",
+    "TwitterSpaceService",
 ]

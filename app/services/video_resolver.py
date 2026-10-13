@@ -16,8 +16,10 @@ from .providers import (
     TerminalError,
 )
 from .providers.base import AudioNotAvailableError
+from .providers.ytdlp import YtdlpProvider
 from .adapters import TikHubAdapter, CobaltAdapter
 from .platforms.base import VideoInfo
+from .platforms.twitter_space import TwitterSpaceService
 from ..core.config import settings
 
 
@@ -50,6 +52,7 @@ class VideoResolver:
         # 初始化提供者
         self.tikhub_provider = TikHubProvider()
         self.cobalt_provider = CobaltProvider()
+        self.ytdlp_provider = YtdlpProvider()
 
         # 初始化适配器
         self.tikhub_adapter = TikHubAdapter(
@@ -57,6 +60,8 @@ class VideoResolver:
             api_base=settings.TIKHUB_API_BASE
         )
         self.cobalt_adapter = CobaltAdapter()
+        # ytdlp 只服务 twitter_space，平台映射单条，不值得为它建独立 Adapter 类。
+        self.ytdlp_service = TwitterSpaceService(api_key="", api_base="")
 
         # 定义每个平台的提供者优先级
         # 从配置文件读取，如果配置文件中没有，则使用默认配置
@@ -79,6 +84,7 @@ class VideoResolver:
         provider_map = {
             "tikhub": self.tikhub_provider,
             "cobalt": self.cobalt_provider,
+            "ytdlp": self.ytdlp_provider,
         }
 
         # 默认配置
@@ -95,6 +101,8 @@ class VideoResolver:
             "xiaohongshu": [self.tikhub_provider],
             "youtube": [self.tikhub_provider, self.cobalt_provider],
             "twitter": [self.tikhub_provider, self.cobalt_provider],
+            # X Space 回放：yt-dlp 单源（guest token 路径，无 cookie），无兑底。
+            "twitter_space": [self.ytdlp_provider],
 
             # 抖音和快手可能不被 Cobalt 支持，只使用 TikHub
             "douyin": [self.tikhub_provider],
@@ -114,6 +122,7 @@ class VideoResolver:
             "kuaishou": settings.PROVIDER_PRIORITY_KUAISHOU,
             "wechat_channels": settings.PROVIDER_PRIORITY_WECHAT_CHANNELS,
             "twitter": settings.PROVIDER_PRIORITY_TWITTER,
+            "twitter_space": settings.PROVIDER_PRIORITY_TWITTER_SPACE,
         }
 
         for platform, priority_config in platform_config_map.items():
@@ -367,6 +376,13 @@ class VideoResolver:
                     original_url,
                     download_mode=download_mode,
                 )
+            elif provider_name == "ytdlp":
+                video_info = self.ytdlp_service._parse_response(
+                    raw_data, quality=quality
+                )
+                if video_info:
+                    video_info.provider = "ytdlp"
+                return video_info
             else:
                 logger.error(f"Unknown provider: {provider_name}")
                 return None
