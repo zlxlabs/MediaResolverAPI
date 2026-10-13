@@ -714,6 +714,13 @@ async def _forward_ffmpeg_output(
             yield chunk
         # 正常 EOF：等 stderr 排干（顺带取回异常退出诊断尾巴）
         await drain
+        if process.returncode is None:
+            # stdout EOF 即进程已退出；显式等收尸拿确定退出码，
+            # 防 child-watcher 未跑完时 None 漏过检查把截断当成功。
+            try:
+                await asyncio.wait_for(process.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                pass
         if process.returncode not in (0, None):
             logger.error(
                 "twitter_space stream ffmpeg exited code={} space_id={} sent={} tail={}",

@@ -8,6 +8,7 @@ yt-dlp 提供者
 
 import asyncio
 import re
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict
 
 from yt_dlp import YoutubeDL
@@ -48,6 +49,13 @@ _LOGIN_MARKERS = (
 
 _PLAYLIST_URL_RE = re.compile(r"https?://\S*pscp\.tv\S*")
 
+# 提取专用有界线程池：wait_for 超时杀不掉已运行的线程（Python 线程不可终止），
+# 卡住的提取会占用 worker 直至 socket_timeout 自尽。专用池把泄漏封在 twitter_space
+# 内，避免拖死 loop 默认 executor（asyncio.getaddrinfo 同池，拖死即全服务不可用）。
+# 单消费者、无新配置项：有界性本身就是要买的性质（gate primary
+# reliability-ytdlp-timeout-thread-exhaustion）。
+_EXTRACT_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ytdlp-extract")
+
 
 def redact_playlist_url(text: str) -> str:
     """短命 playlist URL 不得进任何错误消息/API 响应（design 不变式 2）。"""
@@ -75,8 +83,10 @@ class YtdlpProvider(BaseProvider):
 
         timeout = settings.YTDLP_EXTRACT_TIMEOUT_SECONDS
         try:
+            loop = asyncio.get_running_loop()
             info = await asyncio.wait_for(
-                asyncio.to_thread(self._extract_sync, original_url), timeout=timeout
+                loop.run_in_executor(_EXTRACT_EXECUTOR, self._extract_sync, original_url),
+                timeout=timeout,
             )
         except asyncio.TimeoutError:
             raise YtdlpExtractionError(

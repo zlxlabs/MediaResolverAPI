@@ -59,10 +59,12 @@ class FakeProcess:
         err_chunks: list[bytes] | None = None,
         exit_code: int | None = 0,
         hang: bool = False,
+        reap_code: int | None = None,
     ):
         self.stdout = FakeStream(out_chunks, hang=hang)
         self.stderr = FakeStream(err_chunks or [], hang=hang)
         self.returncode = exit_code
+        self.reap_code = reap_code
         self.kill_count = 0
 
     def kill(self) -> None:
@@ -70,6 +72,12 @@ class FakeProcess:
         self.returncode = -9
         self.stdout.set_eof()
         self.stderr.set_eof()
+
+    async def wait(self, timeout: float | None = None) -> int | None:
+        """模拟 child-watcher 收尸：wait 后拿到确定退出码。"""
+        if self.returncode is None and self.reap_code is not None:
+            self.returncode = self.reap_code
+        return self.returncode
 
 
 def _patch_provider(monkeypatch, payloads: list[dict]) -> list[str]:
@@ -275,6 +283,23 @@ correctness-ffmpeg-partial-output-success）。"""
         assert await agen.__anext__() == b"half"
         with pytest.raises(RuntimeError, match="before stream completion"):
             await agen.__anext__()
+
+    @pytest.mark.asyncio
+    async def test_returncode_none_race_still_fails_loud(self):
+        """收尸竞态：stdout EOF 但 child-watcher 未跑完（returncode 仍 None）时，
+        必须先等 wait 拿确定退出码再判定，不许把截断流当成功收尾
+        （gate primary correctness-ffmpeg-partial-output-success 第二轮）。"""
+        process = FakeProcess(out_chunks=[b"half"], exit_code=None, reap_code=1)
+        sink = bytearray()
+        drain = await self._drain_task(process, sink)
+        agen = stream_mod._forward_ffmpeg_output(
+            process, drain, b"first", sink, SPACE_ID
+        )
+        assert await agen.__anext__() == b"first"
+        assert await agen.__anext__() == b"half"
+        with pytest.raises(RuntimeError, match="before stream completion"):
+            await agen.__anext__()
+        assert process.returncode == 1
 
     @pytest.mark.asyncio
     async def test_read_hang_times_out_kills_and_raises(self, monkeypatch):
