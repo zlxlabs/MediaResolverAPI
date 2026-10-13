@@ -27,3 +27,10 @@
 - 本段结论：`GET /api/stream/twitter_space/{space_id}` 落地——共享并发槽（`_stream_slot_cm` 单源 429，微信/Space 双端点同 `MAX_CONCURRENT_STREAMS`）、每次请求现取 playlist（测试锁双请求两提取）、ffmpeg argv 锁定（-c copy/-bsf:a aac_adtstoasc/-movflags frag_keyframe+empty_moov/pipe:1 + 按声明传 -user_agent/-headers）、首块预读把 ffmpeg 瞬时失败升级为 502、断连同步 kill 不留尸（直接驱动生成器断言 kill_count==1）。全量 494 passed。
 - 关键决策与已否决方案：否决「await process.wait() 收尸」——取消上下文中 await 不可靠，改为同步 kill+cancel+close（收尸交给 asyncio 子进程传输层 SIGCHLD 自动完成）；预读首块换取错误状态码可见性（否则 200 空体）。stderr 持续排干防 64KB 管道卡死，尾部仅入日志且经 redact（pscp.tv 不进日志）。
 - 下一步唯一动作：M5 README + 真实环境三步验收（起服务→resolve→下载≥1MiB→ffprobe）。
+
+## M5 真实环境验收与两处修复
+
+- 当前阶段：implementing（M5 完成，待提交验收）
+- 本段结论：真实环境三步全过。关键发现：**audio-only fragmented MP4 必须显式给切片参数**——`frag_keyframe` 只认视频关键帧，实测 ffmpeg 消费 HLS 正常（30x 速）但输出停在 32B moov 不吐字节（D3 探针证据的盲区：跑完整进程收尾才写盘，掩盖了增量不吐字）。修复：`-frag_duration 4000000`（仍为 mp4 容器，不换锁定决策）；第二修复：`_cleanup_ffmpeg` 不可调 StreamReader.close()（不存在该方法，首测时炸 AttributeError 且把响应挂在 more_body=True）。修复后实测：resolve 2.748s（200，twitter_space/audio，无 pscp.tv）；下载 1 MiB 墙钟 7.0s；ffprobe 显示 aac/48000Hz/2ch、容器 mov,mp4,m4a；断连后服务端无 ffmpeg 残留；服务日志 pscp.tv 零命中。audio 模式 resolve 亦通。
+- 关键决策与已否决方案：`-frag_duration` 是锁定决策 4 同容器下的 muxer 参数补全（卡面假设节预留的「实测发现兼容性问题」分支），非容器更换；否决 matroska。否决在 finally 里 await 收尸——改同步 kill+cancel（见 M4）。
+- 下一步唯一动作：提交 M5（README + 修复），跑全量套件与 Accept-Check，写报告。

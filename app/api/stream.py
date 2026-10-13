@@ -645,6 +645,10 @@ async def _spawn_ffmpeg(playlist_url: str, headers: dict) -> asyncio.subprocess.
         "mp4",
         "-movflags",
         "frag_keyframe+empty_moov",
+        # audio-only 下 frag_keyframe 永不触发（无视频关键帧），不显式给切片参数
+        # 会把整场音频堆在 muxer 缓冲里不吐字节（实测卡 32B moov，2026-10-14）。
+        "-frag_duration",
+        "4000000",
         "pipe:1",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -662,18 +666,15 @@ async def _drain_stderr(stderr, sink: bytearray) -> None:
 
 
 def _cleanup_ffmpeg(process: asyncio.subprocess.Process, drain: asyncio.Task) -> None:
-    """同步清理：kill 未退出的 ffmpeg、取消 stderr 排干、关闭管道。
+    """同步清理：kill 未退出的 ffmpeg、取消 stderr 排干。
 
     全程无 await——生成器的 finally 会在 GeneratorExit/CancelledError 上下文中执行；
+    管道传输层随进程退出自动关闭（StreamReader 没有 close，不可手关）；
     进程收尸由 asyncio 子进程传输层在 SIGCHLD 后自动完成，不留尸。
     """
     if process.returncode is None:
         process.kill()
     drain.cancel()
-    if process.stdout is not None:
-        process.stdout.close()
-    if process.stderr is not None:
-        process.stderr.close()
 
 
 async def _forward_ffmpeg_output(

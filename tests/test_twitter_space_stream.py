@@ -33,12 +33,11 @@ def _meta() -> dict:
 
 
 class FakeStream:
-    """按序吐 chunk，耗尽后挂起直到 EOF 被置位（模拟管道语义）。"""
+    """按序吐 chunk，耗尽后挂起直到 EOF 被置位（模拟 StreamReader 管道语义，无 close）。"""
 
     def __init__(self, chunks: list[bytes], *, hang: bool = False):
         self._chunks = list(chunks)
         self._eof = asyncio.Event()
-        self.closed = False
         if not hang:
             self._eof.set()
 
@@ -49,10 +48,6 @@ class FakeStream:
         return b""
 
     def set_eof(self) -> None:
-        self._eof.set()
-
-    def close(self) -> None:
-        self.closed = True
         self._eof.set()
 
 
@@ -120,6 +115,8 @@ def _assert_common_argv(cmd: tuple, playlist_url: str) -> None:
         "mp4",
         "-movflags",
         "frag_keyframe+empty_moov",
+        "-frag_duration",
+        "4000000",
         "pipe:1",
     )
 
@@ -247,7 +244,6 @@ class TestForwardLoopLifecycle:
         await asyncio.sleep(0.05)
         assert process.kill_count == 1
         assert drain.cancelled()
-        assert process.stdout.closed and process.stderr.closed
 
     @pytest.mark.asyncio
     async def test_normal_eof_does_not_kill_and_logs_no_error(self):
@@ -263,4 +259,3 @@ class TestForwardLoopLifecycle:
         assert collected == [b"first", b"rest"]
         assert process.kill_count == 0
         assert drain.done() and not drain.cancelled()
-        assert process.stdout.closed and process.stderr.closed
