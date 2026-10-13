@@ -32,7 +32,7 @@ risk-tier: internal
 > - **YouTube**：`web/get_video_info（预解析直链）→ web/get_video_info_v2（streamingData 合流）`；解析器自适应两套 schema。有 Cobalt 兜底。
 > - **微信视频号**：TikHub 单源单端点（`wechat_channels/v2/fetch_video_detail`），无 Cobalt 兜底，故链内不判终态。瞬态 `retryable` 在单端点上重试，最多 3 次尝试、退避 0.3s；`attempts` 带脱敏原因（`data_missing` / `object_type_mismatch` / `error_body`）。平台标识是 `wechat_channels`（不是 `wechat`）。
 > - **X (Twitter)**：TikHub 单端点（`twitter/web/fetch_tweet_detail`）按 status ID 获取元数据，失败后降级 Cobalt；只返回本帖最高码率 MP4，忽略 HLS 与引用帖视频。平台标识是 `twitter`（同时支持 `x.com` 与 `twitter.com`）。
-> - **X Space**：yt-dlp 进程内提取（guest token 路径，无 cookie），仅回放（`was_live`）；`video_url` 指向本服务 ffmpeg 拼装的流式端点。平台标识是 `twitter_space`（与推文 `twitter` 互斥）。详见「X Space 回放下载」节。
+> - **X Space**：yt-dlp 进程内提取（guest token 路径，无 cookie），仅回放（`was_live`/`post_live`）；`video_url` 指向本服务 ffmpeg 拼装的流式端点。平台标识是 `twitter_space`（与推文 `twitter` 互斥）。详见「X Space 回放下载」节。
 
 ---
 
@@ -44,7 +44,7 @@ risk-tier: internal
 2. **无 Range / 断点续传。** 流式响应无 `Content-Length`、不支持 `Range`，进度条不可拖动；中断后只能整段重新下载。
 3. **时长未知。** X 的 Space 元数据不提供时长（`data.duration` 恒为 `null`），文件大小无法预知，只能边下边收。
 4. **首次字节延迟约 4~5 秒。** 每次下载都要先现场提取一次回放清单（约 2~3 秒，受 `YTDLP_EXTRACT_TIMEOUT_SECONDS` 约束），再加 ffmpeg 连接与首片拼装；之后按约 10~30 倍速持续出字节（实测 1 MiB 约 7 秒含首延迟）。清单 URL 短命，绝不缓存、绝不出现在任何响应里。
-5. **只支持回放，且只有约 30 天。** 正在直播或未开播的 Space 会明确报错（`live_status != was_live`）；X 只保留回放约 30 天，过期后 resolve 返回明确错误、下载端点返回 404，服务不做任何兑底取回。
+5. **只支持回放，且只有约 30 天。** 正在直播或未开播的 Space 会明确报错（`live_status` 为 `is_live`/`is_upcoming`/缺失；`post_live` 即已结束可回放）；X 只保留回放约 30 天，过期后 resolve 返回明确错误、下载端点返回 404，服务不做任何兑底取回。
 6. **并发与视频号共用上限。** 流式下载共用 `MAX_CONCURRENT_STREAMS`（默认 4），超限返回 429。
 7. **仅支持 x.com / twitter.com 直链**，不支持 t.co 短链包裹的 Space 链接。
 

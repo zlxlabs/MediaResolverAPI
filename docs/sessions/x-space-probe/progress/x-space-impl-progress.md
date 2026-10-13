@@ -48,3 +48,10 @@
 - 本段结论：round-2（2032c0f）三 findings 全修：专用有界 ThreadPoolExecutor(4)（进程内库调用锁定内，隔离默认 executor 防 getaddrinfo 全死）、收尸竞态闭合（EOF 后显式 wait 拿确定退出码，测试锁定）、fixture 换合成 pscp.tv 形态凭证（SapzA 令牌零残留，红验复跑 1 注入→5 红→还原→30 绿）。round-3（6fd3682）：security-twitter-space-auth-bypass 为误报（router 级 verify_api_key 同文件顶部，新增显式 401 测试钉死）；correctness-ffmpeg-partial-output-success 重标——None 竞态与异常退出均已上抛，唯一残余「exit 0 但内容截断」无本地信号可判（D4 无时长元数据），已在判据处注释声明；thread-exhaustion 降级 minor（承认隔离，剩余为锁定决策 2 内已知限界）；committed-credential 转指 probe-report.md——不在本卡可写范围，URL 早已过期，归主脑裁决（保留历史证据 or 后续清洗）。
 - 关键决策与已否决方案：否决「给 exit-0 截断加检测」（无对账信号，只能假精确）；否决「修 probe-report.md」（不在 Scope-Globs，历史证据归主脑）。
 - 下一步唯一动作：等 round-4 gate 结论；若同泛化 finding 再现且无新事实，收敛停止、报告上报主脑裁决。
+
+## M8 续派（dlg-20261013-194528-7c1867）：段抓取收归服务端 + post_live 放行
+
+- 当前阶段：implementing（代码完成，真实环境重试中）
+- 本段结论：修复 B：live_status 判据改 `not in ("was_live", "post_live")`，post_live 测试反转为放行。修复 A：服务端现取并解析 m3u8（master 跟首个 variant、urljoin 相对解析、空表报错）→ ffmpeg 改 `-f aac -i pipe:0`（ffmpeg 的 ADTS 解复用器名为 aac，首测 `-f adts` 报 Unknown input format 即被预读 502 路径抓住）→ 服务端 httpx 逐段抓写 stdin（读超时 HTTP_TIMEOUT_SECONDS，任何段失败杀 ffmpeg 上抛）→ 全段写完关 stdin，exit≠0 上抛保留。完整性不变式「响应正常收尾 ⇔ 全部段成功且 ffmpeg exit 0」由 4 个生命周期测试锁定（段失败中断/异常退出/收尸竞态/双向 stall）。实现期抓到两处：_spawn_ffmpeg 漏传 stdin=PIPE（spawn_record 的 kwargs 断言当场抓住）；测试假 resolver 绕过空表检查后补了端点守卫。全量 510 passed；本地真实管道验证（lavfi 生成 ADTS → -f aac pipe:0 → fMP4 输出 ffprobe aac/mp4）通过。
+- 关键决策与已否决方案：否决「段列表字段枚举脱敏」沿用递归脱敏；否决「m3u8 解析引第三方库」（标准库 urljoin + 手写行过滤，卡面禁止新依赖）；写侧 stall 由读侧超时兼管（ffmpeg 停止消费 → stdout 停止产出 → 读超时触发清理，不再单设写超时旋钮）。
+- 下一步唯一动作：真实环境三步重跑（网络到 x.com 今晚抖动：SSL EOF/30s 超时/无 formats 混合出现，后台每 3 分钟重试）；成则取证提交，持续失败则按卡面预案报 blocked 上行。

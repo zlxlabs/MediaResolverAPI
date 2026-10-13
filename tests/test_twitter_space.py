@@ -78,12 +78,12 @@ class TestYtdlpProvider:
         with pytest.raises(SpaceNotReplayError, match="is_live"):
             await _fetch(YtdlpProvider())
 
-    async def test_post_live_space_is_rejected_per_locked_design(self, monkeypatch):
-        """yt-dlp 的 timedout 态（post_live）按 design 字面判据同样拒绝；已上报主脑裁决。"""
+    async def test_post_live_space_is_replayable_per_ruling(self, monkeypatch):
+        """post_live（timedout）即已结束可回放：放行（design 非目标段 2026-10-14 修正）。"""
         payload = _meta() | {"live_status": "post_live"}
         monkeypatch.setattr(YtdlpProvider, "_extract_sync", lambda self, url: payload)
-        with pytest.raises(SpaceNotReplayError):
-            await _fetch(YtdlpProvider())
+        info = await _fetch(YtdlpProvider())
+        assert info["live_status"] == "post_live"
 
     async def test_missing_live_status_is_rejected(self, monkeypatch):
         payload = _meta()

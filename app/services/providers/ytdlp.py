@@ -101,8 +101,9 @@ class YtdlpProvider(BaseProvider):
             )
 
         live_status = info.get("live_status")
-        if live_status != "was_live":
-            # design 非目标：live_status != "was_live" 一律明确报错（含缺失）。
+        if live_status not in ("was_live", "post_live"):
+            # design 非目标（2026-10-14 主脑修正）：post_live（timedout）即已结束
+            # 可回放；is_live/未开播/缺失 一律明确报错（含缺失）。
             raise SpaceNotReplayError(
                 f"twitter space {video_id} is not a replay "
                 f"(live_status={live_status if live_status is not None else 'missing'})"
