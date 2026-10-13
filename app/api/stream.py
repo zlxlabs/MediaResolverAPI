@@ -827,9 +827,29 @@ async def _forward_ffmpeg_output(
                 break
             sent += len(chunk)
             yield chunk
-        # 正常 EOF：等 stderr 排干与段泵任务收尾（段失败在此上抛）
-        await drain
-        await writer
+        # 正常 EOF：等 stderr 排干与段泵收尾——均有界，未知状态不当成功
+        try:
+            await asyncio.wait_for(drain, timeout=_REAP_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            if process.returncode is None:
+                process.kill()
+            logger.error(
+                "twitter_space stream stderr drain hung space_id={} sent={}",
+                space_id,
+                sent,
+            )
+            raise RuntimeError("ffmpeg stderr drain did not finish after stream end")
+        try:
+            await asyncio.wait_for(writer, timeout=settings.HTTP_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            if process.returncode is None:
+                process.kill()
+            logger.error(
+                "twitter_space stream segment pump hung space_id={} sent={}",
+                space_id,
+                sent,
+            )
+            raise RuntimeError("segment pump did not finish after stream end")
         if process.returncode is None:
             # stdout EOF 即进程应已退出；显式等收尸拿确定退出码。
             # 收尸超时即 kill + 上抛：未知状态绝不当成功（round-6 major）。

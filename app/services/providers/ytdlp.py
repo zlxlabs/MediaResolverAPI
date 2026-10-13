@@ -8,6 +8,7 @@ yt-dlp 提供者
 
 import asyncio
 import re
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict
 
@@ -56,6 +57,12 @@ _PLAYLIST_URL_RE = re.compile(r"https?://\S*pscp\.tv\S*")
 # reliability-ytdlp-timeout-thread-exhaustion）。
 _EXTRACT_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ytdlp-extract")
 
+# 提交门闩：同时「运行中+排队中」的提取任务总数上界（2×workers）。
+# ThreadPoolExecutor 自带队列无界——持续超时的请求会无限堆队列拖爆内存
+# （gate primary round-7 major）。门闩满时新请求立即 502 fail fast；
+# 许可在线程侧释放（wait_for 超时后线程仍在跑，许可仍应被占住）。
+_EXTRACT_GATE = threading.Semaphore(8)
+
 
 def redact_playlist_url(text: str) -> str:
     """短命 playlist URL 不得进任何错误消息/API 响应（design 不变式 2）。"""
@@ -82,10 +89,16 @@ class YtdlpProvider(BaseProvider):
             raise ProviderError(f"ytdlp provider does not support platform: {platform}")
 
         timeout = settings.YTDLP_EXTRACT_TIMEOUT_SECONDS
+        if not _EXTRACT_GATE.acquire(blocking=False):
+            raise ProviderError(
+                "ytdlp extraction backlog full; retry later"
+            )
         try:
             loop = asyncio.get_running_loop()
             info = await asyncio.wait_for(
-                loop.run_in_executor(_EXTRACT_EXECUTOR, self._extract_sync, original_url),
+                loop.run_in_executor(
+                    _EXTRACT_EXECUTOR, self._extract_with_release, original_url
+                ),
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
@@ -109,6 +122,13 @@ class YtdlpProvider(BaseProvider):
                 f"(live_status={live_status if live_status is not None else 'missing'})"
             )
         return info
+
+    def _extract_with_release(self, url: str) -> Any:
+        """线程侧包装：提取结束（含超时后线程仍在跑的情形）释放提交门闩。"""
+        try:
+            return self._extract_sync(url)
+        finally:
+            _EXTRACT_GATE.release()
 
     def _extract_sync(self, url: str) -> Any:
         """同步提取，经 asyncio.to_thread 跑在线程池；不落盘、不下载。"""

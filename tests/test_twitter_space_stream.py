@@ -603,6 +603,43 @@ class TestForwardLoopLifecycle:
         assert process.kill_count == 1
 
     @pytest.mark.asyncio
+    async def test_post_eof_drain_hang_fails_loud(self, monkeypatch):
+        """EOF 后 stderr 不排干 = 未知状态：有界等待超时即 kill + 上抛
+        （round-7 minor reliability-ffmpeg-post-eof-cleanup-hang）。"""
+        monkeypatch.setattr(stream_mod, "_REAP_TIMEOUT_SECONDS", 0.1)
+        process = FakeProcess(out_chunks=[b"half"], err_chunks=[], exit_code=None)
+        process.stderr = FakeStream([], hang=True)  # stderr 永不 EOF（stdout 正常 EOF）
+        sink = bytearray()
+        drain, writer = await self._tasks(monkeypatch, process, sink)
+        agen = stream_mod._forward_ffmpeg_output(
+            process, writer, drain, b"first", sink, SPACE_ID
+        )
+        assert await agen.__anext__() == b"first"
+        assert await agen.__anext__() == b"half"
+        with pytest.raises(RuntimeError, match="stderr drain did not finish"):
+            await agen.__anext__()
+        assert process.kill_count == 1
+
+    @pytest.mark.asyncio
+    async def test_post_eof_pump_hang_fails_loud(self, monkeypatch):
+        """EOF 后段泵不收尾 = 未知状态：有界等待超时即 kill + 上抛。"""
+        from app.core.config import settings
+
+        monkeypatch.setattr(settings, "HTTP_TIMEOUT_SECONDS", 0.2)
+        stdin = FakeStdin(hang_on=b"seg")
+        process = FakeProcess(out_chunks=[b"half"], exit_code=None, stdin=stdin)
+        sink = bytearray()
+        drain, writer = await self._tasks(monkeypatch, process, sink)
+        agen = stream_mod._forward_ffmpeg_output(
+            process, writer, drain, b"first", sink, SPACE_ID
+        )
+        assert await agen.__anext__() == b"first"
+        assert await agen.__anext__() == b"half"
+        with pytest.raises(RuntimeError, match="segment pump did not finish"):
+            await agen.__anext__()
+        assert process.kill_count == 1
+
+    @pytest.mark.asyncio
     async def test_read_hang_times_out_kills_and_raises(self, monkeypatch):
         from app.core.config import settings
 

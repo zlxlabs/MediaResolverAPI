@@ -66,6 +66,27 @@ class TestYtdlpProvider:
         assert info["id"] == SPACE_ID
         assert info["url"].startswith("https://")
 
+    async def test_successful_fetch_releases_gate(self, extract_calls):
+        import app.services.providers.ytdlp as ytdlp_mod
+
+        await _fetch(YtdlpProvider())
+        # 许可在线程侧释放：提取成功后门闩应恢复满额
+        assert ytdlp_mod._EXTRACT_GATE.acquire(blocking=False) is True
+        ytdlp_mod._EXTRACT_GATE.release()
+
+    async def test_backlog_full_fails_fast(self):
+        """提交门闩满 → 立即 502 fail fast，不无限堆队列
+        （gate primary round-7 major：executor 队列无界）。"""
+        import app.services.providers.ytdlp as ytdlp_mod
+
+        for _ in range(8):
+            assert ytdlp_mod._EXTRACT_GATE.acquire(blocking=False)
+        try:
+            with pytest.raises(ProviderError, match="backlog full"):
+                await _fetch(YtdlpProvider())
+        finally:
+            ytdlp_mod._EXTRACT_GATE.release(8)
+
     async def test_rejects_unsupported_platform(self):
         with pytest.raises(ProviderError, match="does not support platform"):
             await YtdlpProvider().fetch_video_info(
