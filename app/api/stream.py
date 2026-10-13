@@ -722,6 +722,8 @@ async def _forward_ffmpeg_output(
             except asyncio.TimeoutError:
                 pass
         if process.returncode not in (0, None):
+            # 判据边界：exit 0 但内容截断（上游部分成功）无本地信号可判
+            # （D4 实测元数据无时长，无法对账）；异常退出与收尸竞态均已在上抛。
             logger.error(
                 "twitter_space stream ffmpeg exited code={} space_id={} sent={} tail={}",
                 process.returncode,

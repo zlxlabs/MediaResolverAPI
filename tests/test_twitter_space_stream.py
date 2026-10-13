@@ -197,6 +197,18 @@ class TestStreamEndpoint:
         assert resp.status_code == 502
         assert resp.json()["detail"].startswith("X Space extraction failed")
 
+    def test_stream_requires_api_key(self, client, spawn_record):
+        """router 级 verify_api_key 覆盖本端点：无 key 显式 401，且不触发提取。
+        （gate primary security-twitter-space-auth-bypass 前提不成立，此测试钉死。）"""
+        original = settings.API_KEY
+        settings.API_KEY = "test-key-123"
+        try:
+            resp = client.get(f"/api/stream/twitter_space/{SPACE_ID}")
+            assert resp.status_code == 401
+            assert spawn_record == []
+        finally:
+            settings.API_KEY = original
+
     def test_429_when_concurrency_full(self, authed_client, spawn_record, monkeypatch):
         monkeypatch.setattr(settings, "MAX_CONCURRENT_STREAMS", 0)
         stream_mod.stream_limiter.reset()
