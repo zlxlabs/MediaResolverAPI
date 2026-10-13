@@ -135,6 +135,25 @@ CPU 开销：user 3.11s + sys 1.98s（纯网络 IO，remux `-c copy` 成本可�
 | `d3-ffmpeg.log` | 4,823 行 | ffmpeg stderr + time -v（断流判定证据） |
 | `probe-d2.sh` / `d2-nohup.log` / `d3-time.log` / `playlist-url.txt` / `ffprobe.json` / `sample-sha256.txt` / `d1-stderr.log` | 小 | 过程文件 |
 
+## 入库证据（git）
+
+以下三件套在 HEAD = `6d047a4`（报告主体 commit）执行的实际输出；随后仅追加本节本身
+作为 evidence commit，产物内容不变，终态以最后一条 `git status` 干净为准：
+
+```
+$ git log --oneline -1
+6d047a4 docs(x-space-probe): D1-D4 probe report (extract ok, no stream break, 206 x3, field map)
+
+$ git show --stat --format= HEAD
+ docs/sessions/x-space-probe/probe-report.md | 168 ++++++++++++++++++++++++++++
+ 1 file changed, 168 insertions(+)
+
+$ git status --short --untracked-files=all
+（空，工作区与未跟踪文件均干净）
+```
+
+全部提交：`b3cfae1`（probe.md 脚本）→ `6d047a4`（probe-report.md 报告主体）→ 本 evidence commit。
+
 ## 回执
 
 - 探针脚本入库（D1–D4 可重复执行） [commit: `b3cfae1`]
