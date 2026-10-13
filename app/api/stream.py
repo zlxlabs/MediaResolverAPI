@@ -666,16 +666,28 @@ async def _fetch_media_segments(playlist_url: str, headers: dict) -> list[str]:
     return segments
 
 
-async def _stream_url_chunks(url: str, headers: dict, chunk_size: int):
-    """逐段流式抓取；读超时复用 HTTP_TIMEOUT_SECONDS，非 2xx 视为段失败。"""
-    async with httpx.AsyncClient(
-        timeout=_http_timeout(), follow_redirects=True, headers=headers
-    ) as client:
+async def _stream_url_chunks(
+    url: str, headers: dict, chunk_size: int,
+    client: Optional[httpx.AsyncClient] = None,
+):
+    """逐段流式抓取；读超时复用 HTTP_TIMEOUT_SECONDS，非 2xx 视为段失败。
+
+    client 传入时复用（整场回放共用一个连接池），不传则自建（兼容单段调用）。
+    """
+    owns_client = client is None
+    if owns_client:
+        client = httpx.AsyncClient(
+            timeout=_http_timeout(), follow_redirects=True, headers=headers
+        )
+    try:
         async with client.stream("GET", url) as resp:
             if resp.status_code >= 400:
                 raise SegmentFetchError(f"segment HTTP {resp.status_code}")
             async for chunk in resp.aiter_bytes(chunk_size):
                 yield chunk
+    finally:
+        if owns_client:
+            await client.aclose()
 
 
 async def _pump_segments(
@@ -687,14 +699,17 @@ async def _pump_segments(
     """
     stdin = process.stdin
     try:
-        for url in segment_urls:
-            async for chunk in _stream_url_chunks(
-                url, headers, settings.STREAM_CHUNK_SIZE
-            ):
-                stdin.write(chunk)      # 同步缓冲写（StreamWriter.write 非协程）
-                await stdin.drain()     # 背压：缓冲满时阻塞，上游抓取随之暂停
+        async with httpx.AsyncClient(
+            timeout=_http_timeout(), follow_redirects=True, headers=headers
+        ) as client:
+            for url in segment_urls:
+                async for chunk in _stream_url_chunks(
+                    url, headers, settings.STREAM_CHUNK_SIZE, client
+                ):
+                    stdin.write(chunk)      # 同步缓冲写（StreamWriter.write 非协程）
+                    await stdin.drain()     # 背压：缓冲满时阻塞，上游抓取随之暂停
         stdin.close()
-        await stdin.wait()
+        await stdin.wait_closed()   # 注意是 wait_closed：StreamWriter 没有 wait()
     except Exception as exc:
         if process.returncode is None:
             process.kill()

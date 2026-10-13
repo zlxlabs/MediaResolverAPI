@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
+import subprocess
 from pathlib import Path
 from urllib.parse import urljoin
 
@@ -83,7 +85,7 @@ class FakeStdin:
         self.closed = True
         self._release.set()
 
-    async def wait(self) -> None:
+    async def wait_closed(self) -> None:
         self.closed = True
         self._release.set()
 
@@ -140,7 +142,7 @@ def _patch_segments(monkeypatch, segments: list[str]):
 def _patch_segment_chunks(monkeypatch, mapping: dict[str, list[bytes]]):
     """按 URL 吐字节；mapping 未覆盖的 URL 视为 HTTP 404。"""
 
-    async def chunks(url, headers, chunk_size):
+    async def chunks(url, headers, chunk_size, client=None):
         if url not in mapping:
             raise stream_mod.SegmentFetchError("segment HTTP 404")
         for piece in mapping[url]:
@@ -268,7 +270,7 @@ class TestStreamEndpoint:
 
         monkeypatch.setattr(stream_mod, "_fetch_media_segments", fake_fetch)
 
-        async def chunks(url, headers, chunk_size):
+        async def chunks(url, headers, chunk_size, client=None):
             yield b"x"
 
         monkeypatch.setattr(stream_mod, "_stream_url_chunks", chunks)
@@ -397,7 +399,7 @@ class TestSegmentFailureAborts:
 
         monkeypatch.setattr(stream_mod.asyncio, "create_subprocess_exec", fake_exec)
 
-        async def chunks(url, headers, chunk_size):
+        async def chunks(url, headers, chunk_size, client=None):
             if url == SEG_1:
                 yield b"ok1"
             else:
@@ -427,7 +429,7 @@ class TestForwardLoopLifecycle:
     async def _tasks(self, monkeypatch, process: FakeProcess, sink: bytearray):
         drain = asyncio.create_task(stream_mod._drain_stderr(process.stderr, sink))
 
-        async def chunks(url, headers, chunk_size):
+        async def chunks(url, headers, chunk_size, client=None):
             yield b"seg"
 
         monkeypatch.setattr(stream_mod, "_stream_url_chunks", chunks)
@@ -557,6 +559,55 @@ class TestForwardLoopLifecycle:
         assert process.kill_count == 1
         await asyncio.sleep(0.05)
         assert writer.cancelled()
+
+
+class TestRealSubprocessCompletion:
+    """真子进程回归（round-5 major： StreamWriter 无 wait()）：
+
+    假进程接口若与真实 StreamWriter 不一致，单元测试挡不住——必须有一条
+    真 ffmpeg 走完 pump→close→wait_closed→exit 0 的完整收尾序列。
+    CI 环境无 ffmpeg 时跳过（runtime 镜像内必装）。
+    """
+
+    @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
+    @pytest.mark.asyncio
+    async def test_full_completion_sequence_real_subprocess(self, tmp_path):
+        adts = tmp_path / "sample.aac"
+        subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error",
+             "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+             "-c:a", "aac", "-f", "adts", str(adts), "-y"],
+            check=True, capture_output=True,
+        )
+        assert adts.stat().st_size > 0
+
+        process = await stream_mod._spawn_ffmpeg()
+        sink: bytearray = bytearray()
+        drain = asyncio.create_task(stream_mod._drain_stderr(process.stderr, sink))
+
+        async def chunks(url, headers, chunk_size, client=None):
+            yield adts.read_bytes()
+
+        monkey = pytest.MonkeyPatch()
+        try:
+            monkey.setattr(stream_mod, "_stream_url_chunks", chunks)
+            pump = asyncio.create_task(
+                stream_mod._pump_segments(["local://sample.aac"], {}, process)
+            )
+            collected = b""
+            while True:
+                chunk = await process.stdout.read(65536)
+                if not chunk:
+                    break
+                collected += chunk
+            await drain
+            await pump
+            rc = await process.wait()
+        finally:
+            monkey.undo()
+
+        assert rc == 0
+        assert len(collected) > 1000  # fMP4 头 + 分片实际产出
 
 
 class TestM3u8Parsing:
