@@ -34,3 +34,10 @@
 - 本段结论：真实环境三步全过。关键发现：**audio-only fragmented MP4 必须显式给切片参数**——`frag_keyframe` 只认视频关键帧，实测 ffmpeg 消费 HLS 正常（30x 速）但输出停在 32B moov 不吐字节（D3 探针证据的盲区：跑完整进程收尾才写盘，掩盖了增量不吐字）。修复：`-frag_duration 4000000`（仍为 mp4 容器，不换锁定决策）；第二修复：`_cleanup_ffmpeg` 不可调 StreamReader.close()（不存在该方法，首测时炸 AttributeError 且把响应挂在 more_body=True）。修复后实测：resolve 2.748s（200，twitter_space/audio，无 pscp.tv）；下载 1 MiB 墙钟 7.0s；ffprobe 显示 aac/48000Hz/2ch、容器 mov,mp4,m4a；断连后服务端无 ffmpeg 残留；服务日志 pscp.tv 零命中。audio 模式 resolve 亦通。
 - 关键决策与已否决方案：`-frag_duration` 是锁定决策 4 同容器下的 muxer 参数补全（卡面假设节预留的「实测发现兼容性问题」分支），非容器更换；否决 matroska。否决在 finally 里 await 收尸——改同步 kill+cancel（见 M4）。
 - 下一步唯一动作：提交 M5（README + 修复），跑全量套件与 Accept-Check，写报告。
+
+## M6 gate primary findings 处置
+
+- 当前阶段：implementing（M6 完成，待推送后等 CI）
+- 本段结论：PR #43 gate primary（codex-sub）给 verdict=fail：3 major + 1 minor。处置：#4 raw_data 泄 playlist 进缓存（minor，实为锁定决策 4「绝不持久化」违规——cache.py:144 to_dict 落库含 raw_data）→ 修复：映射层递归脱敏所有字符串值（实测 requested_downloads[].url 也携带 playlist，字段枚举不可靠）；#1 中途异常退出静默收尾成 200 截断流（major）→ 修复：EOF 后 returncode 非 0 即抛 RuntimeError 中断响应（客户端看到传输中断而非假成功）；#2 读挂死永久占并发槽（major）→ 修复：stdout 读包 wait_for(HTTP_TIMEOUT_SECONDS)，超时 kill+抛错释放槽（复用既有上游超时旋钮，第二消费者成立）；#3 yt-dlp wait_for 超时后 to_thread 线程不可杀、持续卡顿会堆积（major）→ 与锁定决策 2「进程内库调用」直接冲突（子进程化才能真杀），上报主脑裁决，不自行改。修复后全量 497 passed；修复后真实环境复验：resolve 2.0s / 1MiB 4.4s / ffprobe aac-mp4 / 无 ffmpeg 残留 / 日志零泄漏。
+- 关键决策与已否决方案：否决「按字段枚举脱敏」（requested_downloads 逃逸）；否决「读超时新增配置」（复用 HTTP_TIMEOUT_SECONDS）；否决「#3 改子进程」（锁定决策 2，只上报）。
+- 下一步唯一动作：提交推送，等新 head 的 gate 结论，写报告。

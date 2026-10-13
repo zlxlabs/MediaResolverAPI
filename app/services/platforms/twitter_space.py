@@ -2,7 +2,23 @@
 
 from typing import Any, Dict, Optional
 
+from ..providers.ytdlp import redact_playlist_url
 from .base import BasePlatformService, VideoInfo
+
+
+def _redact_raw_data(data: Any) -> Any:
+    """playlist URL 短命凭证绝不持久化（锁定决策 4 / design 不变式 2）：
+    缓存经 VideoInfo.to_dict() 把 raw_data 落库，映射层先脱敏。
+
+    递归遍历所有字符串值（url 字段形态不止顶层 url 与 formats[].url，
+    实测 requested_downloads[].url 同样携带 playlist），不做字段枚举。"""
+    if isinstance(data, str):
+        return redact_playlist_url(data)
+    if isinstance(data, dict):
+        return {k: _redact_raw_data(v) for k, v in data.items()}
+    if isinstance(data, list):
+        return [_redact_raw_data(item) for item in data]
+    return data
 
 
 class TwitterSpaceService(BasePlatformService):
@@ -50,5 +66,5 @@ class TwitterSpaceService(BasePlatformService):
             comment_count=self._parse_count(response_data.get("comment_count")),
             create_time=self._parse_timestamp(response_data.get("timestamp")),
             publish_time=str(response_data.get("upload_date") or ""),
-            raw_data=response_data,
+            raw_data=_redact_raw_data(response_data),
         )

@@ -684,12 +684,30 @@ async def _forward_ffmpeg_output(
     stderr_tail: bytearray,
     space_id: str,
 ) -> AsyncIterator[bytes]:
-    """把 ffmpeg stdout 转发给客户端；EOF/断连后同步清理子进程（不留尸）。"""
+    """把 ffmpeg stdout 转发给客户端；EOF/断连后同步清理子进程（不留尸）。
+
+    fail-loud 语义：中途异常退出或读挂死超时都抛错中断响应（客户端看到传输中断），
+    不把截断文件当成功流收尾；读超时复用 HTTP_TIMEOUT_SECONDS（上游无响应上界），
+    防单个卡死上游永久占住并发槽。
+    """
     sent = len(first)
     try:
         yield first
         while True:
-            chunk = await process.stdout.read(settings.STREAM_CHUNK_SIZE)
+            try:
+                chunk = await asyncio.wait_for(
+                    process.stdout.read(settings.STREAM_CHUNK_SIZE),
+                    timeout=settings.HTTP_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    "twitter_space stream ffmpeg stdout stalled space_id={} sent={}",
+                    space_id,
+                    sent,
+                )
+                raise RuntimeError(
+                    f"ffmpeg stdout stalled over {settings.HTTP_TIMEOUT_SECONDS}s"
+                )
             if not chunk:
                 break
             sent += len(chunk)
@@ -703,6 +721,9 @@ async def _forward_ffmpeg_output(
                 space_id,
                 sent,
                 redact_playlist_url(bytes(stderr_tail).decode("utf-8", "replace")),
+            )
+            raise RuntimeError(
+                f"ffmpeg exited {process.returncode} before stream completion"
             )
     finally:
         _cleanup_ffmpeg(process, drain)
@@ -746,7 +767,15 @@ async def stream_twitter_space(space_id: str):
     drain = asyncio.create_task(_drain_stderr(process.stderr, stderr_tail))
     try:
         # 预读首块：ffmpeg 瞬时失败（playlist 已坏/起不来）时 headers 还没发，可升级成 502。
-        first = await process.stdout.read(settings.STREAM_CHUNK_SIZE)
+        try:
+            first = await asyncio.wait_for(
+                process.stdout.read(settings.STREAM_CHUNK_SIZE),
+                timeout=settings.HTTP_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            raise _json_http_error(
+                502, f"ffmpeg stalled over {settings.HTTP_TIMEOUT_SECONDS}s before first byte"
+            )
         if not first:
             await drain
             logger.error(

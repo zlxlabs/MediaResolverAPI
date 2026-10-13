@@ -259,3 +259,39 @@ class TestForwardLoopLifecycle:
         assert collected == [b"first", b"rest"]
         assert process.kill_count == 0
         assert drain.done() and not drain.cancelled()
+
+    @pytest.mark.asyncio
+    async def test_abnormal_exit_mid_stream_raises_instead_of_clean_end(self):
+        """fail-loud：ffmpeg 中途异常退出时生成器必须抛错中断响应（客户端看到传输中断），
+        不许把截断文件当成功流收尾（gate primary finding
+correctness-ffmpeg-partial-output-success）。"""
+        process = FakeProcess(out_chunks=[b"half"], err_chunks=[], exit_code=1)
+        sink = bytearray()
+        drain = await self._drain_task(process, sink)
+        agen = stream_mod._forward_ffmpeg_output(
+            process, drain, b"first", sink, SPACE_ID
+        )
+        assert await agen.__anext__() == b"first"
+        assert await agen.__anext__() == b"half"
+        with pytest.raises(RuntimeError, match="before stream completion"):
+            await agen.__anext__()
+
+    @pytest.mark.asyncio
+    async def test_read_hang_times_out_kills_and_raises(self, monkeypatch):
+        """读挂死必须超时释放并发槽并 kill 子进程（gate primary finding
+reliability-ffmpeg-read-hang）；超时旋钮复用 HTTP_TIMEOUT_SECONDS。"""
+        from app.core.config import settings
+
+        monkeypatch.setattr(settings, "HTTP_TIMEOUT_SECONDS", 0.1)
+        process = FakeProcess(out_chunks=[], err_chunks=[], exit_code=None, hang=True)
+        sink = bytearray()
+        drain = await self._drain_task(process, sink)
+        agen = stream_mod._forward_ffmpeg_output(
+            process, drain, b"first", sink, SPACE_ID
+        )
+        assert await agen.__anext__() == b"first"
+        with pytest.raises(RuntimeError, match="stalled"):
+            await agen.__anext__()
+        assert process.kill_count == 1
+        await asyncio.sleep(0.05)  # 取消送达需要一拍循环
+        assert drain.cancelled()

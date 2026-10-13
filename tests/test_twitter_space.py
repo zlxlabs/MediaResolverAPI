@@ -210,6 +210,14 @@ class TestTwitterSpaceServiceMapping:
         info = self._parse(raw)
         assert "pscp.tv" not in info.video_url
 
+    def test_raw_data_playlist_redacted_for_cache(self):
+        """锁定决策 4：playlist 短命凭证绝不持久化。缓存经 to_dict() 落库含 raw_data，
+        必须在映射层脱敏（对齐 wechat_channels 的 _redact_raw_data 先例）。"""
+        info = self._parse()
+        assert "pscp.tv" not in json.dumps(info.raw_data, ensure_ascii=False)
+        assert "[redacted-playlist-url]" in info.raw_data["url"]
+        assert "pscp.tv" not in json.dumps(info.to_dict(), ensure_ascii=False)
+
     def test_quality_kwarg_is_noop(self):
         service = TwitterSpaceService(api_key="", api_base="")
         info = service._parse_response(_meta(), quality="720p")
