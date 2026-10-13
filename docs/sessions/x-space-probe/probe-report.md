@@ -19,10 +19,10 @@ $ uv tool run yt-dlp --simulate --dump-single-json "https://x.com/i/spaces/1AKEm
 # exit=0，stderr 全空，耗时 2.6s，meta.json 5009 字节
 ```
 
-提取到的 playlist URL（顶层 `url` 字段，pscp.tv 直链，`?type=replay`）：
+提取到的 playlist URL（顶层 `url` 字段，pscp.tv 直链，`?type=replay`；令牌已主脑脱敏——D2 实测有效期仅 30 分钟，探针后即过期，真实形态见 D4 `url` 字段说明）：
 
 ```
-https://prod-fastly-us-west-1.video.pscp.tv/Transcoding/v1/hls/1m5X1najU_VkQeZvZhQnXjQ_2IsRK0Oe8NuPBaIT2Csw56Kcz4Bfg_dk8gUw4tjiQywtL3gbxBG9erCRbSapzA/non_transcode/us-west-1/periscope-replay-direct-prod-us-west-1-public/audio-space/playlist_16654926480857770170.m3u8?type=replay
+https://prod-fastly-us-west-1.video.pscp.tv/Transcoding/v1/hls/<签名令牌-已脱敏>/non_transcode/us-west-1/periscope-replay-direct-prod-us-west-1-public/audio-space/playlist_16654926480857770170.m3u8?type=replay
 ```
 
 关键形态：`live_status="was_live"`、`protocol="m3u8"`、`acodec="aac"`、`vcodec="none"`、单 format（`format_id="0"`）、`http_headers` 含 5 项（UA / Accept / Accept-Language / Sec-Fetch-Mode / `Referer: https://twitter.com/`）。
