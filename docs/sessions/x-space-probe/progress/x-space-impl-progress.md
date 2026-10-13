@@ -20,3 +20,10 @@
 - 本段结论：YtdlpProvider（to_thread + wait_for 超时，unavailable/login/generic 三分类，SpaceNotReplayError 终态）与 TwitterSpaceService（映射容错）落地；video_resolver 挂 twitter_space→[ytdlp] 链并在 _adapt_data 内联适配（providers/__init__.py 不在卡面允许清单，直接模块路径导入）。test_twitter_space.py 29 例全绿，含 resolve API 面与 pscp.tv 不泄漏断言。
 - 关键决策与已否决方案：否决「为 ytdlp 建 YtdlpAdapter 类」——adapters/ 不在允许清单且平台映射仅一条，内联分支第二消费者不存在（反熵条款）。【待裁决偏差】yt-dlp SPACE_STATUS 四态中 timedout→post_live 仍可下载（源码注释明示），design 字面判据 live_status != "was_live" 会拒绝这部分可下载回放；按锁定决策实现（post_live 同样拒），报告中上报主脑裁决是否放行。另一偏差：fixture 实况顶层无 duration 键（D4 报告写「键存在值为 null」），测试按实况锁两种形态。
 - 下一步唯一动作：M4 流式端点 stream.py（并发槽共享改造 + ffmpeg 子进程生命周期测试先行）。
+
+## M4 流式端点
+
+- 当前阶段：implementing（M4 完成）
+- 本段结论：`GET /api/stream/twitter_space/{space_id}` 落地——共享并发槽（`_stream_slot_cm` 单源 429，微信/Space 双端点同 `MAX_CONCURRENT_STREAMS`）、每次请求现取 playlist（测试锁双请求两提取）、ffmpeg argv 锁定（-c copy/-bsf:a aac_adtstoasc/-movflags frag_keyframe+empty_moov/pipe:1 + 按声明传 -user_agent/-headers）、首块预读把 ffmpeg 瞬时失败升级为 502、断连同步 kill 不留尸（直接驱动生成器断言 kill_count==1）。全量 494 passed。
+- 关键决策与已否决方案：否决「await process.wait() 收尸」——取消上下文中 await 不可靠，改为同步 kill+cancel+close（收尸交给 asyncio 子进程传输层 SIGCHLD 自动完成）；预读首块换取错误状态码可见性（否则 200 空体）。stderr 持续排干防 64KB 管道卡死，尾部仅入日志且经 redact（pscp.tv 不进日志）。
+- 下一步唯一动作：M5 README + 真实环境三步验收（起服务→resolve→下载≥1MiB→ffprobe）。
