@@ -55,3 +55,10 @@
 - 本段结论：修复 B：live_status 判据改 `not in ("was_live", "post_live")`，post_live 测试反转为放行。修复 A：服务端现取并解析 m3u8（master 跟首个 variant、urljoin 相对解析、空表报错）→ ffmpeg 改 `-f aac -i pipe:0`（ffmpeg 的 ADTS 解复用器名为 aac，首测 `-f adts` 报 Unknown input format 即被预读 502 路径抓住）→ 服务端 httpx 逐段抓写 stdin（读超时 HTTP_TIMEOUT_SECONDS，任何段失败杀 ffmpeg 上抛）→ 全段写完关 stdin，exit≠0 上抛保留。完整性不变式「响应正常收尾 ⇔ 全部段成功且 ffmpeg exit 0」由 4 个生命周期测试锁定（段失败中断/异常退出/收尸竞态/双向 stall）。实现期抓到两处：_spawn_ffmpeg 漏传 stdin=PIPE（spawn_record 的 kwargs 断言当场抓住）；测试假 resolver 绕过空表检查后补了端点守卫。全量 510 passed；本地真实管道验证（lavfi 生成 ADTS → -f aac pipe:0 → fMP4 输出 ffprobe aac/mp4）通过。
 - 关键决策与已否决方案：否决「段列表字段枚举脱敏」沿用递归脱敏；否决「m3u8 解析引第三方库」（标准库 urljoin + 手写行过滤，卡面禁止新依赖）；写侧 stall 由读侧超时兼管（ffmpeg 停止消费 → stdout 停止产出 → 读超时触发清理，不再单设写超时旋钮）。
 - 下一步唯一动作：真实环境三步重跑（网络到 x.com 今晚抖动：SSL EOF/30s 超时/无 formats 混合出现，后台每 3 分钟重试）；成则取证提交，持续失败则按卡面预案报 blocked 上行。
+
+## M9 stdin 互锁与 StreamWriter 真机双 bug，三步全过
+
+- 当前阶段：implementing（收尾：提交推送 + 报告）
+- 本段结论：真机首跑连环 502，逐层定位出两个单测假进程挡不住的真机 bug：①预读-泵启动顺序死锁——`-f aac -i pipe:0` 的 ffmpeg 收到 stdin 前零 stdout，旧顺序预读白等 30s 超时；修复为泵任务先于预读，并新增门控假进程测试（stdout 等 stdin 喂数据才出流）锁住顺序；②`await stdin.write()`——StreamWriter.write 是同步方法（await None 即 TypeError `'NoneType' object can't be awaited`），背压应用 `await drain()`；单元假 stdin 恰好是 async write 挡住了它，真机 pump 日志（segments=2379, err=NoneType...）一枪定位。另补两处观测缺口：段泵失败必须落日志（此前被任务取消吞掉）；端点对空段列表加 502 守卫。修复后真实环境三步全过（04:55）：resolve 1.96s（200，twitter_space/audio，无泄漏）→ 流式 1 MiB 11.8s（含现场提取+清单解析+首批段）→ ffprobe aac/48kHz/2ch、容器 mov,mp4,m4a；断连后无 ffmpeg 残留；服务日志 pscp.tv 零命中。全量 511 passed。插曲记录：排查中一度误判为网络抖动/线程池毒化，最终由泵日志 + faulthandler 线程栈（worker 空闲=提取已完，挂的是预读）实锤为顺序死锁；今早的 SSL EOF/超时/无 formats 是叠加的真实瞬时抖动（CLI 隔离验证网络通路正常）。
+- 关键决策与已否决方案：否决「预读改为跳过」——502-on-instant-failure 语义保留，只是把喂数据的一方先跑起来；否决「假 stdin 维持 async write」——假接口必须镜像真实接口（StreamWriter.write 同步），否则测试挡不住这类 bug（本次就是反例教材，写入报告）。
+- 下一步唯一动作：提交推送、盯 CI gate、写最终报告。

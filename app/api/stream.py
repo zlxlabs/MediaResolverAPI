@@ -691,15 +691,21 @@ async def _pump_segments(
             async for chunk in _stream_url_chunks(
                 url, headers, settings.STREAM_CHUNK_SIZE
             ):
-                await stdin.write(chunk)
+                stdin.write(chunk)      # 同步缓冲写（StreamWriter.write 非协程）
+                await stdin.drain()     # 背压：缓冲满时阻塞，上游抓取随之暂停
         stdin.close()
         await stdin.wait()
     except Exception as exc:
         if process.returncode is None:
             process.kill()
-        raise SegmentFetchError(
-            f"segment fetch failed: {redact_playlist_url(str(exc))}"
-        ) from exc
+        detail = redact_playlist_url(str(exc)) or type(exc).__name__
+        logger.error(
+            "twitter_space segment pump aborted segments={} first={} err={}",
+            len(segment_urls),
+            redact_playlist_url(segment_urls[0]) if segment_urls else "-",
+            detail,
+        )
+        raise SegmentFetchError(f"segment fetch failed: {detail}") from exc
 
 
 async def _spawn_ffmpeg() -> asyncio.subprocess.Process:
@@ -871,6 +877,11 @@ async def stream_twitter_space(space_id: str):
     process = await _spawn_ffmpeg()
     stderr_tail: bytearray = bytearray()
     drain = asyncio.create_task(_drain_stderr(process.stderr, stderr_tail))
+    # 泵任务必须先于预读启动：-f aac -i pipe:0 的 ffmpeg 在收到 stdin 输入前
+    # 不产出任何 stdout，先预读会白等 30s 超时（stdin/stdout 互锁）。
+    writer = asyncio.create_task(
+        _pump_segments(segment_urls, headers, process)
+    )
     try:
         # 预读首块：ffmpeg 瞬时失败（playlist 已坏/起不来）时 headers 还没发，可升级成 502。
         try:
@@ -893,12 +904,8 @@ async def stream_twitter_space(space_id: str):
             )
             raise _json_http_error(502, "ffmpeg failed to assemble the Space stream")
     except BaseException:
-        _cleanup_ffmpeg(process, drain)
+        _cleanup_ffmpeg(process, drain, writer)
         raise
-
-    writer = asyncio.create_task(
-        _pump_segments(segment_urls, headers, process)
-    )
 
     return StreamingResponse(
         _forward_ffmpeg_output(process, writer, drain, first, stderr_tail, space_id),

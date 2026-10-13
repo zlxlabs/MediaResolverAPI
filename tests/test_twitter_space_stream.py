@@ -52,22 +52,32 @@ class FakeStream:
 
 
 class FakeStdin:
-    """记录写入；hang_on 命中时阻塞写入（模拟背压/stall），close 后 no-op。"""
+    """记录写入；hang_on 命中时阻塞写入（模拟背压/stall），close 后 no-op。
 
-    def __init__(self, *, hang_on: bytes | None = None, broken: bool = False):
+    gate_stdout=True 时模拟真实 ffmpeg 的 stdin/stdout 互锁：stdin 收到数据前
+    stdout 不产出（write 解锁 stdout 的 EOF）。
+    """
+
+    def __init__(self, *, hang_on: bytes | None = None, broken: bool = False, gate_stdout: FakeStream | None = None):
         self.received = bytearray()
         self.closed = False
         self._hang_on = hang_on
         self._broken = broken
+        self._gate_stdout = gate_stdout
         self._release = asyncio.Event()
 
-    async def write(self, data: bytes) -> None:
+    def write(self, data: bytes) -> None:
+        """镜像真实 StreamWriter.write：同步缓冲写，无 await。"""
         if self._broken:
             raise BrokenPipeError("Broken pipe")
-        if self._hang_on is not None and self._hang_on in data:
-            await self._release.wait()
-            return
         self.received.extend(data)
+        if self._gate_stdout is not None and self.received:
+            self._gate_stdout.set_eof()
+
+    async def drain(self) -> None:
+        # 真实 StreamWriter.drain 的背压语义：缓冲满时挂起
+        if self._hang_on is not None and self._hang_on in bytes(self.received):
+            await self._release.wait()
 
     def close(self) -> None:
         self.closed = True
@@ -212,6 +222,31 @@ class TestStreamEndpoint:
         assert resp.status_code == 200
         assert bytes(stdin.received) == b"seg1aseg1bseg2a"
         assert stdin.closed  # 全部段写完后 stdin 必须关闭让 ffmpeg 收尾
+
+    def test_stdin_gated_stdout_still_streams(self, authed_client, monkeypatch):
+        """真实 ffmpeg 互锁建模：stdin 收到段数据前 stdout 零产出。
+
+        泵任务若先于预读启动（修复后顺序）则正常出流；旧顺序（预读先行）
+        会在这里白等 HTTP_TIMEOUT_SECONDS 后 502——本测试锁住修复。
+        """
+        from app.core.config import settings
+
+        monkeypatch.setattr(settings, "HTTP_TIMEOUT_SECONDS", 1.0)
+        gated_out = FakeStream([b"frag1"], hang=True)  # stdout 等 stdin 喂数据才吐 frag1、随后 EOF
+        stdin = FakeStdin(gate_stdout=gated_out)
+
+        async def fake_exec(*cmd, **kwargs):
+            p = FakeProcess(out_chunks=[], exit_code=0, stdin=stdin)
+            p.stdout = gated_out
+            return p
+
+        monkeypatch.setattr(stream_mod.asyncio, "create_subprocess_exec", fake_exec)
+        _patch_provider(monkeypatch, [_meta()])
+        _patch_segments(monkeypatch, [SEG_1])
+        _patch_segment_chunks(monkeypatch, {SEG_1: [b"seg"]})
+        resp = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
+        assert resp.status_code == 200
+        assert resp.content == b"frag1"
 
     def test_rejects_bad_space_id(self, authed_client):
         resp = authed_client.get("/api/stream/twitter_space/1AKEmvYqbrOK")
