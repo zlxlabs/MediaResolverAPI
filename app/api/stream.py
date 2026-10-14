@@ -1051,6 +1051,8 @@ async def stream_twitter_space(space_id: str):
     if st is space_cache.SpaceCacheStatus.ABSENT:
         try:
             await space_cache.start(space_id, lambda: _materialize_space(space_id))
+        except space_cache.SpaceCacheAdmissionError as exc:
+            raise _json_http_error(503, str(exc)) from exc
         except OSError as exc:
             logger.error("twitter_space cache start failed err={}", type(exc).__name__)
             raise _json_http_error(502, _CACHE_UNAVAILABLE_DETAIL) from exc

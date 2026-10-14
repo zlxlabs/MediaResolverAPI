@@ -14,6 +14,7 @@ import json
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from urllib.parse import urljoin
@@ -680,6 +681,32 @@ class TestCacheFailureSurface:
             resp = client.get(f"/api/stream/twitter_space/{SPACE_ID}", headers=AUTH)
         assert resp.status_code == 502
         assert resp.json()["detail"] == "X Space cache storage is unavailable"
+
+    def test_materialization_queue_rejects_when_pending_capacity_is_full(
+        self, monkeypatch
+    ):
+        """后台 pending+running 总数有界；队列满时不承诺 202。"""
+        gate = threading.Event()
+
+        async def hold_materialization(space_id):
+            await asyncio.to_thread(gate.wait)
+
+        monkeypatch.setattr(space_cache, "_MAX_MATERIALIZATION_TASKS", 1, raising=False)
+        monkeypatch.setattr(space_cache, "_disk_free_bytes", lambda: 10**15)
+        monkeypatch.setattr(stream_mod, "_materialize_space", hold_materialization)
+        with self._client_no_raise() as client:
+            try:
+                first = client.get(f"/api/stream/twitter_space/{SPACE_ID}", headers=AUTH)
+                second_id = "1BKEmvYqbrOKL"
+                second = client.get(
+                    f"/api/stream/twitter_space/{second_id}", headers=AUTH
+                )
+                assert first.status_code == 202
+                assert second.status_code == 503
+                assert second.json()["detail"] == "X Space materialization queue is full"
+                assert len(space_cache._tasks) == 1
+            finally:
+                gate.set()
 
     def test_502_body_hides_internal_paths(self, authed_client, monkeypatch):
         """任务失败异常 str 含绝对路径（如 ENOSPC）：502 detail 只留 basename（F4）。"""

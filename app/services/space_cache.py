@@ -33,6 +33,12 @@ _STALE_PART_GRACE_SECONDS = 600.0
 # 失败注册表容量（R2 major）：唯一 Space 反复失败不能无界吃内存；
 # 逐出 = 忘掉失败态，下次 GET 按未命中重拉，语义正确。
 _FAILED_CAP = 1024
+# Pending and running materializations share one process-wide admission bound.
+_MAX_MATERIALIZATION_TASKS = 8
+
+
+class SpaceCacheAdmissionError(RuntimeError):
+    """A new materialization was rejected before its task was created."""
 
 # 惰性互斥锁与单飞登记表（与 stream.StreamLimiter 同一 lazy 模式：锁在首次使用的
 # 事件循环创建；测试与多个 TestClient portal loop 复用时仅在争用路径才触碰循环绑定）。
@@ -124,8 +130,8 @@ def consume_failure(space_id: str) -> Optional[BaseException]:
 async def start(space_id: str, factory: Callable[[], Coroutine[None, None, None]]) -> bool:
     """单飞 spawn：已有进行中任务时不重复 spawn（返回 False）。
 
-    spawn 前确保缓存目录存在（任务体写 .part 的前置）。done 条目不在此清理：
-    惰性归位（_reap_done_entry）在查询路径统一处理。
+    spawn 前确保缓存目录存在，并对 pending+running 数量与磁盘水位做 admission。
+    done 条目先归位，避免已结束任务占用队列容量。
     """
     ensure_dir()
     async with _lock_for_loop():
@@ -133,6 +139,10 @@ async def start(space_id: str, factory: Callable[[], Coroutine[None, None, None]
         if task is not None and not task.done():
             return False
         _tasks.pop(space_id, None)  # done 残条目（reap 尚未扫到的窗口内防御）
+        for active_id in list(_tasks):
+            _reap_done_entry(active_id)
+        if len(_tasks) >= _MAX_MATERIALIZATION_TASKS:
+            raise SpaceCacheAdmissionError("X Space materialization queue is full")
         created = asyncio.create_task(factory())
         _tasks[space_id] = created
         return True
