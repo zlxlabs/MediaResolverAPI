@@ -57,3 +57,14 @@
 - 四项先写测试：首版各红在 `200 != 502`、注册表仍含 `BaseException`、水位回收数 `0 != 1`、compose 缺卷；实现后对应测试转绿。注入复验也均以断言失败红；R4-4 恢复注入行时曾误命中 `discard_part` 的同名 `pass`，随后按完整函数上下文恢复，`git diff` 核实无残留，四项目标测试复绿。
 - 真实路径：TestClient 调真实 ASGI 路由，使用真实 `shutil.disk_usage`；请求先获 202，再临时提高阈值，得到 `502 storage below watermark`，`.part` 与 final 均不存在。两份 `docker compose config -q` 均通过（部署配置用临时空 `.env`，验证后删除）。
 - 验证：窄套件 `85 passed`；全量 `uv run --extra dev pytest -q` 为 `573 passed, 240 warnings`。R5 实现已提交 `b855e8d`，待进度与红验记录最终提交后推送。
+
+## 2026-10-14 R6 收敛：round-5 三项修复 + 文档 + waiver
+
+- R5-1（major）：`publish_final` 增加 `_MIN_FINAL_BYTES = 1024` 门禁，空/极小 `.part` 上抛 `RuntimeError`，由既有失败路径映射 502、清 `.part`、不产 final。ENDLIST + 段数对账 + ffmpeg exit 0 仍是必要条件。真实 ASGI 路径：ffmpeg stdout 空 + exit 0 → 轮询 502、无 final/无 `.part`。
+- R5-3：`_FinalDownloadResponse._resolve_range` 对合法单区间返回 `ranged=True`（含 `bytes=0-` 的 start=0、end 空）；`__call__` 发 206 + `Content-Range`。416 与多区间/畸形回 200 存量断言保持。
+- R5-4：README 第 10 条补「启动回收只收陈旧遗留（>600s）；新鲜孤儿由周期清理按水位/TTL 回收」。卡面所引「崩溃遗留 .part 启动回收」在 README 无原文，按语义补进该条，未改代码。
+- R5-5：`tests/test_twitter_space_stream.py` 的 autouse fixture `_space_cache_isolated` 补 `_failures` / `_sweeper_task` 的 yield 前清零与 yield 后清理。
+- R5-2 waiver：水位 TOCTOU 不修。README 第 3 条水位语义加「水位是尽力防护，非跨写入者硬隔离」。同 id 第三现、无新触发事实；根治需 fallocate/预留，违反反过度设计红线。
+- TDD：空输出 ASGI 初红 `assert 200 == 502`；`bytes=0-` 初红 `assert 200 == 206`；隔离探测初红 `_failures` 泄漏。实现后窄套件 89 passed，全量 577 passed。
+- 红验（断言失败、只还原注入行）：R5-1 `_MIN_FINAL_BYTES = 1024`→`0` 后 `200 == 502`；R5-3 状态行加回 `start > 0 or end != size-1` 后 `200 == 206`；R5-5 去掉两处 `_failures.clear()` 后泄漏断言红。均已还原，`git diff` 空。
+- 验证：`uv run --extra dev pytest tests/test_twitter_space_stream.py tests/test_space_cache.py -q` → 89 passed；`uv run --extra dev pytest -q` → 577 passed, 241 warnings。diff 111+/22-（预算 target 150 / hard 400）。派发时主干基线查询失败，继承红未能判定。
