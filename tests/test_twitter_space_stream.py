@@ -1,16 +1,19 @@
-"""X Space 流式端点：全部网络与 ffmpeg 子进程 stub。
+"""X Space 两阶段交付端点：全部网络与 ffmpeg 子进程 stub。
 
-服务端逐段抓取喂 ffmpeg stdin（gate primary round-4 major 裁定后的传输形态）：
-每次请求现取 playlist（design 不变式 2）、m3u8 解析、错误映射（400/404/502）、
-429 并发槽、ffmpeg argv 形态、段失败中断（无 200 假成功）、断连清理、双向 stall。
+交付形态 v2（后台获取 + 文件交付）：GET 命中 final → 文件下载（Content-Length + Range）；
+未命中 → spawn 后台获取任务并立即 202；轮询至终态；错误映射（400/404/502）在轮询时
+呈现且失败态消费一次后重新 spawn；完整性门禁（ENDLIST + 段数对账 + exit 0）缺一
+不产 final；排队占槽不 429；ffmpeg argv/段泵语义由后台任务复用。
 """
 
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from urllib.parse import urljoin
 
@@ -18,6 +21,7 @@ import httpx
 import pytest
 
 import app.api.stream as stream_mod
+import app.services.space_cache as space_cache
 from app.core.config import settings
 from app.services.providers.base import ProviderError, VideoNotFoundError
 from app.services.providers.ytdlp import SpaceNotReplayError, YtdlpProvider
@@ -25,10 +29,23 @@ from app.services.providers.ytdlp import SpaceNotReplayError, YtdlpProvider
 FIXTURES = Path(__file__).parent / "fixtures" / "twitter_space"
 SPACE_ID = "1AKEmvYqbrOKL"
 AUTH = {"X-API-Key": "test-key-123"}
-PLAYLIST_A = "https://prod-fastly-us-west-1.video.pscp.tv/a/playlist.m3u8?type=replay"
-PLAYLIST_B = "https://prod-fastly-us-west-1.video.pscp.tv/b/playlist.m3u8?type=replay"
 SEG_1 = "https://prod-fastly-us-west-1.video.pscp.tv/a/chunk_1_a.aac"
 SEG_2 = "https://prod-fastly-us-west-1.video.pscp.tv/a/chunk_2_a.aac"
+PLAYLIST_TEXT = (
+    "#EXTM3U\n#EXT-X-TARGETDURATION:4\n"
+    f"#EXTINF:3.008,\n{SEG_1}\n#EXTINF:3.0,\n{SEG_2}\n#EXT-X-ENDLIST\n"
+)
+
+
+@pytest.fixture(autouse=True)
+def _space_cache_isolated(monkeypatch, tmp_path):
+    """物化缓存目录指到本测试 tmp；模块级单飞状态逐测试清零。"""
+    monkeypatch.setattr(settings, "SPACE_CACHE_DIR", str(tmp_path / "space-cache"))
+    space_cache._tasks.clear()
+    monkeypatch.setattr(space_cache, "_started", False)
+    monkeypatch.setattr(space_cache, "_lock", None)
+    yield
+    space_cache._tasks.clear()
 
 
 def _meta() -> dict:
@@ -140,11 +157,13 @@ def _patch_provider(monkeypatch, payloads: list[dict]) -> list[str]:
     return urls
 
 
-def _patch_segments(monkeypatch, segments: list[str]):
-    async def fake_fetch(playlist_url, headers):
-        return segments
+def _patch_playlist(monkeypatch, text: str, segments: list[str]):
+    """后台任务消费的是 _fetch_media_playlist（含 playlist 全文，供 ENDLIST 门禁）。"""
 
-    monkeypatch.setattr(stream_mod, "_fetch_media_segments", fake_fetch)
+    async def fake_fetch(playlist_url, headers):
+        return text, segments
+
+    monkeypatch.setattr(stream_mod, "_fetch_media_playlist", fake_fetch)
 
 
 def _patch_segment_chunks(monkeypatch, mapping: dict[str, list[bytes]]):
@@ -157,6 +176,24 @@ def _patch_segment_chunks(monkeypatch, mapping: dict[str, list[bytes]]):
             yield piece
 
     monkeypatch.setattr(stream_mod, "_stream_url_chunks", chunks)
+
+
+def _poll_until_terminal(client, timeout: float = 5.0):
+    """轮询 202 至终态（TestClient portal loop 与后台任务并发推进）。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        resp = client.get(f"/api/stream/twitter_space/{SPACE_ID}")
+        if resp.status_code != 202:
+            return resp
+        time.sleep(0.02)
+    pytest.fail("materialization did not reach a terminal status in time")
+
+
+def _make_final(space_id: str, payload: bytes) -> Path:
+    space_cache.ensure_dir()
+    final = space_cache.final_path(space_id)
+    final.write_bytes(payload)
+    return final
 
 
 @pytest.fixture
@@ -197,28 +234,35 @@ def _assert_common_argv(cmd: tuple) -> None:
 
 
 class TestStreamEndpoint:
+    """两阶段交付语义：未命中 202（spawn 后台任务，脱离连接）→ 轮询 → final 文件下载。"""
 
-    def test_happy_path_headers_body_stdin_and_argv(
+    def test_happy_path_202_then_200_file(
         self, authed_client, spawn_record, monkeypatch
     ):
         _patch_provider(monkeypatch, [_meta()])
-        _patch_segments(monkeypatch, [SEG_1, SEG_2])
+        _patch_playlist(monkeypatch, PLAYLIST_TEXT, [SEG_1, SEG_2])
         _patch_segment_chunks(monkeypatch, {SEG_1: [b"aaa", b"bbb"], SEG_2: [b"ccc"]})
-        resp = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
+        first = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
+        assert first.status_code == 202
+        assert first.json() == {"status": "extracting", "retry_after": 5}
+        resp = _poll_until_terminal(authed_client)
         assert resp.status_code == 200
         assert resp.headers["content-type"] == "audio/mp4"
         assert (
             resp.headers["content-disposition"]
             == f'attachment; filename="space-{SPACE_ID}.m4a"'
         )
-        assert "accept-ranges" not in resp.headers
+        assert resp.headers["content-length"] == str(len(b"frag1frag2"))
         assert resp.content == b"frag1frag2"
         assert len(spawn_record) == 1
         _assert_common_argv(spawn_record[0])
+        # 改名即完整态：final 在盘上，.part 已消失
+        assert space_cache.final_path(SPACE_ID).is_file()
+        assert not space_cache.part_path(SPACE_ID).exists()
 
     def test_all_segments_reach_ffmpeg_stdin(self, authed_client, monkeypatch):
         _patch_provider(monkeypatch, [_meta()])
-        _patch_segments(monkeypatch, [SEG_1, SEG_2])
+        _patch_playlist(monkeypatch, PLAYLIST_TEXT, [SEG_1, SEG_2])
         stdin = FakeStdin()
 
         async def fake_exec(*cmd, **kwargs):
@@ -228,110 +272,142 @@ class TestStreamEndpoint:
         _patch_segment_chunks(
             monkeypatch, {SEG_1: [b"seg1a", b"seg1b"], SEG_2: [b"seg2a"]}
         )
-        resp = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
+        resp = _poll_until_terminal(authed_client)
         assert resp.status_code == 200
         assert bytes(stdin.received) == b"seg1aseg1bseg2a"
         assert stdin.closed  # 全部段写完后 stdin 必须关闭让 ffmpeg 收尾
 
-    def test_stdin_gated_stdout_still_streams(self, authed_client, monkeypatch):
-        """真实 ffmpeg 互锁建模：stdin 收到段数据前 stdout 零产出。
+    def test_single_flight_and_cached_repeat_no_refetch(
+        self, authed_client, spawn_record, monkeypatch
+    ):
+        """进行中重复 GET 复用同一任务（单飞）；final 命中后不再提取/抓取（根治重复消耗代理）。"""
+        fetch_calls = []
 
-        泵任务若先于预读启动（修复后顺序）则正常出流；旧顺序（预读先行）
-        会在这里白等 HTTP_TIMEOUT_SECONDS 后 502——本测试锁住修复。
-        """
-        from app.core.config import settings
+        async def slow_fetch(self, **kwargs):
+            fetch_calls.append(kwargs["video_id"])
+            await asyncio.sleep(0.15)
+            return _meta()
 
-        monkeypatch.setattr(settings, "HTTP_TIMEOUT_SECONDS", 1.0)
-        gated_out = FakeStream([b"frag1"], hang=True)  # stdout 等 stdin 喂数据才吐 frag1、随后 EOF
-        stdin = FakeStdin(gate_stdout=gated_out)
-
-        async def fake_exec(*cmd, **kwargs):
-            p = FakeProcess(out_chunks=[], exit_code=0, stdin=stdin)
-            p.stdout = gated_out
-            return p
-
-        monkeypatch.setattr(stream_mod.asyncio, "create_subprocess_exec", fake_exec)
-        _patch_provider(monkeypatch, [_meta()])
-        _patch_segments(monkeypatch, [SEG_1])
+        monkeypatch.setattr(YtdlpProvider, "fetch_video_info", slow_fetch)
+        _patch_playlist(monkeypatch, PLAYLIST_TEXT, [SEG_1])
         _patch_segment_chunks(monkeypatch, {SEG_1: [b"seg"]})
-        resp = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
+        first = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
+        assert first.status_code == 202
+        second = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
+        assert second.status_code == 202
+        resp = _poll_until_terminal(authed_client)
         assert resp.status_code == 200
-        assert resp.content == b"frag1"
+        assert resp.content == b"frag1frag2"
+        assert fetch_calls == [SPACE_ID]
+        cached = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
+        assert cached.status_code == 200
+        assert cached.content == b"frag1frag2"
+        assert fetch_calls == [SPACE_ID]  # 缓存命中：零重复提取
+
+    def test_final_delivery_supports_range_resume(self, authed_client, monkeypatch):
+        """阶段二：对 final 普通文件下载，Range/断点续传由 Starlette FileResponse 原生承担。"""
+        payload = bytes(range(256)) * 64
+        _make_final(SPACE_ID, payload)
+        full = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
+        assert full.status_code == 200
+        assert full.headers["content-length"] == str(len(payload))
+        assert full.headers["accept-ranges"] == "bytes"
+        assert full.content == payload
+        head = authed_client.get(
+            f"/api/stream/twitter_space/{SPACE_ID}", headers={"Range": "bytes=0-9"}
+        )
+        assert head.status_code == 206
+        assert head.content == payload[:10]
+        assert head.headers["content-range"] == f"bytes 0-9/{len(payload)}"
+        tail = authed_client.get(
+            f"/api/stream/twitter_space/{SPACE_ID}", headers={"Range": "bytes=100-"}
+        )
+        assert tail.status_code == 206
+        assert tail.content == payload[100:]
 
     def test_rejects_bad_space_id(self, authed_client):
         resp = authed_client.get("/api/stream/twitter_space/1AKEmvYqbrOK")
         assert resp.status_code == 400
         assert resp.json()["detail"] == "Invalid X Space id"
 
-    def test_extracts_fresh_playlist_per_request(
-        self, authed_client, spawn_record, monkeypatch
-    ):
-        """design 不变式 2：playlist 短命，每次请求必须现取，第二次不得复用。"""
-        payload_a = _meta() | {"url": PLAYLIST_A}
-        payload_b = _meta() | {"url": PLAYLIST_B}
-        urls = _patch_provider(monkeypatch, [payload_a, payload_b])
-        fetched_playlists: list[str] = []
+    def test_live_space_maps_400_after_poll(self, authed_client, monkeypatch):
+        """错误契约保持：直播中仍 400，只是在轮询时呈现（提取在后台任务内）。"""
 
-        async def fake_fetch(playlist_url, headers):
-            fetched_playlists.append(playlist_url)
-            return [SEG_1]
-
-        monkeypatch.setattr(stream_mod, "_fetch_media_segments", fake_fetch)
-
-        async def chunks(url, headers, chunk_size, client=None):
-            yield b"x"
-
-        monkeypatch.setattr(stream_mod, "_stream_url_chunks", chunks)
-        assert authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}").content
-        assert authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}").content
-        assert urls == [
-            f"https://x.com/i/spaces/{SPACE_ID}",
-            f"https://x.com/i/spaces/{SPACE_ID}",
-        ]
-        assert fetched_playlists == [PLAYLIST_A, PLAYLIST_B]
-
-    def test_live_space_maps_400(self, authed_client, monkeypatch):
         async def live(self, **kwargs):
             raise SpaceNotReplayError(
                 "twitter space x is not a replay (live_status=is_live)"
             )
 
         monkeypatch.setattr(YtdlpProvider, "fetch_video_info", live)
-        resp = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
+        first = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
+        assert first.status_code == 202
+        resp = _poll_until_terminal(authed_client)
         assert resp.status_code == 400
         assert "is_live" in resp.json()["detail"]
+        assert not space_cache.final_path(SPACE_ID).exists()
 
-    def test_unavailable_space_maps_404(self, authed_client, monkeypatch):
+    def test_unavailable_space_maps_404_after_poll(self, authed_client, monkeypatch):
         async def gone(self, **kwargs):
             raise VideoNotFoundError(
                 "twitter space replay unavailable: replay is disabled"
             )
 
         monkeypatch.setattr(YtdlpProvider, "fetch_video_info", gone)
-        resp = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
+        first = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
+        assert first.status_code == 202
+        resp = _poll_until_terminal(authed_client)
         assert resp.status_code == 404
         assert "pscp.tv" not in resp.text
 
-    def test_extraction_failure_maps_502(self, authed_client, monkeypatch):
+    def test_extraction_failure_maps_502_after_poll(self, authed_client, monkeypatch):
         async def boom(self, **kwargs):
             raise ProviderError("yt-dlp extraction failed: [redacted-playlist-url]")
 
         monkeypatch.setattr(YtdlpProvider, "fetch_video_info", boom)
-        resp = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
+        first = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
+        assert first.status_code == 202
+        resp = _poll_until_terminal(authed_client)
         assert resp.status_code == 502
-        assert resp.json()["detail"].startswith("X Space extraction failed")
+        assert resp.json()["detail"].startswith("X Space materialization failed")
+
+    def test_failure_is_retryable_next_get_respawns(
+        self, authed_client, spawn_record, monkeypatch
+    ):
+        """失败态不持久（锁定决策 4）：消费一次后，下次 GET 重新 spawn。"""
+        calls = {"n": 0}
+
+        async def flaky(self, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise ProviderError("yt-dlp extraction failed: transient")
+            return _meta()
+
+        monkeypatch.setattr(YtdlpProvider, "fetch_video_info", flaky)
+        _patch_playlist(monkeypatch, PLAYLIST_TEXT, [SEG_1])
+        _patch_segment_chunks(monkeypatch, {SEG_1: [b"seg"]})
+        first = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
+        assert first.status_code == 202
+        resp = _poll_until_terminal(authed_client)
+        assert resp.status_code == 502
+        again = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
+        assert again.status_code == 202  # 重新 spawn，不再是 502
+        resp = _poll_until_terminal(authed_client)
+        assert resp.status_code == 200
+        assert calls["n"] == 2
 
     def test_playlist_fetch_failure_maps_502_and_redacts(
         self, authed_client, monkeypatch
     ):
         async def fail(playlist_url, headers):
             raise stream_mod.SegmentFetchError(
-                "segment fetch failed: https://x.video.pscp.tv/a/playlist.m3u8 boom"
+                "playlist fetch failed: https://x.video.pscp.tv/a/playlist.m3u8 boom"
             )
 
-        monkeypatch.setattr(stream_mod, "_fetch_media_segments", fail)
+        monkeypatch.setattr(stream_mod, "_fetch_media_playlist", fail)
         _patch_provider(monkeypatch, [_meta()])
-        resp = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
+        first = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
+        assert first.status_code == 202
+        resp = _poll_until_terminal(authed_client)
         assert resp.status_code == 502
         assert "pscp.tv" not in resp.text
 
@@ -346,66 +422,97 @@ class TestStreamEndpoint:
         finally:
             settings.API_KEY = original
 
-    def test_429_when_concurrency_full(self, authed_client, spawn_record, monkeypatch):
-        monkeypatch.setattr(settings, "MAX_CONCURRENT_STREAMS", 0)
+    def test_full_slots_queue_instead_of_429(
+        self, authed_client, spawn_record, monkeypatch
+    ):
+        """锁定决策 3/8：后台任务排队等槽（不 429、不翻转 202→502）；
+        拿到槽之前不提取（不占上游代理出口）。"""
+        monkeypatch.setattr(settings, "MAX_CONCURRENT_STREAMS", 1)
         stream_mod.stream_limiter.reset()
+        fetch_calls = []
+
+        async def fetch(self, **kwargs):
+            fetch_calls.append(kwargs["video_id"])
+            return _meta()
+
+        monkeypatch.setattr(YtdlpProvider, "fetch_video_info", fetch)
+        _patch_playlist(monkeypatch, PLAYLIST_TEXT, [SEG_1])
+        _patch_segment_chunks(monkeypatch, {SEG_1: [b"seg"]})
+        stream_mod.stream_limiter.active = 1  # 槽被占（如视频号流在跑）
         try:
             resp = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
-            assert resp.status_code == 429
-            assert resp.json()["detail"] == "Too many concurrent streams"
+            assert resp.status_code == 202
+            assert fetch_calls == []  # 排队中：提取尚未开始
+            stream_mod.stream_limiter.active = 0  # 释放槽
+            resp = _poll_until_terminal(authed_client)
+            assert resp.status_code == 200
+            assert fetch_calls == [SPACE_ID]
         finally:
             stream_mod.stream_limiter.reset()
 
-    def test_ffmpeg_instant_failure_maps_502(self, authed_client, monkeypatch):
+    def test_ffmpeg_instant_failure_maps_502(
+        self, authed_client, monkeypatch
+    ):
         async def fake_exec(*cmd, **kwargs):
-            return FakeProcess(
-                out_chunks=[],
-                err_chunks=[b"failed\n"],
-                exit_code=1,
-            )
+            return FakeProcess(out_chunks=[], err_chunks=[b"failed\n"], exit_code=1)
 
         monkeypatch.setattr(stream_mod.asyncio, "create_subprocess_exec", fake_exec)
         _patch_provider(monkeypatch, [_meta()])
-        _patch_segments(monkeypatch, [SEG_1])
-        resp = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
+        _patch_playlist(monkeypatch, PLAYLIST_TEXT, [SEG_1])
+        _patch_segment_chunks(monkeypatch, {SEG_1: [b"seg"]})
+        first = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
+        assert first.status_code == 202
+        resp = _poll_until_terminal(authed_client)
         assert resp.status_code == 502
         assert "pscp.tv" not in resp.text  # 短命 playlist URL 不回显给客户端
+        assert not space_cache.final_path(SPACE_ID).exists()
 
     def test_no_playlist_url_maps_502(self, authed_client, monkeypatch):
         payload = _meta() | {"url": ""}
         _patch_provider(monkeypatch, [payload])
-        resp = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
+        first = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
+        assert first.status_code == 202
+        resp = _poll_until_terminal(authed_client)
         assert resp.status_code == 502
 
     def test_empty_playlist_maps_502(self, authed_client, monkeypatch):
+        async def fake_text(url, headers):
+            return "#EXTM3U\n"
+
+        monkeypatch.setattr(stream_mod, "_fetch_text", fake_text)
         _patch_provider(monkeypatch, [_meta()])
-        _patch_segments(monkeypatch, [])
-        resp = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
+        first = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
+        assert first.status_code == 202
+        resp = _poll_until_terminal(authed_client)
         assert resp.status_code == 502
 
 
-class TestSegmentFailureAborts:
-    """完整性不变式：响应正常收尾 ⇔ 所有段抓取成功且 ffmpeg exit 0。
-    任何段失败必须传输中断，禁止 200 假成功（round-4 major）。"""
+class TestMaterializationIntegrity:
+    """完整性门禁（锁定决策 5）与故障矩阵（锁定决策 6）：坏列表/坏段/磁盘满
+    不发布 final、只留可回收临时文件；交付承诺 = playlist 声明内容的完整交付。"""
 
-    def _spawn(self, monkeypatch, spawn_record):
-        async def fake_exec(*cmd, **kwargs):
-            spawn_record.append(cmd)
-            return FakeProcess(out_chunks=[b"f1", b"f2"], exit_code=0)
+    def test_playlist_without_endlist_fails_no_final_no_part(
+        self, authed_client, monkeypatch
+    ):
+        """无 #EXT-X-ENDLIST = 非回放/未完结，fail、不产 final。"""
+        _patch_provider(monkeypatch, [_meta()])
+        _patch_playlist(
+            monkeypatch, f"#EXTM3U\n#EXTINF:3.0,\n{SEG_1}\n", [SEG_1]
+        )
+        _patch_segment_chunks(monkeypatch, {SEG_1: [b"data"]})
+        first = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
+        assert first.status_code == 202
+        resp = _poll_until_terminal(authed_client)
+        assert resp.status_code == 502
+        assert "ENDLIST" in resp.json()["detail"]
+        assert not space_cache.final_path(SPACE_ID).exists()
+        assert not space_cache.part_path(SPACE_ID).exists()
 
-        monkeypatch.setattr(stream_mod.asyncio, "create_subprocess_exec", fake_exec)
-
-    def test_middle_segment_404_aborts_response(
+    def test_middle_segment_404_no_final_no_part(
         self, authed_client, spawn_record, monkeypatch
     ):
         _patch_provider(monkeypatch, [_meta()])
-        _patch_segments(monkeypatch, [SEG_1, SEG_2])
-
-        async def fake_exec(*cmd, **kwargs):
-            spawn_record.append(cmd)
-            return FakeProcess(out_chunks=[b"f1", b"f2"], exit_code=0)
-
-        monkeypatch.setattr(stream_mod.asyncio, "create_subprocess_exec", fake_exec)
+        _patch_playlist(monkeypatch, PLAYLIST_TEXT, [SEG_1, SEG_2])
 
         async def chunks(url, headers, chunk_size, client=None):
             if url == SEG_1:
@@ -414,49 +521,67 @@ class TestSegmentFailureAborts:
                 raise stream_mod.SegmentFetchError("segment HTTP 404")
 
         monkeypatch.setattr(stream_mod, "_stream_url_chunks", chunks)
-        try:
-            resp = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
-        except Exception as exc:
-            # 传输中断形态：客户端拿到异常而非干净响应
-            assert "404" in str(exc) or "segment" in str(exc).lower()
-            return
-        # 若返回了响应，绝不允许是「200 + 完整体」的假成功形态
-        assert resp.status_code != 200 or resp.content != b"f1f2"
+        first = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
+        assert first.status_code == 202
+        resp = _poll_until_terminal(authed_client)
+        assert resp.status_code == 502
+        assert not space_cache.final_path(SPACE_ID).exists()
+        assert not space_cache.part_path(SPACE_ID).exists()
 
-    def test_segment_error_redacts_url(self, authed_client, spawn_record, monkeypatch):
-        _patch_provider(monkeypatch, [_meta()])
-        _patch_segments(monkeypatch, [SEG_1])
-        _patch_segment_chunks(monkeypatch, {})  # 全部 404
-        resp = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
-        assert "pscp.tv" not in resp.text
-
-    def test_zero_byte_segment_aborts_response(
+    def test_enospc_discards_part_and_stays_retryable(
         self, authed_client, spawn_record, monkeypatch
     ):
-        """200 + 空体段 = 段失败（round-6 major）：ADTS 零字节不可能是合法内容。"""
+        """磁盘满（ENOSPC）：fail-loud、.part 删除、不产 final；下次 GET 重新 spawn。"""
+        calls = {"n": 0}
+
+        def fake_forward(process, writer, drain, first, stderr_tail, space_id):
+            calls["n"] += 1
+
+            async def gen():
+                yield b"half"
+                raise OSError(errno.ENOSPC, "No space left on device")
+
+            return gen()
+
+        monkeypatch.setattr(stream_mod, "_forward_ffmpeg_output", fake_forward)
+        _patch_provider(monkeypatch, [_meta(), _meta()])
+        _patch_playlist(monkeypatch, PLAYLIST_TEXT, [SEG_1])
+        _patch_segment_chunks(monkeypatch, {SEG_1: [b"seg"]})
+        first = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
+        assert first.status_code == 202
+        resp = _poll_until_terminal(authed_client)
+        assert resp.status_code == 502
+        assert not space_cache.final_path(SPACE_ID).exists()
+        assert not space_cache.part_path(SPACE_ID).exists()
+        again = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
+        assert again.status_code == 202
+        assert calls["n"] == 2
+
+    def test_segment_count_mismatch_blocks_publish(
+        self, authed_client, spawn_record, monkeypatch
+    ):
+        """段数对账（锁定决策 5）：声明段数 != 实际写入段数 → 不发布 final。
+        注入方式：直接对 pump 计数器动手脚（只改判据来源，不全局替换）。"""
         _patch_provider(monkeypatch, [_meta()])
-        _patch_segments(monkeypatch, [SEG_1, SEG_2])
+        _patch_playlist(monkeypatch, PLAYLIST_TEXT, [SEG_1, SEG_2])
+        _patch_segment_chunks(monkeypatch, {SEG_1: [b"s1"], SEG_2: [b"s2"]})
+        original_pump = stream_mod._pump_segments
 
-        async def fake_exec(*cmd, **kwargs):
-            spawn_record.append(cmd)
-            return FakeProcess(out_chunks=[b"f1", b"f2"], exit_code=0)
+        async def pump_with_lost_count(segment_urls, headers, process, progress=None):
+            result = await original_pump(segment_urls, headers, process, progress)
+            if progress is not None:
+                # pump 成功后篡改计数：模拟「泵漏记一段」的回归，对账必须拦下发布
+                progress["segments_done"] = len(segment_urls) - 1
+            return result
 
-        monkeypatch.setattr(stream_mod.asyncio, "create_subprocess_exec", fake_exec)
-
-        async def chunks(url, headers, chunk_size, client=None):
-            if url == SEG_1:
-                yield b"ok1"
-            else:
-                raise stream_mod.SegmentFetchError("segment HTTP 200 with empty body")
-
-        monkeypatch.setattr(stream_mod, "_stream_url_chunks", chunks)
-        try:
-            resp = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
-        except Exception as exc:
-            assert "empty body" in str(exc)
-            return
-        # 若返回了响应，绝不允许是「200 + 完整体」的假成功形态
-        assert resp.status_code != 200 or resp.content != b"f1f2"
+        monkeypatch.setattr(stream_mod, "_pump_segments", pump_with_lost_count)
+        first = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
+        assert first.status_code == 202
+        resp = _poll_until_terminal(authed_client)
+        assert resp.status_code == 502
+        assert "reconciliation" in resp.json()["detail"]
+        assert not space_cache.final_path(SPACE_ID).exists()
+        assert not space_cache.part_path(SPACE_ID).exists()
 
 
 class TestEmptySegmentGuard:
