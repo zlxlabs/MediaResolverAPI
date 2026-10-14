@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import enum
 import os
+import re
 import shutil
 import time
 from pathlib import Path
@@ -21,6 +22,8 @@ from typing import Callable, Coroutine, Optional
 from loguru import logger
 
 from ..core.config import settings
+from .providers.base import VideoNotFoundError
+from .providers.ytdlp import SpaceNotReplayError, redact_playlist_url
 
 FINAL_SUFFIX = ".m4a"
 PART_SUFFIX = ".part"
@@ -33,8 +36,10 @@ _STALE_PART_GRACE_SECONDS = 600.0
 # 失败注册表容量（R2 major）：唯一 Space 反复失败不能无界吃内存；
 # 逐出 = 忘掉失败态，下次 GET 按未命中重拉，语义正确。
 _FAILED_CAP = 1024
+_FAILED_TEXT_MAX = 512
 # Pending and running materializations share one process-wide admission bound.
 _MAX_MATERIALIZATION_TASKS = 8
+_ABSOLUTE_PATH_RE = re.compile(r"/[^\s'\"]+")
 
 
 class SpaceCacheAdmissionError(RuntimeError):
@@ -45,7 +50,7 @@ class SpaceCacheAdmissionError(RuntimeError):
 # _tasks 只存进行中任务；done 条目由 _reap_done_entry 在查询路径惰性归位
 # （成功/取消弹出、失败迁 _failures），done Task 连同 traceback 不滞留内存。
 _tasks: dict[str, asyncio.Task] = {}
-_failures: dict[str, BaseException] = {}
+_failures: dict[str, tuple[int, str]] = {}
 _lock: Optional[asyncio.Lock] = None
 _started = False
 _sweeper_task: Optional[asyncio.Task] = None
@@ -112,14 +117,25 @@ def _reap_done_entry(space_id: str) -> None:
 
 
 def _record_failure(space_id: str, exc: BaseException) -> None:
-    """记失败态（同 id 重失败覆盖旧条目）；cap 满时 FIFO 逐出最旧。"""
-    _failures[space_id] = exc
+    """只存 HTTP 状态与脱敏短文本，不把异常/traceback 保留在失败注册表。"""
+    message = redact_playlist_url(str(exc))
+    message = _ABSOLUTE_PATH_RE.sub(lambda match: match.group(0).rsplit("/", 1)[-1], message)
+    if isinstance(exc, SpaceNotReplayError):
+        status_code = 400
+        detail = f"X Space is not a downloadable replay: {message}"
+    elif isinstance(exc, VideoNotFoundError):
+        status_code = 404
+        detail = f"X Space replay unavailable: {message}"
+    else:
+        status_code = 502
+        detail = f"X Space materialization failed: {message or type(exc).__name__}"
+    _failures[space_id] = (status_code, detail[:_FAILED_TEXT_MAX])
     while len(_failures) > _FAILED_CAP:
         _failures.pop(next(iter(_failures)))
 
 
-def consume_failure(space_id: str) -> Optional[BaseException]:
-    """弹出已失败任务的异常（消费一次）；无失败条目返回 None。
+def consume_failure(space_id: str) -> Optional[tuple[int, str]]:
+    """弹出已失败任务的 HTTP 状态与脱敏文案（消费一次）；无条目返回 None。
 
     失败态不持久：消费后状态回落 ABSENT，下次 GET 重新 spawn（锁定决策 4）。
     """
@@ -280,6 +296,9 @@ def sweep() -> dict[str, int]:
     directory = cache_dir()
     if not directory.is_dir():
         return stats
+    active_ids = {
+        space_id for space_id, task in _tasks.items() if not task.done()
+    }
     ttl_seconds = settings.SPACE_CACHE_TTL_HOURS * 3600
     now = time.time()
     for final in sorted(directory.glob(f"*{FINAL_SUFFIX}")):
@@ -295,28 +314,47 @@ def sweep() -> dict[str, int]:
             age = now - part.stat().st_mtime
         except FileNotFoundError:
             continue
-        if age >= ttl_seconds:
+        space_id = part.name[: -len(PART_SUFFIX)]
+        if (
+            age >= ttl_seconds
+            and age >= _STALE_PART_GRACE_SECONDS
+            and space_id not in active_ids
+        ):
             _unlink(part)
             stats["part_removed"] += 1
-    _evict_to_watermark(stats)
+    _evict_to_watermark(stats, active_ids)
     return stats
 
 
-def _evict_to_watermark(stats: dict[str, int]) -> None:
+def _evict_to_watermark(stats: dict[str, int], active_ids: set[str]) -> None:
     min_free_bytes = settings.SPACE_CACHE_MIN_FREE_MB * 1024 * 1024
     if settings.SPACE_CACHE_MIN_FREE_MB <= 0 or _disk_free_bytes() >= min_free_bytes:
         return
     directory = cache_dir()
-    candidates = sorted(directory.glob(f"*{FINAL_SUFFIX}"), key=_mtime_of)
-    for final in candidates:
+    candidates = list(directory.glob(f"*{FINAL_SUFFIX}"))
+    now = time.time()
+    for part in directory.glob(f"*{PART_SUFFIX}"):
+        space_id = part.name[: -len(PART_SUFFIX)]
+        if space_id in active_ids:
+            continue
+        try:
+            if now - part.stat().st_mtime < _STALE_PART_GRACE_SECONDS:
+                continue
+        except FileNotFoundError:
+            continue
+        candidates.append(part)
+    candidates.sort(key=_mtime_of)
+    for candidate in candidates:
         if _disk_free_bytes() >= min_free_bytes:
             break
         logger.warning(
-            "twitter_space cache below watermark, evicting oldest final name={}",
-            final.name,
+            "twitter_space cache below watermark, evicting oldest item name={}",
+            candidate.name,
         )
-        _unlink(final)
+        _unlink(candidate)
         stats["watermark_removed"] += 1
+        if candidate.name.endswith(PART_SUFFIX):
+            stats["part_removed"] += 1
 
 
 def _mtime_of(path: Path) -> float:

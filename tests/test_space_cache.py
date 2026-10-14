@@ -15,6 +15,7 @@ from collections import namedtuple
 from pathlib import Path
 
 import pytest
+import yaml
 from loguru import logger
 
 import app.services.space_cache as space_cache
@@ -155,10 +156,27 @@ class TestSingleFlight:
             await space_cache._tasks[SPACE_ID]
         assert space_cache.status(SPACE_ID) is space_cache.SpaceCacheStatus.FAILED
         assert SPACE_ID not in space_cache._tasks
-        exc = space_cache.consume_failure(SPACE_ID)
-        assert isinstance(exc, RuntimeError)
+        failure = space_cache.consume_failure(SPACE_ID)
+        assert failure == (502, "X Space materialization failed: proxy exploded")
         assert space_cache.consume_failure(SPACE_ID) is None
         assert space_cache.status(SPACE_ID) is space_cache.SpaceCacheStatus.ABSENT
+
+    def test_failure_registry_stores_redacted_bounded_response_snapshot(self):
+        raw = RuntimeError(
+            "fetch failed https://x.video.pscp.tv/a/private.m3u8?token=secret "
+            "/var/private/cache/space.part "
+            + "x" * 700
+        )
+        space_cache._record_failure(SPACE_ID, raw)
+
+        stored = space_cache._failures[SPACE_ID]
+        assert not isinstance(stored, BaseException)
+        status_code, detail = stored
+        assert status_code == 502
+        assert "secret" not in detail
+        assert "pscp.tv" not in detail
+        assert "/var/private/cache" not in detail
+        assert len(detail) <= space_cache._FAILED_TEXT_MAX
 
     async def test_registry_cap_evicts_oldest_fifo(self):
         """cap 满：FIFO 逐出最旧失败条目（dict 插入序），新条目保留。"""
@@ -170,7 +188,10 @@ class TestSingleFlight:
         assert space_cache.consume_failure(oldest) is None
         assert space_cache.status(oldest) is space_cache.SpaceCacheStatus.ABSENT
         newest = f"1A{space_cache._FAILED_CAP:011d}"
-        assert isinstance(space_cache.consume_failure(newest), RuntimeError)
+        assert space_cache.consume_failure(newest) == (
+            502,
+            f"X Space materialization failed: fail-{space_cache._FAILED_CAP}",
+        )
 
     async def test_evicted_failure_respawns_instead_of_erroring(self):
         """逐出语义 = 忘掉失败态：下次 GET 按 ABSENT 重拉，不报错。"""
@@ -213,7 +234,10 @@ class TestSingleFlight:
             await task
         assert task.exception() is task.exception()
         assert space_cache.status(SPACE_ID) is space_cache.SpaceCacheStatus.FAILED
-        assert isinstance(space_cache.consume_failure(SPACE_ID), RuntimeError)
+        assert space_cache.consume_failure(SPACE_ID) == (
+            502,
+            "X Space materialization failed: once",
+        )
 
     async def test_failed_entry_consumed_once_then_respawn_allowed(self):
         async def boom():
@@ -224,8 +248,8 @@ class TestSingleFlight:
         with pytest.raises(RuntimeError):
             await task
         assert space_cache.status(SPACE_ID) is space_cache.SpaceCacheStatus.FAILED
-        exc = space_cache.consume_failure(SPACE_ID)
-        assert isinstance(exc, RuntimeError)
+        failure = space_cache.consume_failure(SPACE_ID)
+        assert failure == (502, "X Space materialization failed: proxy exploded")
         assert space_cache.consume_failure(SPACE_ID) is None
         assert space_cache.status(SPACE_ID) is space_cache.SpaceCacheStatus.ABSENT
 
@@ -317,6 +341,35 @@ class TestSweep:
         assert stats["watermark_removed"] == 1
         assert not old.exists()
         assert mid.exists() and new.exists()
+
+    async def test_watermark_reclaims_only_stale_orphan_parts(self, monkeypatch):
+        orphan_id = "1Q" + "q" * 11
+        active_id = "1R" + "r" * 11
+        fresh_id = "1S" + "s" * 11
+        orphan = _make_part(orphan_id)
+        active = _make_part(active_id)
+        fresh = _make_part(fresh_id)
+        _age(orphan, space_cache._STALE_PART_GRACE_SECONDS + 60)
+        _age(active, space_cache._STALE_PART_GRACE_SECONDS + 60)
+        active_task = asyncio.create_task(asyncio.Event().wait())
+        space_cache._tasks[active_id] = active_task
+        fake = _FakeDiskUsage(
+            free_values=[100 * 1024**2, 100 * 1024**2, 3000 * 1024**2]
+        )
+        monkeypatch.setattr(space_cache, "_disk_free_bytes", lambda: fake(".").free)
+        monkeypatch.setattr(settings, "SPACE_CACHE_MIN_FREE_MB", 2048)
+
+        try:
+            stats = space_cache.sweep()
+            assert stats["watermark_removed"] == 1
+            assert stats["part_removed"] == 1
+            assert not orphan.exists()
+            assert active.exists()
+            assert fresh.exists()
+        finally:
+            active_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await active_task
 
     def test_sweep_without_cache_dir_is_noop(self, monkeypatch):
         monkeypatch.setattr(settings, "SPACE_CACHE_DIR", "/nonexistent/space-cache-x")
@@ -427,9 +480,15 @@ class TestPeriodicSweeper:
         try:
             await asyncio.sleep(0.08)
             assert SPACE_ID not in space_cache._tasks
-            assert isinstance(space_cache._failures.get(SPACE_ID), RuntimeError)
+            assert space_cache._failures.get(SPACE_ID) == (
+                502,
+                "X Space materialization failed: nobody polls me",
+            )
             assert space_cache.status(SPACE_ID) is space_cache.SpaceCacheStatus.FAILED
-            assert isinstance(space_cache.consume_failure(SPACE_ID), RuntimeError)
+            assert space_cache.consume_failure(SPACE_ID) == (
+                502,
+                "X Space materialization failed: nobody polls me",
+            )
         finally:
             await _cancel_sweeper()
 
@@ -459,3 +518,14 @@ class TestPeriodicSweeper:
         finally:
             logger.remove(sink_id)
             await _cancel_sweeper()
+
+
+@pytest.mark.parametrize(
+    "compose_name",
+    ("docker-compose.yml", "docker-compose.deploy.yml"),
+)
+def test_compose_mounts_space_cache_volume(compose_name):
+    repo_root = Path(__file__).resolve().parents[1]
+    compose = yaml.safe_load((repo_root / "docker" / compose_name).read_text())
+    volumes = compose["services"]["media-resolver"]["volumes"]
+    assert "../space-cache:/data/space-cache" in volumes

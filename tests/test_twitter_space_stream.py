@@ -366,7 +366,10 @@ class TestStreamEndpoint:
         assert first.status_code == 202
         resp = _poll_until_terminal(authed_client)
         assert resp.status_code == 400
-        assert "is_live" in resp.json()["detail"]
+        assert resp.json()["detail"] == (
+            "X Space is not a downloadable replay: "
+            "twitter space x is not a replay (live_status=is_live)"
+        )
         assert not space_cache.final_path(SPACE_ID).exists()
 
     def test_unavailable_space_maps_404_after_poll(self, authed_client, monkeypatch):
@@ -380,6 +383,10 @@ class TestStreamEndpoint:
         assert first.status_code == 202
         resp = _poll_until_terminal(authed_client)
         assert resp.status_code == 404
+        assert resp.json()["detail"] == (
+            "X Space replay unavailable: "
+            "twitter space replay unavailable: replay is disabled"
+        )
         assert "pscp.tv" not in resp.text
 
     def test_extraction_failure_maps_502_after_poll(self, authed_client, monkeypatch):
@@ -391,7 +398,10 @@ class TestStreamEndpoint:
         assert first.status_code == 202
         resp = _poll_until_terminal(authed_client)
         assert resp.status_code == 502
-        assert resp.json()["detail"].startswith("X Space materialization failed")
+        assert resp.json()["detail"] == (
+            "X Space materialization failed: "
+            "yt-dlp extraction failed: [redacted-playlist-url]"
+        )
 
     def test_failure_is_retryable_next_get_respawns(
         self, authed_client, spawn_record, monkeypatch
@@ -739,6 +749,27 @@ class TestMaterializationIntegrity:
         resp2 = _poll_until_terminal(authed_client)
         assert resp2.status_code == 502
         assert calls["n"] == 2
+
+    def test_midstream_low_disk_watermark_aborts_and_discards_part(
+        self, authed_client, spawn_record, monkeypatch
+    ):
+        """写入期间可用空间跌破水位时，轮询得到 502，且不留 part/final。"""
+        monkeypatch.setattr(settings, "SPACE_CACHE_MIN_FREE_MB", 1)
+        free_values = iter([10 * 1024**2, 10 * 1024**2, 1024**2 - 1])
+        monkeypatch.setattr(space_cache, "_disk_free_bytes", lambda: next(free_values))
+        _patch_provider(monkeypatch, [_meta()])
+        _patch_playlist(monkeypatch, PLAYLIST_TEXT, [SEG_1])
+        _patch_segment_chunks(monkeypatch, {SEG_1: [b"seg"]})
+
+        first = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
+        assert first.status_code == 202
+        resp = _poll_until_terminal(authed_client)
+
+        assert resp.status_code == 502
+        assert "storage below watermark" in resp.json()["detail"]
+        assert not space_cache.part_path(SPACE_ID).exists()
+        assert not space_cache.final_path(SPACE_ID).exists()
+        assert SPACE_ID not in space_cache._tasks
 
     def test_segment_count_mismatch_blocks_publish(
         self, authed_client, spawn_record, monkeypatch

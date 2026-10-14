@@ -12,6 +12,7 @@ services:
     volumes:
       - ../data:/app/data
       - ../logs:/app/logs
+      - ../space-cache:/data/space-cache
     restart: unless-stopped
     environment:
       - TZ=Asia/Shanghai

@@ -42,7 +42,7 @@ risk-tier: internal
 
 1. **`video_url` 指向本服务，必须带 `X-API-Key`。** 端点：`GET /api/stream/twitter_space/{space_id}`。文件就绪时返回 `200`（`Content-Type: audio/mp4`、`Content-Disposition: attachment`，直接保存即得可播放的 m4a）；AAC 不重编码，服务端只做容器拼装/remux，不改变「不做转码」承诺。
 2. **任务式等待协议：先 202、再轮询。** 文件未就绪时 GET 返回 `202 + {"status": "extracting", "retry_after": 5}`——获取任务在服务端后台进行（约 4~5 秒提取 + 按约 10~30 倍速拉完全场，2 小时场约 10 分钟），**断开连接不影响任务**；客户端按 `retry_after` 秒间隔轮询同一 URL 直到 200。进行中的重复请求复用同一个任务，不会重复消耗代理。
-3. **支持 Range / 断点续传。** 就绪文件是普通文件响应：带 `Content-Length`，支持 `Range`（`206 Partial Content`），下载中断后可用 `curl -C -` 等续传，不必整段重来。**续传窗口 72 小时**：final 文件按 mtime 保留 `SPACE_CACHE_TTL_HOURS`（默认 72h），过期清理；磁盘可用空间低于 `SPACE_CACHE_MIN_FREE_MB`（默认 2048 MB）时按最旧优先淘汰（正在下载的文件不受影响，已打开的读句柄能读完）。
+3. **支持 Range / 断点续传。** 就绪文件是普通文件响应：带 `Content-Length`，支持 `Range`（`206 Partial Content`），下载中断后可用 `curl -C -` 等续传，不必整段重来。**续传窗口 72 小时**：final 文件按 mtime 保留 `SPACE_CACHE_TTL_HOURS`（默认 72h），过期清理；磁盘可用空间低于 `SPACE_CACHE_MIN_FREE_MB`（默认 2048 MB）时按最旧优先淘汰 final 与超过 600 秒宽限期的孤儿 `.part`（正在运行的任务文件不受水位淘汰影响，已打开的 final 读句柄能读完）。
 4. **时长未知，大小以响应为准。** X 的 Space 元数据不提供时长（`data.duration` 恒为 `null`），文件大小在 200 响应的 `Content-Length` 里。
 5. **只支持回放，且只有约 30 天。** 正在直播或未开播的 Space 会明确报错（`live_status` 为 `is_live`/`is_upcoming`/缺失；`post_live` 即已结束可回放，错误在轮询时以 400/404 呈现）；X 只保留回放约 30 天，过期后 resolve 返回明确错误、下载端点轮询返回 404，服务不做任何兑底取回。
 6. **完整性承诺的边界。** 服务保证交付「回放清单声明内容的完整文件」：清单必须已完结（`#EXT-X-ENDLIST`）、声明段数与实际写入段数对账、ffmpeg exit 0，三者齐备才发布文件；任何一段失败都不产文件（轮询得 502，可重试）。这不等于「源内容完整」——清单与原始广播之间的残差上游不可证。
@@ -57,6 +57,7 @@ risk-tier: internal
 |-----------|--------|------|
 | 503 | `X Space materialization queue is full` | 待运行与运行中物化任务已达上限，新任务未受理 |
 | 503 | `storage below watermark` | spawn 前缓存盘可用空间低于 `SPACE_CACHE_MIN_FREE_MB`，新任务未受理 |
+| 502 | `X Space materialization failed: storage below watermark` | 物化写入中预计可用空间将低于水位，任务中止并删除 `.part` |
 
 ---
 
@@ -93,9 +94,9 @@ cp .env.example .env
 | `MAX_CONCURRENT_STREAMS` | 上游流式任务的**每进程**并发上限：视频号流式转发超限返回 429；X Space 后台获取超限排队等待（202 照常返回）。下载交付阶段读磁盘、不占此上限 | `4` | 一般不用改；单进程扛不住并发、或要用 `uvicorn --workers N` / 多副本时需按进程数自行核算（此项不是全局限制） |
 | `YTDLP_EXTRACT_TIMEOUT_SECONDS` | X Space 回放的 yt-dlp 单次提取超时（秒）；解析与后台获取两处消费 | `30` | 一般不用改；网络到 X 较慢时可放宽 |
 | `YTDLP_PROXY` | X 链路出口 HTTP 代理：yt-dlp 提取与 X Space 分段抓取共用；留空直连，其他平台出口不受影响 | 空字符串 `""` | 部署机网络到 X / pscp CDN 被墙（DNS 污染或封锁）时必须设为可用 HTTP 代理 |
-| `SPACE_CACHE_DIR` | X Space 物化缓存目录：后台获取的 `.part` 临时文件与就绪的 `.m4a` final 都在这里（单进程契约，多 worker/多副本不得共享，见「X Space 回放下载」第 10 条）。容器内默认路径**不预建、必须可写**：用 volume 挂到该路径，或改指已挂载的可写目录（见 `docker/docker-compose.deploy.yml` 注释示例） | `/data/space-cache` | 部署必须保证可写（挂卷或改路径），否则 X Space 获取任务全部失败（502） |
+| `SPACE_CACHE_DIR` | X Space 物化缓存目录：后台获取的 `.part` 临时文件与就绪的 `.m4a` final 都在这里（单进程契约，多 worker/多副本不得共享，见「X Space 回放下载」第 10 条）。两份 Compose 配置都将宿主相对目录挂到容器默认路径 | `/data/space-cache` | 部署必须保证宿主目录由容器用户 UID `10001` 可写，否则 X Space 获取任务失败（502） |
 | `SPACE_CACHE_TTL_HOURS` | X Space final 文件保留时长（按 mtime），即断点续传窗口 | `72` | 客户端需要更长的续传窗口时调大；调小会缩短可续传时间 |
-| `SPACE_CACHE_MIN_FREE_MB` | 缓存所在磁盘可用空间低于该值（MB）时，按 mtime 最旧优先淘汰 final 直到回升；正在下载的文件不受影响 | `2048` | 缓存盘容量大、Space 多时可下调；磁盘紧张时上调以保护同盘其他数据 |
+| `SPACE_CACHE_MIN_FREE_MB` | 缓存盘可用空间低于该值时，拒绝新任务；写入每个物化块前预留该水位，空间不足则以 502 中止；sweep 按 mtime 淘汰 final 与超过 600 秒且非活跃任务的孤儿 `.part` | `2048` | 磁盘紧张时上调以保护同盘其他数据 |
 | `STREAM_WINDOW_BYTES` | 视频号流式代理向 CDN 请求的有界窗口大小（字节）。每个窗口整块读完才向客户端吐数据 | `4194304` | 一般不用改；要压内存或适应更慢的客户端时才设 |
 | `STREAM_CHUNK_SIZE` | 流式转发的分块大小（字节） | `65536` | 一般不用改；要调整转发缓冲时才设 |
 | `COBALT_API_BASE` | Cobalt 自建服务地址，作为部分平台的兜底数据源 | 空字符串 `""`（未配置则 Cobalt 不可用） | 需要 Cobalt 兜底时必须设为实际服务地址；视频号无 Cobalt 兜底，不设不影响视频号 |
@@ -115,6 +116,8 @@ pip install -e .
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 # Docker 启动
+mkdir -p space-cache
+chown 10001:10001 space-cache  # 以 root 执行；容器用户 UID 10001 需要写入物化缓存
 docker compose up -d
 ```
 

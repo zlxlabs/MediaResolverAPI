@@ -24,7 +24,6 @@ from ..services import space_cache
 from ..services.providers.base import ProviderError, VideoNotFoundError
 from ..services.providers.tikhub import TikHubProvider
 from ..services.providers.ytdlp import (
-    SpaceNotReplayError,
     YtdlpProvider,
     redact_playlist_url,
 )
@@ -1067,24 +1066,12 @@ def _202_extracting() -> JSONResponse:
 
 
 _CACHE_UNAVAILABLE_DETAIL = "X Space cache storage is unavailable"
-_ABSOLUTE_PATH_RE = re.compile(r"/[^\s'\"]+")
 
 
-def _strip_internal_paths(text: str) -> str:
-    """502 响应体脱敏（review F4）：内部文件系统绝对路径只留 basename，不暴露部署目录结构。"""
-    return _ABSOLUTE_PATH_RE.sub(lambda m: m.group(0).rsplit("/", 1)[-1], text)
-
-
-def _materialize_failure_to_http(exc: BaseException) -> HTTPException:
-    """任务失败 → 客户端状态码：沿用既有错误契约（直播 400/不可用 404/其余 502 脱敏）。"""
-    if isinstance(exc, SpaceNotReplayError):
-        return _json_http_error(400, f"X Space is not a downloadable replay: {exc}")
-    if isinstance(exc, VideoNotFoundError):
-        return _json_http_error(404, f"X Space replay unavailable: {exc}")
-    detail = redact_playlist_url(str(exc)) or type(exc).__name__
-    return _json_http_error(
-        502, f"X Space materialization failed: {_strip_internal_paths(detail)}"
-    )
+def _materialize_failure_to_http(failure: tuple[int, str]) -> HTTPException:
+    """任务失败快照 → 客户端状态码（注册前已脱敏与限长）。"""
+    status_code, detail = failure
+    return _json_http_error(status_code, detail)
 
 
 async def _materialize_space(space_id: str) -> None:
@@ -1144,7 +1131,13 @@ async def _materialize_to_file(space_id: str, part: Path) -> None:
         )
         agen = _forward_ffmpeg_output(process, writer, drain, b"", stderr_tail, space_id)
         try:
+            min_free_bytes = settings.SPACE_CACHE_MIN_FREE_MB * 1024 * 1024
             async for chunk in agen:
+                if (
+                    min_free_bytes > 0
+                    and space_cache._disk_free_bytes() - len(chunk) < min_free_bytes
+                ):
+                    raise SegmentFetchError("storage below watermark")
                 sink.write(chunk)
         finally:
             # 异常路径由此触发生成器 finally：kill ffmpeg、取消 drain/writer（不留尸）

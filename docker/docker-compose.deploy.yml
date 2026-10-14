@@ -14,8 +14,8 @@ services:
       - ../data:/app/data
       - ../logs:/app/logs
       # X Space 物化缓存（SPACE_CACHE_DIR，默认 /data/space-cache）：容器不预建该路径，
-      # 不挂卷则 X Space 获取全部失败。宿主目录需可写：chown -R 10001:10001 ../space-cache
-      # - ../space-cache:/data/space-cache
+      # 宿主目录需可写：chown -R 10001:10001 ../space-cache
+      - ../space-cache:/data/space-cache
     restart: unless-stopped
     environment:
       - TZ=Asia/Shanghai
