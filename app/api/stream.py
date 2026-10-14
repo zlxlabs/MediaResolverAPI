@@ -5,22 +5,25 @@ from __future__ import annotations
 import asyncio
 import base64
 from contextlib import asynccontextmanager
+from pathlib import Path
+import os
 import re
-from typing import AsyncIterator, Optional, Protocol
+from typing import AsyncIterator, BinaryIO, Optional, Protocol
 from urllib.parse import urljoin
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from loguru import logger
 from pydantic import BaseModel
+from starlette.responses import Response
 
 from ..core.config import settings
 from .deps import verify_api_key
+from ..services import space_cache
 from ..services.providers.base import ProviderError, VideoNotFoundError
 from ..services.providers.tikhub import TikHubProvider
 from ..services.providers.ytdlp import (
-    SpaceNotReplayError,
     YtdlpProvider,
     redact_playlist_url,
 )
@@ -144,6 +147,26 @@ class StreamLimiter:
             if acquired:
                 await self.release()
 
+    @asynccontextmanager
+    async def blocking_slot(self, label: str) -> AsyncIterator[None]:
+        """后台物化任务专用：占不到槽时排队等待而非 429。
+
+        任务脱离客户端连接，等得起；不排队会把暂时性饱和变成 202→502 翻转并
+        诱发客户端立即重试风暴。同一计数器与视频号/流式共享 MAX_CONCURRENT_STREAMS。
+        """
+        if settings.MAX_CONCURRENT_STREAMS <= 0:
+            raise RuntimeError("MAX_CONCURRENT_STREAMS must be positive")
+        while True:
+            async with self._lock_for_loop():
+                if self.active < settings.MAX_CONCURRENT_STREAMS:
+                    self.active += 1
+                    break
+            await asyncio.sleep(_SLOT_POLL_SECONDS)
+        try:
+            yield
+        finally:
+            await self.release()
+
     async def release(self) -> None:
         async with self._lock_for_loop():
             if self.active > 0:
@@ -155,6 +178,9 @@ class StreamLimiter:
 
 
 stream_limiter = StreamLimiter()
+
+_SLOT_POLL_SECONDS = 0.2  # blocking_slot 排队轮询间隔
+_SPACE_RETRY_AFTER_SECONDS = 5  # 202 等待协议建议轮询间隔（锁定决策 4）
 
 _SPH_CODE_PATTERN = re.compile(r"^[A-Za-z0-9]{1,64}$")
 
@@ -419,11 +445,6 @@ async def _stream_slot(sph_code: str) -> AsyncIterator[None]:
         yield
 
 
-async def _twitter_space_slot(space_id: str) -> AsyncIterator[None]:
-    async with _stream_slot_cm(f"twitter_space:{space_id}"):
-        yield
-
-
 def _416_from_cdn(content_range: Optional[str]) -> HTTPException:
     headers = {}
     if content_range and _UNSATISFIABLE_RANGE_PATTERN.fullmatch(content_range.strip()):
@@ -663,10 +684,13 @@ async def _fetch_text(url: str, headers: dict) -> str:
     return resp.text
 
 
-async def _fetch_media_segments(playlist_url: str, headers: dict) -> list[str]:
-    """现取播放列表并解析分段子行；master playlist 跟随第一个 variant。
+async def _fetch_media_playlist(
+    playlist_url: str, headers: dict
+) -> tuple[str, list[str]]:
+    """现取最终 media playlist：返回（playlist 全文，绝对 URL 段列表）。
 
-    相对 URL 按所在播放列表的基址解析（urljoin）。
+    master playlist 跟随第一个 variant；相对 URL 按所在播放列表的基址解析
+    （urljoin）。ENDLIST 门禁由消费方（物化任务）基于返回的全文判断。
     """
     text, base = await _fetch_text(playlist_url, headers), playlist_url
     if "#EXT-X-STREAM-INF" in text:
@@ -678,6 +702,12 @@ async def _fetch_media_segments(playlist_url: str, headers: dict) -> list[str]:
     segments = [urljoin(base, uri) for uri in _playlist_uris(text)]
     if not segments:
         raise SegmentFetchError("playlist has no segments")
+    return text, segments
+
+
+async def _fetch_media_segments(playlist_url: str, headers: dict) -> list[str]:
+    """现取播放列表并解析分段子行（保留给非物化路径与解析测试的旧入口）。"""
+    _text, segments = await _fetch_media_playlist(playlist_url, headers)
     return segments
 
 
@@ -715,11 +745,15 @@ async def _stream_url_chunks(
 
 
 async def _pump_segments(
-    segment_urls: list[str], headers: dict, process: asyncio.subprocess.Process
+    segment_urls: list[str],
+    headers: dict,
+    process: asyncio.subprocess.Process,
+    progress: Optional[dict] = None,
 ) -> None:
     """逐段抓取写入 ffmpeg stdin；任何段失败：杀 ffmpeg 并上抛（无假成功）。
 
     stdin 背压天然限流：ffmpeg 停止消费时 write 阻塞，上游抓取随之暂停。
+    progress 传入时逐段回写 ``segments_done``（段数对账用，锁定决策 5）。
     """
     stdin = process.stdin
     try:
@@ -729,12 +763,14 @@ async def _pump_segments(
             headers=headers,
             **_proxy_client_kwargs(),
         ) as client:
-            for url in segment_urls:
+            for index, url in enumerate(segment_urls):
                 async for chunk in _stream_url_chunks(
                     url, headers, settings.STREAM_CHUNK_SIZE, client
                 ):
                     stdin.write(chunk)      # 同步缓冲写（StreamWriter.write 非协程）
                     await stdin.drain()     # 背压：缓冲满时阻塞，上游抓取随之暂停
+                if progress is not None:
+                    progress["segments_done"] = index + 1
         stdin.close()
         await stdin.wait_closed()   # 注意是 wait_closed：StreamWriter 没有 wait()
     except Exception as exc:
@@ -899,92 +935,229 @@ async def _forward_ffmpeg_output(
         _cleanup_ffmpeg(process, drain, writer)
 
 
-@router.get(
-    "/stream/twitter_space/{space_id}",
-    dependencies=[Depends(_twitter_space_slot)],
-)
-async def stream_twitter_space(space_id: str):
-    """X Space 回放单文件流：playlist 每次现取（短命，design 不变式 2），ffmpeg 拼装 m4a 回流。
+class _FinalDownloadResponse(Response):
+    """从已打开 fd 交付 final（R2 minor）：打开动作前置到端点内，「status 判定 →
+    打开」之间被清理的竞态窗口由此消除——fd 一经打开，unlink 不影响本读者。
+    Starlette FileResponse 在响应阶段先发状态码再 open，无法在打开失败时改发
+    未命中响应，故自写；Range 支持单区间（断点续传/拖动进度条均为单区间），
+    多区间与畸形 Range 回 200 全量（RFC 9110 允许忽略 Range）。
+    """
 
-    无 Range/断点续传（下载器场景，见 README）；playlist URL 是短命凭证，
-    绝不进缓存、绝不进响应，日志中脱敏。
+    _CHUNK = 64 * 1024
+    _RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
+
+    def __init__(self, fh: BinaryIO, *, media_type: str, download_name: str) -> None:
+        self._fh = fh
+        self._size = os.fstat(fh.fileno()).st_size
+        self._disposition = f'attachment; filename="{download_name}"'
+        super().__init__(content=b"", media_type=media_type)
+
+    def _resolve_range(self, raw: Optional[str]) -> tuple[int, int, bool]:
+        """解析请求 Range 为闭区间 [start, end] 与是否命中单区间。
+
+        无/畸形/多区间/空文件 → 全量（ranged=False）。合法单区间（含 ``bytes=0-``
+        这种 start=0、end 空、覆盖整文件的写法）ranged=True，调用方发 206。
+        """
+        start, end = 0, self._size - 1
+        if raw and self._size:
+            m = self._RANGE_RE.fullmatch(raw.strip())
+            if m and (m[1] or m[2]):
+                if m[1]:
+                    start = int(m[1])
+                    if m[2]:
+                        end = min(int(m[2]), self._size - 1)
+                else:
+                    start = max(0, self._size - int(m[2]))
+                return start, end, True
+        return start, end, False
+
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            range_header = None
+            if scope["type"] == "http":
+                range_header = next(
+                    (v.decode("latin-1") for k, v in scope["headers"] if k == b"range"),
+                    None,
+                )
+            start, end, ranged = self._resolve_range(range_header)
+            if self._size and (start >= self._size or end < start):
+                await send({
+                    "type": "http.response.start",
+                    "status": 416,
+                    "headers": [(b"content-range", f"bytes */{self._size}".encode("latin-1"))],
+                })
+                await send({"type": "http.response.body", "body": b"", "more_body": False})
+                return
+            length = max(0, end - start + 1)
+            headers = [
+                (b"content-type", (self.media_type or "application/octet-stream").encode("latin-1")),
+                (b"content-disposition", self._disposition.encode("latin-1")),
+                (b"accept-ranges", b"bytes"),
+                (b"content-length", str(length).encode("latin-1")),
+            ]
+            if ranged:
+                headers.append(
+                    (b"content-range", f"bytes {start}-{end}/{self._size}".encode("latin-1"))
+                )
+            await send({
+                "type": "http.response.start",
+                "status": 206 if ranged else 200,
+                "headers": headers,
+            })
+            self._fh.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = self._fh.read(min(self._CHUNK, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                await send({"type": "http.response.body", "body": chunk, "more_body": remaining > 0})
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
+        finally:
+            self._fh.close()
+
+
+@router.get("/stream/twitter_space/{space_id}")
+async def stream_twitter_space(space_id: str):
+    """X Space 回放两阶段交付（交付形态 v2，锁定决策 3/4/8）。
+
+    命中 final → 普通文件下载（Content-Length + Range 断点续传，fd 前置打开）；
+    未命中 → spawn 后台获取任务并立即 202（任务脱离客户端连接、持有上游并发槽）；
+    任务进行中 → 202；任务失败 → 400/404/502 一次，下次 GET 重新 spawn（失败态不持久）。
+    playlist URL 短命，绝不进缓存、绝不进响应，日志中脱敏。
     """
     if _SPACE_ID_PATTERN.fullmatch(space_id) is None:
         raise _json_http_error(400, "Invalid X Space id")
-
-    provider = YtdlpProvider()
+    # 缓存目录初始化失败（权限/磁盘等 OSError）→ 502 固定文案（review F3）：
+    # README 承诺的可识别错误（fail-loud 拒绝新任务），不裸抛成 500。
     try:
-        info = await provider.fetch_video_info(
-            platform="twitter_space",
-            video_id=space_id,
-            original_url=f"https://x.com/i/spaces/{space_id}",
-        )
-    except SpaceNotReplayError as exc:
-        raise _json_http_error(
-            400, f"X Space is not a downloadable replay: {exc}"
-        ) from exc
-    except VideoNotFoundError as exc:
-        raise _json_http_error(404, f"X Space replay unavailable: {exc}") from exc
-    except ProviderError as exc:
-        raise _json_http_error(502, f"X Space extraction failed: {exc}") from exc
+        space_cache.ensure_started()
+    except OSError as exc:
+        logger.error("twitter_space cache init failed err={}", type(exc).__name__)
+        raise _json_http_error(502, _CACHE_UNAVAILABLE_DETAIL) from exc
 
-    playlist_url = str(info.get("url") or "")
-    if not playlist_url:
-        raise _json_http_error(502, "X Space extraction returned no playlist URL")
-
-    headers = info.get("http_headers") or {}
-    try:
-        segment_urls = await _fetch_media_segments(playlist_url, headers)
-    except SegmentFetchError as exc:
-        logger.warning(
-            "twitter_space playlist resolve failed space_id={}: {}", space_id, exc
-        )
-        raise _json_http_error(
-            502,
-            f"X Space playlist fetch failed: {redact_playlist_url(str(exc))}",
-        ) from exc
-    if not segment_urls:
-        raise _json_http_error(502, "X Space playlist has no segments")
-
-    process = await _spawn_ffmpeg()
-    stderr_tail: bytearray = bytearray()
-    drain = asyncio.create_task(_drain_stderr(process.stderr, stderr_tail))
-    # 泵任务必须先于预读启动：-f aac -i pipe:0 的 ffmpeg 在收到 stdin 输入前
-    # 不产出任何 stdout，先预读会白等 30s 超时（stdin/stdout 互锁）。
-    writer = asyncio.create_task(
-        _pump_segments(segment_urls, headers, process)
-    )
-    try:
-        # 预读首块：ffmpeg 瞬时失败（playlist 已坏/起不来）时 headers 还没发，可升级成 502。
+    st = space_cache.status(space_id)
+    if st is space_cache.SpaceCacheStatus.FINAL:
+        fh = space_cache.open_final(space_id)
+        if fh is not None:
+            return _FinalDownloadResponse(
+                fh, media_type="audio/mp4", download_name=f"space-{space_id}.m4a"
+            )
+        # 交付打开竞态（R2 minor）：status 判定后被 sweep 清理是合法状态迁移，
+        # 按未命中重拉（spawn + 202），非兜底；已打开的读者由 unlink-while-open 保护。
+        st = space_cache.SpaceCacheStatus.ABSENT
+    if st is space_cache.SpaceCacheStatus.FAILED:
+        exc = space_cache.consume_failure(space_id)
+        if exc is not None:
+            raise _materialize_failure_to_http(exc)
+        st = space_cache.SpaceCacheStatus.ABSENT  # 被并发请求抢先消费 → 按未命中重拉
+    if st is space_cache.SpaceCacheStatus.ABSENT:
         try:
-            first = await asyncio.wait_for(
-                process.stdout.read(settings.STREAM_CHUNK_SIZE),
-                timeout=settings.HTTP_TIMEOUT_SECONDS,
-            )
-        except asyncio.TimeoutError:
-            raise _json_http_error(
-                502, f"ffmpeg stalled over {settings.HTTP_TIMEOUT_SECONDS}s before first byte"
-            )
-        if not first:
-            await drain
-            logger.error(
-                "twitter_space stream ffmpeg failed before first byte "
-                "space_id={} returncode={} tail={}",
-                space_id,
-                process.returncode,
-                redact_playlist_url(bytes(stderr_tail).decode("utf-8", "replace")),
-            )
-            raise _json_http_error(502, "ffmpeg failed to assemble the Space stream")
-    except BaseException:
-        _cleanup_ffmpeg(process, drain, writer)
+            await space_cache.start(space_id, lambda: _materialize_space(space_id))
+        except space_cache.SpaceCacheAdmissionError as exc:
+            raise _json_http_error(503, str(exc)) from exc
+        except OSError as exc:
+            logger.error("twitter_space cache start failed err={}", type(exc).__name__)
+            raise _json_http_error(502, _CACHE_UNAVAILABLE_DETAIL) from exc
+    return _202_extracting()
+
+
+def _202_extracting() -> JSONResponse:
+    return JSONResponse(
+        status_code=202,
+        content={"status": "extracting", "retry_after": _SPACE_RETRY_AFTER_SECONDS},
+    )
+
+
+_CACHE_UNAVAILABLE_DETAIL = "X Space cache storage is unavailable"
+
+
+def _materialize_failure_to_http(failure: tuple[int, str]) -> HTTPException:
+    """任务失败快照 → 客户端状态码（注册前已脱敏与限长）。"""
+    status_code, detail = failure
+    return _json_http_error(status_code, detail)
+
+
+async def _materialize_space(space_id: str) -> None:
+    """后台获取任务（锁定决策 3）：脱离客户端连接，全程持有上游并发槽。
+
+    失败收尾：删 .part（故障矩阵：磁盘满/段失败只留可回收临时文件），异常存进
+    任务由 GET 消费一次；成功路径 .part 已被 publish_final 原子改名为 final。
+    """
+    part = space_cache.part_path(space_id)
+    try:
+        async with stream_limiter.blocking_slot(f"twitter_space_download:{space_id}"):
+            await _materialize_to_file(space_id, part)
+    except asyncio.CancelledError:
+        space_cache.discard_part(space_id)
+        raise
+    except Exception as exc:
+        space_cache.discard_part(space_id)
+        logger.error(
+            "twitter_space materialization failed space_id={} err={}",
+            space_id,
+            redact_playlist_url(str(exc)) or type(exc).__name__,
+        )
         raise
 
-    return StreamingResponse(
-        _forward_ffmpeg_output(process, writer, drain, first, stderr_tail, space_id),
-        media_type="audio/mp4",
-        headers={
-            "Content-Disposition": f'attachment; filename="space-{space_id}.m4a"',
-        },
+
+async def _materialize_to_file(space_id: str, part: Path) -> None:
+    """完整获取管线：提取 → ENDLIST 门禁 → 段抓取喂 ffmpeg → stdout 写 .part。
+
+    完整性门禁（锁定决策 5）：ENDLIST 在场 + 段数对账 + ffmpeg exit 0
+    （_forward_ffmpeg_output 内置校验）三者齐备才 publish_final（os.replace 原子改名）。
+    交付承诺 = playlist 声明内容的完整交付，非「源内容完整」。
+    """
+    provider = YtdlpProvider()
+    info = await provider.fetch_video_info(
+        platform="twitter_space",
+        video_id=space_id,
+        original_url=f"https://x.com/i/spaces/{space_id}",
+    )
+    playlist_url = str(info.get("url") or "")
+    if not playlist_url:
+        raise SegmentFetchError("X Space extraction returned no playlist URL")
+    headers = info.get("http_headers") or {}
+    playlist_text, segment_urls = await _fetch_media_playlist(playlist_url, headers)
+    if "#EXT-X-ENDLIST" not in playlist_text:
+        raise SegmentFetchError(
+            "playlist has no #EXT-X-ENDLIST (not a completed replay)"
+        )
+    progress: dict = {"segments_done": 0}
+    # Open the destination before spawning: if filesystem admission fails (for
+    # example ENOSPC or permissions), there is no child process or task to reap.
+    with part.open("wb") as sink:
+        process = await _spawn_ffmpeg()
+        stderr_tail: bytearray = bytearray()
+        drain = asyncio.create_task(_drain_stderr(process.stderr, stderr_tail))
+        writer = asyncio.create_task(
+            _pump_segments(segment_urls, headers, process, progress)
+        )
+        agen = _forward_ffmpeg_output(process, writer, drain, b"", stderr_tail, space_id)
+        try:
+            min_free_bytes = settings.SPACE_CACHE_MIN_FREE_MB * 1024 * 1024
+            async for chunk in agen:
+                if (
+                    min_free_bytes > 0
+                    and space_cache._disk_free_bytes() - len(chunk) < min_free_bytes
+                ):
+                    raise SegmentFetchError("storage below watermark")
+                sink.write(chunk)
+        finally:
+            # 异常路径由此触发生成器 finally：kill ffmpeg、取消 drain/writer（不留尸）
+            await agen.aclose()
+    if progress["segments_done"] != len(segment_urls):
+        # 段数对账（锁定决策 5）：pump 内逐段 fail-fast 之下的常态化 tripwire，
+        # 锁住未来「跳段静默成功」类回归（声明段数 == 实际写入段数）。
+        raise SegmentFetchError(
+            f"segment reconciliation failed: declared {len(segment_urls)}, "
+            f"pumped {progress['segments_done']}"
+        )
+    space_cache.publish_final(space_id)
+    logger.info(
+        "twitter_space materialized space_id={} segments={} part->final",
+        space_id,
+        len(segment_urls),
     )
 
 

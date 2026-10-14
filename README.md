@@ -18,7 +18,7 @@ risk-tier: internal
 | Facebook | ✅ | Cobalt |
 | 微信视频号 (WeChat Channels) | ✅ | TikHub |
 | X (Twitter) | ✅ | TikHub（单端点）→ Cobalt |
-| X Space (Twitter Spaces) | ❌（不支持 t.co 短链包裹） | yt-dlp（本机提取）→ 本服务 ffmpeg 拼装 |
+| X Space (Twitter Spaces) | ❌（不支持 t.co 短链包裹） | yt-dlp（本机提取）→ 本服务后台物化 → 文件下载 |
 
 > 含多个数据源的平台会按优先级依次尝试，前者失败自动降级到后者。
 >
@@ -32,22 +32,32 @@ risk-tier: internal
 > - **YouTube**：`web/get_video_info（预解析直链）→ web/get_video_info_v2（streamingData 合流）`；解析器自适应两套 schema。有 Cobalt 兜底。
 > - **微信视频号**：TikHub 单源单端点（`wechat_channels/v2/fetch_video_detail`），无 Cobalt 兜底，故链内不判终态。瞬态 `retryable` 在单端点上重试，最多 3 次尝试、退避 0.3s；`attempts` 带脱敏原因（`data_missing` / `object_type_mismatch` / `error_body`）。平台标识是 `wechat_channels`（不是 `wechat`）。
 > - **X (Twitter)**：TikHub 单端点（`twitter/web/fetch_tweet_detail`）按 status ID 获取元数据，失败后降级 Cobalt；只返回本帖最高码率 MP4，忽略 HLS 与引用帖视频。平台标识是 `twitter`（同时支持 `x.com` 与 `twitter.com`）。
-> - **X Space**：yt-dlp 进程内提取（guest token 路径，无 cookie），仅回放（`was_live`/`post_live`）；`video_url` 指向本服务 ffmpeg 拼装的流式端点。平台标识是 `twitter_space`（与推文 `twitter` 互斥）。详见「X Space 回放下载」节。
+> - **X Space**：yt-dlp 进程内提取（guest token 路径，无 cookie），仅回放（`was_live`/`post_live`）；`video_url` 指向本服务的下载端点（两阶段：后台获取成单文件后交付）。平台标识是 `twitter_space`（与推文 `twitter` 互斥）。详见「X Space 回放下载」节。
 
 ---
 
 ## X Space 回放下载
 
-`https://x.com/i/spaces/<13位ID>`（含 `/peek` 尾段）解析后返回一个指向本服务的稳定下载 URL，服务端把 HLS 回放拼装成**单个 m4a 文件**流式返回，客户端不需要处理 HLS 或认证。
+`https://x.com/i/spaces/<13位ID>`（含 `/peek` 尾段）解析后返回一个指向本服务的稳定下载 URL。交付是**两阶段物化**：首次请求触发服务端后台获取（提取 HLS 回放清单、逐段抓取、ffmpeg 拼装成单个 m4a 落盘，完整性校验通过后原子发布），客户端轮询；文件就绪后按普通文件下载（带 `Content-Length`、支持 `Range` 断点续传）。客户端不需要处理 HLS 或认证。
 
-1. **`video_url` 指向本服务，必须带 `X-API-Key`。** 与视频号同规则：`GET /api/stream/twitter_space/{space_id}`，响应 `Content-Type: audio/mp4`、`Content-Disposition: attachment`，直接保存即得可播放的 m4a（AAC 不重编码，服务端只做容器拼装/remux，不改变「不做转码」承诺）。
-2. **无 Range / 断点续传。** 流式响应无 `Content-Length`、不支持 `Range`，进度条不可拖动；中断后只能整段重新下载。
-3. **时长未知。** X 的 Space 元数据不提供时长（`data.duration` 恒为 `null`），文件大小无法预知，只能边下边收。
-4. **首次字节延迟约 4~5 秒。** 每次下载都要先现场提取一次回放清单（约 2~3 秒，受 `YTDLP_EXTRACT_TIMEOUT_SECONDS` 约束），再加 ffmpeg 连接与首片拼装；之后按约 10~30 倍速持续出字节（实测 1 MiB 约 7 秒含首延迟）。清单 URL 短命，绝不缓存、绝不出现在任何响应里。
-5. **只支持回放，且只有约 30 天。** 正在直播或未开播的 Space 会明确报错（`live_status` 为 `is_live`/`is_upcoming`/缺失；`post_live` 即已结束可回放）；X 只保留回放约 30 天，过期后 resolve 返回明确错误、下载端点返回 404，服务不做任何兑底取回。
-6. **并发与视频号共用上限。** 流式下载共用 `MAX_CONCURRENT_STREAMS`（默认 4），超限返回 429。
-7. **仅支持 x.com / twitter.com 直链**，不支持 t.co 短链包裹的 Space 链接。
-8. **生产出口被墙时配 `YTDLP_PROXY`。** 部署机到 `x.com` / `pscp.tv`（音频 CDN）被 DNS 污染或 TCP 封锁时，设 `YTDLP_PROXY=http://user:pass@proxy.example:7890`（占位示例；真实值含凭据，只写部署机 `.env`，不进仓），提取与分段抓取整条 X 链路走该 HTTP 代理；留空则直连，行为与未配置完全一致。TikHub / Cobalt / 翻译等其他平台的网络路径不受该变量影响。
+1. **`video_url` 指向本服务，必须带 `X-API-Key`。** 端点：`GET /api/stream/twitter_space/{space_id}`。文件就绪时返回 `200`（`Content-Type: audio/mp4`、`Content-Disposition: attachment`，直接保存即得可播放的 m4a）；AAC 不重编码，服务端只做容器拼装/remux，不改变「不做转码」承诺。
+2. **任务式等待协议：先 202、再轮询。** 文件未就绪时 GET 返回 `202 + {"status": "extracting", "retry_after": 5}`——获取任务在服务端后台进行（约 4~5 秒提取 + 按约 10~30 倍速拉完全场，2 小时场约 10 分钟），**断开连接不影响任务**；客户端按 `retry_after` 秒间隔轮询同一 URL 直到 200。进行中的重复请求复用同一个任务，不会重复消耗代理。
+3. **支持 Range / 断点续传。** 就绪文件是普通文件响应：带 `Content-Length`，支持 `Range`（`206 Partial Content`），下载中断后可用 `curl -C -` 等续传，不必整段重来。**续传窗口 72 小时**：final 文件按 mtime 保留 `SPACE_CACHE_TTL_HOURS`（默认 72h），过期清理；磁盘可用空间低于 `SPACE_CACHE_MIN_FREE_MB`（默认 2048 MB）时按最旧优先淘汰 final 与超过 600 秒宽限期的孤儿 `.part`（正在运行的任务文件不受水位淘汰影响，已打开的 final 读句柄能读完）。水位是尽力防护，非跨写入者硬隔离。
+4. **时长未知，大小以响应为准。** X 的 Space 元数据不提供时长（`data.duration` 恒为 `null`），文件大小在 200 响应的 `Content-Length` 里。
+5. **只支持回放，且只有约 30 天。** 正在直播或未开播的 Space 会明确报错（`live_status` 为 `is_live`/`is_upcoming`/缺失；`post_live` 即已结束可回放，错误在轮询时以 400/404 呈现）；X 只保留回放约 30 天，过期后 resolve 返回明确错误、下载端点轮询返回 404，服务不做任何兑底取回。
+6. **完整性承诺的边界。** 服务保证交付「回放清单声明内容的完整文件」：清单必须已完结（`#EXT-X-ENDLIST`）、声明段数与实际写入段数对账、ffmpeg exit 0，三者齐备才发布文件；任何一段失败都不产文件（轮询得 502，可重试）。这不等于「源内容完整」——清单与原始广播之间的残差上游不可证。
+7. **并发与视频号共用上限。** 后台获取共用 `MAX_CONCURRENT_STREAMS`（默认 4）：槽位用满时新任务**排队等待**，202 照常返回；待运行与运行中物化任务合计最多 8 个，队列满时新任务返回 503；下载（交付）阶段读磁盘，不占并发槽。此限制是每进程的，不是全局限制。
+8. **仅支持 x.com / twitter.com 直链**，不支持 t.co 短链包裹的 Space 链接。
+9. **生产出口被墙时配 `YTDLP_PROXY`。** 部署机到 `x.com` / `pscp.tv`（音频 CDN）被 DNS 污染或 TCP 封锁时，设 `YTDLP_PROXY=http://user:pass@proxy.example:7890`（占位示例；真实值含凭据，只写部署机 `.env`，不进仓），提取与分段抓取整条 X 链路走该 HTTP 代理；留空则直连，行为与未配置完全一致。TikHub / Cobalt / 翻译等其他平台的网络路径不受该变量影响。
+10. **缓存目录是单进程契约。** `SPACE_CACHE_DIR` 下的单飞登记、原子发布、孤儿回收与 TTL/水位清理都按单进程设计，不提供跨进程互斥：`uvicorn --workers N` 或多副本**不得共享同一缓存目录**（多实例必须各自独立目录）；默认单进程部署（Docker 镜像 CMD 不带 `--workers`）不受影响。启动回收只收陈旧遗留（>600s）；新鲜孤儿由周期清理按水位/TTL 回收。
+
+#### 失败语义
+
+| HTTP 状态 | Detail | 说明 |
+|-----------|--------|------|
+| 503 | `X Space materialization queue is full` | 待运行与运行中物化任务已达上限，新任务未受理 |
+| 503 | `storage below watermark` | spawn 前缓存盘可用空间低于 `SPACE_CACHE_MIN_FREE_MB`，新任务未受理 |
+| 502 | `X Space materialization failed: storage below watermark` | 物化写入中预计可用空间将低于水位，任务中止并删除 `.part` |
 
 ---
 
@@ -81,9 +91,12 @@ cp .env.example .env
 | `TIKHUB_API_KEY` | TikHub 数据源密钥，解析各平台元数据时使用 | 空字符串 `""` | 要解析视频（含视频号）时必须设，否则上游请求失败 |
 | `TIKHUB_API_BASE` | TikHub API 基址 | `https://api.tikhub.io` | 一般不用改；只用自建/代理 TikHub 时才设 |
 | `PUBLIC_BASE_URL` | 对外公开基址，决定 `POST /api/resolve` 返回的 `data.video_url` 前缀。显式配置了就用它，没配置就用当前请求的 `Host`（`request.base_url`）推导 | 空字符串 `""` | **反向代理后面且代理未透传正确 Host 时必须设置**，否则 `video_url` 会变成内网地址（如 `http://127.0.0.1:8000/api/stream/...`），下游拿到无法使用 |
-| `MAX_CONCURRENT_STREAMS` | 流式下载（视频号 + X Space）的**每进程**并发上限，超限返回 429，不会排队 | `4` | 一般不用改；单进程扛不住并发、或要用 `uvicorn --workers N` / 多副本时需按进程数自行核算（此项不是全局限制） |
-| `YTDLP_EXTRACT_TIMEOUT_SECONDS` | X Space 回放的 yt-dlp 单次提取超时（秒）；解析与流式下载两处消费 | `30` | 一般不用改；网络到 X 较慢时可放宽 |
+| `MAX_CONCURRENT_STREAMS` | 上游流式任务的**每进程**并发上限：视频号流式转发超限返回 429；X Space 后台获取超限排队等待（202 照常返回）。下载交付阶段读磁盘、不占此上限 | `4` | 一般不用改；单进程扛不住并发、或要用 `uvicorn --workers N` / 多副本时需按进程数自行核算（此项不是全局限制） |
+| `YTDLP_EXTRACT_TIMEOUT_SECONDS` | X Space 回放的 yt-dlp 单次提取超时（秒）；解析与后台获取两处消费 | `30` | 一般不用改；网络到 X 较慢时可放宽 |
 | `YTDLP_PROXY` | X 链路出口 HTTP 代理：yt-dlp 提取与 X Space 分段抓取共用；留空直连，其他平台出口不受影响 | 空字符串 `""` | 部署机网络到 X / pscp CDN 被墙（DNS 污染或封锁）时必须设为可用 HTTP 代理 |
+| `SPACE_CACHE_DIR` | X Space 物化缓存目录：后台获取的 `.part` 临时文件与就绪的 `.m4a` final 都在这里（单进程契约，多 worker/多副本不得共享，见「X Space 回放下载」第 10 条）。两份 Compose 配置都将宿主相对目录挂到容器默认路径 | `/data/space-cache` | 部署必须保证宿主目录由容器用户 UID `10001` 可写，否则 X Space 获取任务失败（502） |
+| `SPACE_CACHE_TTL_HOURS` | X Space final 文件保留时长（按 mtime），即断点续传窗口 | `72` | 客户端需要更长的续传窗口时调大；调小会缩短可续传时间 |
+| `SPACE_CACHE_MIN_FREE_MB` | 缓存盘可用空间低于该值时，拒绝新任务；写入每个物化块前预留该水位，空间不足则以 502 中止；sweep 按 mtime 淘汰 final 与超过 600 秒且非活跃任务的孤儿 `.part` | `2048` | 磁盘紧张时上调以保护同盘其他数据 |
 | `STREAM_WINDOW_BYTES` | 视频号流式代理向 CDN 请求的有界窗口大小（字节）。每个窗口整块读完才向客户端吐数据 | `4194304` | 一般不用改；要压内存或适应更慢的客户端时才设 |
 | `STREAM_CHUNK_SIZE` | 流式转发的分块大小（字节） | `65536` | 一般不用改；要调整转发缓冲时才设 |
 | `COBALT_API_BASE` | Cobalt 自建服务地址，作为部分平台的兜底数据源 | 空字符串 `""`（未配置则 Cobalt 不可用） | 需要 Cobalt 兜底时必须设为实际服务地址；视频号无 Cobalt 兜底，不设不影响视频号 |
@@ -103,6 +116,8 @@ pip install -e .
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 # Docker 启动
+mkdir -p space-cache
+chown 10001:10001 space-cache  # 以 root 执行；容器用户 UID 10001 需要写入物化缓存
 docker compose up -d
 ```
 
@@ -243,7 +258,7 @@ audio 模式不代表 MP3 或其他容器格式，服务不做转码；请使用
 | `data.translation_status` | string \| null | 翻译状态：`ok`、`skipped_chinese`、`skipped_disabled`、`skipped_not_requested` 或 `failed`；失败时译文为 `null`，不代表整次解析失败 |
 | `data.author_name` | string | 作者昵称 |
 | `data.author_id` | string | 作者 ID |
-| `data.video_url` | string | 视频无水印直链。其他平台为第三方 CDN；视频号与 X Space 指向本服务的流式端点（见「视频号的下载方式」「X Space 回放下载」） |
+| `data.video_url` | string | 视频无水印直链。其他平台为第三方 CDN；视频号指向本服务的流式端点，X Space 指向本服务的下载端点（两阶段物化，见「视频号的下载方式」「X Space 回放下载」） |
 | `data.media_type` | `video` \| `audio` | `video_url` 的媒体类型；未指定 `download_mode` 时为 `video`。X Space 恒为 `audio` |
 | `data.width` | int | 视频宽度（像素） |
 | `data.height` | int | 视频高度（像素） |
