@@ -49,3 +49,11 @@
 - 验证：`uv run --extra dev pytest tests/test_twitter_space_stream.py tests/test_space_cache.py -q` → 80 passed；`uv run --extra dev pytest -q` → 568 passed。派发时主干基线查询失败，继承红仍未能判定。
 - 新增/修订测试只落在 `tests/test_twitter_space_stream.py`；`tests/pytest-test-durations.json` 在当前 checkout 中不存在，未创建。
 - 下一步唯一动作：最终提交后重跑全量测试，采集 git 回执，push 本卡分支并写完整报告。
+
+## 2026-10-14 R5 收敛：round-4 四项修复完成
+
+- R4-1：`.part` 写入前按块预检实际剩余空间并预留当前块大小；将跌破水位的块拒写为 502，沿现有失败路径关闭生成器并删除 `.part`。R4-2：失败注册表只保留 `(状态码, 脱敏文案)`，文案限 512 字符；400/404/502 状态与文案回归锁定。
+- R4-4：水位淘汰将超过 600 秒且不属于 pending/running 任务的孤儿 `.part` 与 final 按 mtime 共同排序；新鲜件和活任务件保留。R4-5：两份 Compose 均挂载 `../space-cache:/data/space-cache`；README 说明宿主目录归 UID/GID 10001。R4-3 维持非法 Range 忽略并回 200，按 RFC 9110 §14.2 合规记录，不修。
+- 四项先写测试：首版各红在 `200 != 502`、注册表仍含 `BaseException`、水位回收数 `0 != 1`、compose 缺卷；实现后对应测试转绿。注入复验也均以断言失败红；R4-4 恢复注入行时曾误命中 `discard_part` 的同名 `pass`，随后按完整函数上下文恢复，`git diff` 核实无残留，四项目标测试复绿。
+- 真实路径：TestClient 调真实 ASGI 路由，使用真实 `shutil.disk_usage`；请求先获 202，再临时提高阈值，得到 `502 storage below watermark`，`.part` 与 final 均不存在。两份 `docker compose config -q` 均通过（部署配置用临时空 `.env`，验证后删除）。
+- 验证：窄套件 `85 passed`；全量 `uv run --extra dev pytest -q` 为 `573 passed, 240 warnings`。R5 实现已提交 `b855e8d`，待进度与红验记录最终提交后推送。
