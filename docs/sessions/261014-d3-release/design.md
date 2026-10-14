@@ -14,7 +14,7 @@
 | `git tag -l` 为空，无任何版本锚点 | `git tag -l` |
 | `/health` 只返回 `{"status":"ok"}`，version 挂在根路径 `/`，与线上实际部署的 commit 无关 | `app/main.py:118-124` |
 | 发版两段式纯手工：本地 `docker/push_to_acr.sh`（build→ACR，tag=40位SHA）→ `scp`+`ssh fordeal` 跑 `docker/pull_and_deploy.sh`（pull→retag→compose up→探针→失败回滚） | `docker/*.sh` |
-| 生产容器 GIT_SHA=92a9c0763fec…（2026-10-14T08:17 部署），部署目录为服务器 home 下 `docker/media-resolver-api/docker/`（路径不入 git，经 secrets `D3_DEPLOY_DIR` 注入），compose 文件名 `docker-compose.deploy.yml` | `ssh fordeal 'docker exec media-resolver-api printenv GIT_SHA'`；compose label |
+| 生产容器 GIT_SHA=92a9c0763fec…（2026-10-14T08:17 部署），部署目录 `/srv/media-resolver-api/docker`（服务器 `/srv` 别名 → home 下真实目录，D3 字面量传入），compose 文件名 `docker-compose.deploy.yml` | `ssh fordeal 'docker exec media-resolver-api printenv GIT_SHA'`；compose label |
 | 平台标准：自托管服务部署走 D3（`zlxlabs/ci-templates/build-deploy.yml`），未接入的仓才配 `deploy_targets.json`，二选一 | `gate-hub/docs/guides/platform-onboarding.md` |
 
 目标：用户已拍板走 D3 路线。发版动作收敛为「merge 到 master 自动 build→部署→探针→失败自动回滚」，
@@ -32,8 +32,9 @@
    本服务生产端口 8206→8000，健康口 `http://localhost:8206/health`。fordeal 的 sshd 另听
    一个内网地址:35220（本机 ssh config，不入 git），但 runner 连的是 100.107.95.24:22，known_hosts
    必须按后者采集。
-4. **deploy_dir**：服务器 home 下 `docker/media-resolver-api/docker`（容器 compose label 核实；
-   路径值经 secrets `D3_DEPLOY_DIR` 注入，本仓 public 不落明文）。
+4. **deploy_dir**：`/srv/media-resolver-api/docker`（服务器 `/srv` 符号别名 → home 下真实
+   目录，容器 compose label 核实；D3 caller 以字面量传入——`jobs.<job_id>.with` 不支持
+   secrets 上下文，见 §7-1）。
    **该目录不是 git checkout**（部署流是 scp 脚本 + 服务器侧 owned compose，见
    `docs/handoff-generic-fallback-engine.md` §7），不存在「仓内 compose 覆盖服务器」的所有权冲突。
    **坑**：D3 的 `scripts/pull_and_deploy.sh` 在 deploy_dir 内跑裸 `docker compose`（依赖默认
@@ -152,3 +153,23 @@
   另：占位值不得以 required 校验为据 → 补源码消费路径证据（§2.6）。
   翻正条件全部满足，按纪律无需二次咨询（无不可逆动作提前，卡 A 合并由主脑在验收后执行）。
 - 咨询载荷归档：`retro/consult/261014-d3-release-plan.md`（自包含版，随卡 A 或卡 B PR 进 git）。
+
+## 7. 接入后的修订记录（首跑前）
+
+1. **D3_DEPLOY_DIR secrets 注入方案废弃**。首版为绕 public-scan 把 `deploy_dir` 经
+   `secrets.D3_DEPLOY_DIR` 注入；gate primary 实锤该写法不成立：官方 contexts 表中
+   `jobs.<job_id>.with.<with_id>` 可用上下文仅 github/needs/strategy/matrix/inputs/vars，
+   无 secrets——触发时报 Unrecognized named-value，部署根本不会启动。换方案：服务器侧建
+   `/srv/media-resolver-api` 符号别名 → home 下真实目录（主脑预置并验证：compose 符号链接
+   与 `.deploy-state` 均可达），deploy.yml 用不含 home 前缀的字面量，public-scan 可过，
+   `D3_DEPLOY_DIR` secret 已删。
+2. **dockerfile 默认值陷阱**。上游 push_to_acr.sh build 用 `-f "${BUILD_CONTEXT}/${DOCKERFILE}"`，
+   DOCKERFILE 默认 `Dockerfile`、BUILD_CONTEXT 默认 `.`；本仓 Dockerfile 在 `docker/` 子目录，
+   不传则首跑 build 必失败。deploy.yml 显式 `dockerfile: docker/Dockerfile`（build_context
+   保持默认 "."）。
+3. **gate primary 三条 findings 处置**：
+   | # | finding | 本仓判定 | 依据/处置 |
+   |---|---|---|---|
+   | 1 | Dockerfile 不在仓库根，默认值 build 必失败 | 实锤，已修 | `dockerfile: docker/Dockerfile`（§7-2） |
+   | 2 | workflow_dispatch 可从非 master ref 部署 | 接受不修 | 设计的补发口（design §2.7）；全舰队 caller 同款，单仓收窄破坏一致性 |
+   | 3 | 首跑与手工部署/并发部署竞态 | 接受不修 | 上游 build-deploy.yml L145-147 `concurrency: deploy-${{ inputs.host }}` cancel-in-progress=false 按 host 排队 + 主机 SSH flock 双保险；手工脚本已标 break-glass 互斥（§5） |

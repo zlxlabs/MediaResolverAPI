@@ -18,8 +18,12 @@ jobs:
       image_name: media-resolver-api
       host: 100.107.95.24
       ssh_user: lixing
-      # 本仓 public：服务器绝对路径不进 git，经 secrets 注入（值 = secrets D3_DEPLOY_DIR）。
-      deploy_dir: ${{ secrets.D3_DEPLOY_DIR }}
+      # /srv 别名 → 服务器 home 部署目录（服务器侧 symlink，主脑预置已验证）。with 不支持
+      # secrets 上下文（官方 contexts 表：with 仅 github/needs/strategy/matrix/inputs/vars），必须字面量。
+      deploy_dir: /srv/media-resolver-api/docker
+      # Dockerfile 在 docker/ 子目录；上游 build 用 -f "${BUILD_CONTEXT}/${DOCKERFILE}"，
+      # DOCKERFILE 默认 Dockerfile、BUILD_CONTEXT 默认 \.，不传则首跑 build 必失败。
+      dockerfile: docker/Dockerfile
       healthcheck_url: http://localhost:8206/health
       healthcheck_warmup: 10
       healthcheck_retries: 12
