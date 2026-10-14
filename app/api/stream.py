@@ -628,6 +628,14 @@ def _http_timeout() -> httpx.Timeout:
     )
 
 
+def _proxy_client_kwargs() -> dict:
+    """YTDLP_PROXY 接线（X 链路三处 AsyncClient 共用）：设置时传 proxy=，
+
+    空时返回空 dict 不传该键——现网空值路径零行为变化。
+    """
+    return {"proxy": settings.YTDLP_PROXY} if settings.YTDLP_PROXY else {}
+
+
 def _playlist_uris(text: str) -> list[str]:
     """播放列表中非注释行（variant URI 或分段子行）。"""
     return [
@@ -640,7 +648,10 @@ def _playlist_uris(text: str) -> list[str]:
 async def _fetch_text(url: str, headers: dict) -> str:
     try:
         async with httpx.AsyncClient(
-            timeout=_http_timeout(), follow_redirects=True, headers=headers
+            timeout=_http_timeout(),
+            follow_redirects=True,
+            headers=headers,
+            **_proxy_client_kwargs(),
         ) as client:
             resp = await client.get(url)
     except httpx.HTTPError as exc:
@@ -681,7 +692,10 @@ async def _stream_url_chunks(
     owns_client = client is None
     if owns_client:
         client = httpx.AsyncClient(
-            timeout=_http_timeout(), follow_redirects=True, headers=headers
+            timeout=_http_timeout(),
+            follow_redirects=True,
+            headers=headers,
+            **_proxy_client_kwargs(),
         )
     try:
         async with client.stream("GET", url) as resp:
@@ -710,7 +724,10 @@ async def _pump_segments(
     stdin = process.stdin
     try:
         async with httpx.AsyncClient(
-            timeout=_http_timeout(), follow_redirects=True, headers=headers
+            timeout=_http_timeout(),
+            follow_redirects=True,
+            headers=headers,
+            **_proxy_client_kwargs(),
         ) as client:
             for url in segment_urls:
                 async for chunk in _stream_url_chunks(

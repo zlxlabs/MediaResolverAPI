@@ -139,6 +139,9 @@ class YtdlpProvider(BaseProvider):
             "noplaylist": True,
             "socket_timeout": settings.YTDLP_EXTRACT_TIMEOUT_SECONDS,
         }
+        # YTDLP_PROXY 接线：空时不传该键，现网空值路径零行为变化。
+        if settings.YTDLP_PROXY:
+            options["proxy"] = settings.YTDLP_PROXY
         with YoutubeDL(options) as ydl:
             return ydl.extract_info(url, download=False)
 
