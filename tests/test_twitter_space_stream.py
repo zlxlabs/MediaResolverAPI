@@ -492,9 +492,13 @@ class TestMaterializationIntegrity:
     不发布 final、只留可回收临时文件；交付承诺 = playlist 声明内容的完整交付。"""
 
     def test_playlist_without_endlist_fails_no_final_no_part(
-        self, authed_client, monkeypatch
+        self, authed_client, spawn_record, monkeypatch
     ):
-        """无 #EXT-X-ENDLIST = 非回放/未完结，fail、不产 final。"""
+        """无 #EXT-X-ENDLIST = 非回放/未完结，fail、不产 final。
+
+        全 stub（含子进程）：若门禁被旁路，伪造的 ffmpeg exit 0 会让物化「成功」
+        发布 final，本测试红在 assert not final（比依赖真 ffmpeg 的退出码更准）。
+        """
         _patch_provider(monkeypatch, [_meta()])
         _patch_playlist(
             monkeypatch, f"#EXTM3U\n#EXTINF:3.0,\n{SEG_1}\n", [SEG_1]
