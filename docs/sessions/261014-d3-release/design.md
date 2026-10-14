@@ -171,5 +171,11 @@
    | # | finding | 本仓判定 | 依据/处置 |
    |---|---|---|---|
    | 1 | Dockerfile 不在仓库根，默认值 build 必失败 | 实锤，已修 | `dockerfile: docker/Dockerfile`（§7-2） |
-   | 2 | workflow_dispatch 可从非 master ref 部署 | 接受不修 | 设计的补发口（design §2.7）；全舰队 caller 同款，单仓收窄破坏一致性 |
-   | 3 | 首跑与手工部署/并发部署竞态 | 接受不修 | 上游 build-deploy.yml L145-147 `concurrency: deploy-${{ inputs.host }}` cancel-in-progress=false 按 host 排队 + 主机 SSH flock 双保险；手工脚本已标 break-glass 互斥（§5） |
+   | 2 | workflow_dispatch 可从非 master ref 部署 | 已结构化修复 | ship job 加 `if: github.event_name == 'push' \|\| github.ref_name == 'master'`——push 必跑、dispatch 仅默认分支放行，分支 dispatch 整 job skip（§7-4） |
+   | 3 | 首跑与手工部署/并发部署竞态 | 已结构化修复 | workflow 顶层 `concurrency: deploy-media-resolver-api` cancel-in-progress=false 排队，与上游按 host 排队 + SSH flock 叠为双保险；手工脚本已标 break-glass 互斥（§5、§7-4） |
+4. **gate primary #2/#3 结构化修复**。上一轮以「接受不修」+ PR 描述对照表处置，重跑
+   gate 后 primary 原样重报同 id 同 severity（major），且 gate v2 对 major 无受控处置出口
+   （deferred 全 tier 拒绝、false-positive 仅限 inferred P1），即「描述不能改变 primary 判定」。
+   故改为改代码消除 finding 本体：#2 加 job 级 `if` 守卫（补发口保留在默认分支，非 master ref
+   入口关闭）；#3 加 workflow 顶层 `concurrency` 与上游排队叠加。后续如果 primary 再报新
+   finding，不再自行扩散修。

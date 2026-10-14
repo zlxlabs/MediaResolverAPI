@@ -11,8 +11,17 @@ on:
       - '.github/**'
   workflow_dispatch:
 
+# 部署互斥：与上游 build-deploy.yml 按 host 排队（deploy-${{ inputs.host }}）叠加为双保险；
+# cancel-in-progress=false 部署中途不被取消，只排队（gate primary #3）。
+concurrency:
+  group: deploy-media-resolver-api
+  cancel-in-progress: false
+
 jobs:
   ship:
+    # push(master) 自动部署；workflow_dispatch 仅默认分支放行（补发口），分支 dispatch 直接 skip，
+    # 关闭从非 master ref 构建生产镜像的入口（gate primary #2）。
+    if: github.event_name == 'push' || github.ref_name == 'master'
     uses: zlxlabs/ci-templates/.github/workflows/build-deploy.yml@v2
     with:
       image_name: media-resolver-api
