@@ -198,10 +198,15 @@ def open_final(space_id: str) -> Optional[BinaryIO]:
 async def _sweep_loop() -> None:
     """常驻周期清理（review F2）：首轮 ensure_started 已扫，此后每周期一轮 sweep。
 
+    先全量 reap _tasks 的 done 条目再 sweep：归位由查询驱动（拉），无人再轮询的
+    done Task（含 traceback）需要这里推一把才进有界注册表，否则滞留无界
+    （矩阵增补 B：R2 major 在「客户端失败后不再来」场景下的马甲）。
     单轮失败记 error 不静默，也不杀进程/循环——磁盘竞态等暂时性失败下一周期重试。
     """
     while True:
         await asyncio.sleep(_SWEEP_INTERVAL_SECONDS)
+        for space_id in list(_tasks):
+            _reap_done_entry(space_id)
         try:
             stats = sweep()
         except Exception as exc:

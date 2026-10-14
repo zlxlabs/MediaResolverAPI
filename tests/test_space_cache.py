@@ -412,6 +412,27 @@ class TestPeriodicSweeper:
         finally:
             await _cancel_sweeper()
 
+    async def test_sweep_loop_reaps_unqueried_done_entries(self, monkeypatch):
+        """矩阵增补 B：无人查询的 done 失败条目由周期任务推式归位进有界注册表
+        （否则 done Task + traceback 滞留 _tasks，cap 永不生效）。"""
+        monkeypatch.setattr(space_cache, "_SWEEP_INTERVAL_SECONDS", 0.01)
+
+        async def boom():
+            raise RuntimeError("nobody polls me")
+
+        await space_cache.start(SPACE_ID, boom)
+        with pytest.raises(RuntimeError):
+            await space_cache._tasks[SPACE_ID]
+        space_cache.ensure_started()  # 不查询 status/consume，直接等周期归位
+        try:
+            await asyncio.sleep(0.08)
+            assert SPACE_ID not in space_cache._tasks
+            assert isinstance(space_cache._failures.get(SPACE_ID), RuntimeError)
+            assert space_cache.status(SPACE_ID) is space_cache.SpaceCacheStatus.FAILED
+            assert isinstance(space_cache.consume_failure(SPACE_ID), RuntimeError)
+        finally:
+            await _cancel_sweeper()
+
     async def test_sweep_failure_logs_error_and_loop_survives(self, monkeypatch):
         """单轮 sweep 抛错：logger.error 不静默；循环不死，下一周期继续跑。"""
         monkeypatch.setattr(space_cache, "_SWEEP_INTERVAL_SECONDS", 0.01)
