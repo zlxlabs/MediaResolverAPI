@@ -13,3 +13,10 @@
 - 本段结论：U1（space_cache 状态机，d3d7d89）+ U2（两阶段端点，bc14081 + faba9d3）落地，全量 544 passed。TDD 顺序执行：17 个新语义测试先红后绿；红验两项均成立——① os.replace 改为直写 → test_publish_is_atomic_rename_part_gone_final_intact 红在 `assert not part.exists()`（AssertionError）；② ENDLIST 门禁旁路 → test_playlist_without_endlist_fails_no_final_no_part 红在 `assert 200 == 502`（物化假成功），均只还原注入行。
 - 关键决策与已否决方案：物化管线复用 _forward_ffmpeg_output 生成器（含 stall 超时、stderr 排干、段泵收尾、exit code 校验、finally 清理），消费端 `async for` 写文件 + `finally: await agen.aclose()`；段数对账用 pump 的 progress 计数（pump 逐段 fail-fast 下是常态化 tripwire，锁「跳段静默成功」类回归）。错误契约保留：SpaceNotReplayError→400 / VideoNotFoundError→404 / 其余 502 脱敏，在轮询时呈现（提取在后台任务内，首次 GET 一律 202）。
 - 下一步唯一动作：README/ops.env/compose 文档提交 + 真实环境全链验证。
+
+## 2026-10-14 收工：真实环境全链验证通过，卡面完成
+
+- 当前阶段：deliverable（报告落盘，等主脑验收）
+- 本段结论：真实环境（本机 uvicorn + 活体 Space 1AKEmvYqbrOKL，直连无代理）走通全链：resolve→202→12 次轮询（约 3 分钟）→200（85,112,923 B）；Range 截断 50 MB 后 `curl -C -` 续传 206，`cmp` 逐字节一致；ffprobe=aac/48000Hz/2ch/mp4/7140s；缓存命中二次 GET 0.07s 零重复提取；限速 8k/s 挂起客户端期间其他 Range 请求毫秒级返回；重启带陈旧 .part → 启动扫描回收（日志 startup scan removed 1）、final 保留。服务日志零 ERROR/Traceback。全量 544 passed，diff 923+/230-（预算 1200 内）。
+- 关键决策与已否决方案：无新增（沿袭前两段）。
+- 下一步唯一动作：写 report.md（回执 + 四问 + 偏差清单），收工。
