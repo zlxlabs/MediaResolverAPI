@@ -1097,6 +1097,9 @@ async def _materialize_space(space_id: str) -> None:
     try:
         async with stream_limiter.blocking_slot(f"twitter_space_download:{space_id}"):
             await _materialize_to_file(space_id, part)
+    except asyncio.CancelledError:
+        space_cache.discard_part(space_id)
+        raise
     except Exception as exc:
         space_cache.discard_part(space_id)
         logger.error(

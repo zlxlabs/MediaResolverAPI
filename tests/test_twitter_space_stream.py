@@ -596,6 +596,101 @@ class TestMaterializationIntegrity:
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
 
+    @pytest.mark.asyncio
+    async def test_cancelled_materialization_reaps_resources_and_discards_part(
+        self, monkeypatch
+    ):
+        """中途取消会清进程、任务、并发槽与 .part，不留磁盘残件。"""
+        space_cache.ensure_dir()
+        _patch_provider(monkeypatch, [_meta()])
+        _patch_playlist(monkeypatch, PLAYLIST_TEXT, [SEG_1])
+        _patch_segment_chunks(monkeypatch, {SEG_1: [b"segment"]})
+        process = FakeProcess(out_chunks=[], exit_code=None, hang=True)
+        reading_stdout = asyncio.Event()
+        original_read = process.stdout.read
+
+        async def wait_for_output(n):
+            reading_stdout.set()
+            return await original_read(n)
+
+        async def fake_spawn():
+            return process
+
+        process.stdout.read = wait_for_output
+        monkeypatch.setattr(stream_mod, "_spawn_ffmpeg", fake_spawn)
+        before = asyncio.all_tasks()
+        task = asyncio.create_task(stream_mod._materialize_space(SPACE_ID))
+        try:
+            await asyncio.wait_for(reading_stdout.wait(), timeout=1)
+            part = space_cache.part_path(SPACE_ID)
+            assert part.exists()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await asyncio.sleep(0)
+            leaked = [
+                pending
+                for pending in asyncio.all_tasks() - before
+                if pending.get_coro().__qualname__.split(".")[-1]
+                in {"_drain_stderr", "_pump_segments"}
+                and not pending.done()
+            ]
+            assert process.kill_count == 1
+            assert leaked == []
+            assert stream_mod.stream_limiter.active == 0
+            assert not part.exists()
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    async def test_sink_write_failure_closes_generator_and_reaps_tasks(self, monkeypatch):
+        """落盘中途 ENOSPC 时，已启动的输出生成器关闭进程及后台任务。"""
+        space_cache.ensure_dir()
+        part = space_cache.part_path(SPACE_ID)
+        _patch_provider(monkeypatch, [_meta()])
+        _patch_playlist(monkeypatch, PLAYLIST_TEXT, [SEG_1])
+        _patch_segment_chunks(monkeypatch, {SEG_1: [b"segment"]})
+        process = FakeProcess(out_chunks=[b"fragment"], exit_code=None)
+
+        class FailingSink:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def write(self, data):
+                if data:
+                    raise OSError(errno.ENOSPC, "No space left on device")
+
+        original_open = Path.open
+
+        def open_sink(path, mode="r", *args, **kwargs):
+            if path == part and mode == "wb":
+                return FailingSink()
+            return original_open(path, mode, *args, **kwargs)
+
+        async def fake_spawn():
+            return process
+
+        monkeypatch.setattr(Path, "open", open_sink)
+        monkeypatch.setattr(stream_mod, "_spawn_ffmpeg", fake_spawn)
+        before = asyncio.all_tasks()
+        with pytest.raises(OSError, match="No space left on device"):
+            await stream_mod._materialize_to_file(SPACE_ID, part)
+        await asyncio.sleep(0)
+        leaked = [
+            pending
+            for pending in asyncio.all_tasks() - before
+            if pending.get_coro().__qualname__.split(".")[-1]
+            in {"_drain_stderr", "_pump_segments"}
+            and not pending.done()
+        ]
+        assert process.kill_count == 1
+        assert leaked == []
+
     def test_middle_segment_404_no_final_no_part(
         self, authed_client, spawn_record, monkeypatch
     ):
