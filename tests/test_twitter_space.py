@@ -11,6 +11,7 @@ import pytest
 from yt_dlp.utils import DownloadError
 
 from app.api.resolve import URL_FALLBACK_PLATFORMS
+from app.core.config import settings
 from app.services.platforms.twitter_space import TwitterSpaceService
 from app.services.providers.base import (
     ProviderError,
@@ -179,6 +180,48 @@ class TestYtdlpProvider:
     def test_space_not_replay_is_terminal(self):
         """终态：单 provider 链上命中即短路，不再重试。"""
         assert issubclass(SpaceNotReplayError, TerminalError)
+
+
+class TestProxyOption:
+    """YTDLP_PROXY 接线（x-space-egress-proxy）：设置时 opts 带 proxy，空时不得出现该键。
+
+    测试用假占位代理 URL，禁止真实凭据入仓。
+    """
+
+    @pytest.fixture
+    def ydl_opts(self, monkeypatch):
+        """替换 YoutubeDL 记录构造 opts；extract_info 回放 fixture。"""
+        recorded = {}
+        import app.services.providers.ytdlp as ytdlp_mod
+
+        class FakeYDL:
+            def __init__(self, options):
+                recorded.update(options)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def extract_info(self, url, download=False):
+                return _meta()
+
+        monkeypatch.setattr(ytdlp_mod, "YoutubeDL", FakeYDL)
+        return recorded
+
+    async def test_proxy_passed_when_set(self, monkeypatch, ydl_opts):
+        monkeypatch.setattr(
+            settings, "YTDLP_PROXY", "http://user:pass@proxy.example:7890"
+        )
+        YtdlpProvider()._extract_sync(SPACE_URL)
+        assert ydl_opts["proxy"] == "http://user:pass@proxy.example:7890"
+
+    async def test_no_proxy_key_when_unset(self, monkeypatch, ydl_opts):
+        """空值路径零行为变化：opts 里不得出现 proxy 键。"""
+        monkeypatch.setattr(settings, "YTDLP_PROXY", "")
+        YtdlpProvider()._extract_sync(SPACE_URL)
+        assert "proxy" not in ydl_opts
 
 
 class TestTwitterSpaceServiceMapping:

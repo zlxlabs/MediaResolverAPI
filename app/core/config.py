@@ -91,6 +91,8 @@ class Settings(BaseSettings):
 
     # yt-dlp extraction (X Space replays; consumed by resolve and stream)
     YTDLP_EXTRACT_TIMEOUT_SECONDS: int = 30
+    # X 链路出口代理（提取 + 分段抓取共用）。空 = 直连，行为与未配置完全一致。
+    YTDLP_PROXY: str = ""
 
     # Logging
     LOG_LEVEL: str = "INFO"
