@@ -32,7 +32,11 @@ def test_translation_circuit_health_is_separate_from_liveness(monkeypatch):
         translation = client.get("/health/translation")
 
     assert liveness.status_code == 200
-    assert liveness.json() == {"status": "ok"}
+    assert liveness.json() == {
+        "status": "ok",
+        "version": settings.APP_VERSION,
+        "git_sha": settings.GIT_SHA,
+    }
     assert translation.status_code == 200
     assert translation.json() == {
         "status": "unavailable",
@@ -93,7 +97,11 @@ def test_startup_probe_failure_opens_circuit_but_does_not_block_startup(monkeypa
 
     assert _ProbeClient.calls == 1
     assert liveness.status_code == 200
-    assert liveness.json() == {"status": "ok"}
+    assert liveness.json() == {
+        "status": "ok",
+        "version": settings.APP_VERSION,
+        "git_sha": settings.GIT_SHA,
+    }
     assert translation.status_code == 200
     assert translation.json() == {
         "status": "unavailable",
@@ -122,4 +130,8 @@ def test_startup_probe_exception_does_not_break_application(monkeypatch):
         response = client.get("/health")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    assert response.json() == {
+        "status": "ok",
+        "version": settings.APP_VERSION,
+        "git_sha": settings.GIT_SHA,
+    }

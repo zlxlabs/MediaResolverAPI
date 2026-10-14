@@ -7,6 +7,8 @@
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-14
+
 ### Added
 - `POST /api/resolve` 新增 `download_mode` 参数：`audio` 返回原生音频轨（YouTube 经 TikHub 取最高码率纯音频轨）或 Cobalt 音频直链（Twitter / TikTok / Instagram / Pinterest / Facebook），无音频路径的平台返回 HTTP 400。
 - `POST /api/resolve` 新增 `quality` 参数：清晰度封顶（如 `720p`），不超过 cap 取最高档、全部高于 cap 取最低超档，显式覆盖平台默认选流；与 `download_mode=audio` 组合返回 HTTP 422。

@@ -59,7 +59,9 @@ async def lifespan(app: FastAPI):
     """Application lifespan: startup and shutdown."""
     # Startup
     setup_logging()
-    logger.info(f"Starting {settings.APP_NAME} v{settings.APP_VERSION}")
+    logger.info(
+        f"Starting {settings.APP_NAME} v{settings.APP_VERSION} ({settings.GIT_SHA})"
+    )
     if not (settings.PUBLIC_BASE_URL or "").strip():
         logger.warning(
             "PUBLIC_BASE_URL 未设置，data.video_url 将按请求 Host 推导，跨机调用会拿到不可用地址"
@@ -124,7 +126,11 @@ async def root():
 @app.get("/health")
 async def health():
     """Health check endpoint."""
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "version": settings.APP_VERSION,
+        "git_sha": settings.GIT_SHA,
+    }
 
 
 @app.get("/health/translation")

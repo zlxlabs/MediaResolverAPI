@@ -1,6 +1,6 @@
 [project]
 name = "media-resolver-api"
-version = "1.0.0"
+version = "1.1.0"
 description = "Social media URL to direct download link resolver API"
 readme = "README.md"
 requires-python = ">=3.11"
