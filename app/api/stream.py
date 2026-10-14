@@ -976,7 +976,7 @@ class _FinalDownloadResponse(Response):
                     None,
                 )
             start, end = self._resolve_range(range_header)
-            if self._size and start >= self._size:
+            if self._size and (start >= self._size or end < start):
                 await send({
                     "type": "http.response.start",
                     "status": 416,
