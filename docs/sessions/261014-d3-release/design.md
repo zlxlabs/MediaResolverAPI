@@ -68,8 +68,14 @@
    PR 合并即首跑（push master 触发），合并后的运行就是首次全链验证。因此：
    pre-flight（服务器预置 + secrets）必须全部前置到合并之前；合并这个动作由主脑在验收后执行。
    `paths-ignore` 排除 `**.md`、`docs/**`、`.github/**`（纯文档/CI 改动不触发生产部署）。
-8. **手工脚本处置**：`docker/push_to_acr.sh`、`docker/pull_and_deploy.sh` 保留为 break-glass
-   应急通道（D3 不可用时人工部署），头部注释标明身份，不删除。
+8. **手工脚本处置**（2026-10-14 修订：已删除，见 §7-5）：`docker/push_to_acr.sh`、
+   `docker/pull_and_deploy.sh` 已整文件删除（含此前加的 BREAK-GLASS 注释行），两条部署路径
+   互斥由仓库形态保证。break-glass 恢复 = `git show a0cd8bf:docker/push_to_acr.sh` /
+   `git show a0cd8bf:docker/pull_and_deploy.sh` 取回（a0cd8bf = 接入前 master HEAD）。
+   依据链：①gate primary 对「手工脚本 vs D3 部署交错」重复报 major 且 gate v2 对 major 无
+   受控处置出口；②本设计明文「两条部署路径互斥，接入 D3 后删遗留」；③internal tier 判定
+   该风险 ≤P2（单操作者、break-glass 场景 D3 本就无并发运行、下次 D3 部署自愈 last_good
+   状态），不构成保留脚本的理由；④git 历史即恢复路径，删除可逆。
 9. **版本单一来源（按 codex 评审修订）**：`pyproject.toml` 是唯一字面量（发版时 bump）；
    `app/core/config.py` 的 `APP_VERSION` 改从 `importlib.metadata.version("media-resolver-api")`
    取默认值（Dockerfile `uv pip install .` 装出的 dist metadata、本地 `uv run` 同步安装，两处
@@ -137,7 +143,7 @@
 | `deploy_tag` 失败（pull/retag/up 非零退出）无自动回滚 | 部署前镜像快照 `pre-d3-baseline`，人工恢复步骤写入卡面 |
 | compose 文件名不被 D3 发现 | 服务器侧符号链接 `docker-compose.yml → docker-compose.deploy.yml`（单真身，无副本漂移） |
 | 服务器 compose 被仓覆盖 | 已核实部署目录非 checkout（scp 部署流 + server-owned），不成立 |
-| D3 与手工双路径漂移 | 手工脚本降级 break-glass 并注释标明；不引入 `deploy_targets.json`（二选一） |
+| D3 与手工双路径漂移 | 手工脚本已删除（§2.8、§7-5），路径互斥由仓库形态保证；不引入 `deploy_targets.json` |
 | 占位 secrets 未来踩坑 | `TS_AUTHKEY` 切 `runner: hosted` 前必须换真值；`CI_TEMPLATES_PAT` 待上游 v2 摘除契约——两条写进 deploy.yml 注释 |
 | merge 后自动部署与文档 PR 节奏冲突 | paths-ignore 已排除 md/docs/.github |
 | 环境变量覆盖 APP_VERSION | 契约测试锁默认值 + 卡 B 容器环境实测 |
@@ -179,3 +185,13 @@
    故改为改代码消除 finding 本体：#2 加 job 级 `if` 守卫（补发口保留在默认分支，非 master ref
    入口关闭）；#3 加 workflow 顶层 `concurrency` 与上游排队叠加。后续如果 primary 再报新
    finding，不再自行扩散修。
+5. **gate primary #3 变体（手工脚本交错）→ 主脑重开「保留手工脚本」锁定决策（§2.8 原文），
+   删除手工脚本**。run 38578364134 primary 第三次重复报 `reliability-deployment-race`
+   （major，inferred，红线=静默出错），本轮归因切到「workflow 级 concurrency 只串行化 D3
+   工作流，锁不住手工脚本」；其验收条件（共享互斥锁 + 被阻塞方非成功退出）对 break-glass
+   手工通道属过度建设。主脑裁决整文件删除 `docker/push_to_acr.sh`、`docker/pull_and_deploy.sh`
+   （含 BREAK-GLASS 注释行），路径互斥由仓库形态保证，break-glass 恢复走 git 历史（§2.8）。
+   finding 原文（gate/primary 日志）：「手工脚本仍可在 D3 部署前后或部署中执行，交错修改
+   同一 ACR 标签、容器、`last_good_tag`/`last_good_digest` 和 compose 状态，造成旧版本覆盖
+   新版本、错误回滚基线或两个路径都报告成功；最终生产版本可能错误但无失败信号，触及
+   “静默出错”红线。」
