@@ -561,6 +561,10 @@ class TestMaterializationIntegrity:
         assert not space_cache.part_path(SPACE_ID).exists()
         again = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
         assert again.status_code == 202
+        # R2 修复轮改写：轮询至第二次任务终态再对账（前轮踩坑 3：202 返回时后台任务
+        # 可能尚未推进到 ffmpeg 段，即时计数是竞态判据；终态计数才是稳定判据）。
+        resp2 = _poll_until_terminal(authed_client)
+        assert resp2.status_code == 502
         assert calls["n"] == 2
 
     def test_segment_count_mismatch_blocks_publish(
@@ -595,9 +599,7 @@ class TestCacheFailureSurface:
 
     @staticmethod
     def _client_no_raise() -> TestClient:
-        """raise_server_exceptions=False：服务端异常变 500 响应而非直接抛出，
-        使「裸抛 PermissionError」类回归表现为可断言的状态码（而非测试 error）。"""
-        return TestClient(app, raise_server_exceptions=False)
+        return _no_raise_client()
 
     def test_cache_init_failure_maps_502_fixed_copy(self, monkeypatch):
         """ensure_started 抛 OSError（如目录不可写）：502 固定文案，不裸抛。"""
@@ -636,6 +638,59 @@ class TestCacheFailureSurface:
         detail = resp.json()["detail"]
         assert str(space_cache.cache_dir()) not in detail
         assert f"'{part.name}'" in detail  # basename 保留供诊断
+
+
+def _no_raise_client() -> TestClient:
+    """raise_server_exceptions=False：服务端异常变 500 响应而非直接抛出，
+    使「裸抛 PermissionError / FileNotFoundError」类回归表现为可断言的状态码
+    （而非测试 error），保证红验红型是断言失败。"""
+    return TestClient(app, raise_server_exceptions=False)
+
+
+class TestDeliveryOpenRace:
+    """R2 minor：status=FINAL 与交付打开之间的清理竞态（unlink-while-open 只保已打开读者）。
+    修复 = fd 前置打开（space_cache.open_final），打开后交付从 fd 读；
+    打开失败（已被清理）是合法状态迁移 → 按未命中 spawn+202，非兜底非 500。"""
+
+    def test_final_unlinked_after_status_maps_202_not_500(self, monkeypatch):
+        """status 判定 FINAL 后、打开前被清理 → 202（未命中重拉）。"""
+        real_status = space_cache.status
+
+        def status_then_unlink(space_id):
+            st = real_status(space_id)
+            if st is space_cache.SpaceCacheStatus.FINAL:
+                space_cache.final_path(space_id).unlink()  # 模拟判定后被 sweep 清
+            return st
+
+        monkeypatch.setattr(space_cache, "status", status_then_unlink)
+        _make_final(SPACE_ID, b"to-be-swept-mid-decision")
+
+        async def failing_fetch(self, **kwargs):
+            raise ProviderError("no network in test")  # spawn 的重拉任务快速失败，不真跑
+
+        monkeypatch.setattr(YtdlpProvider, "fetch_video_info", failing_fetch)
+        with _no_raise_client() as client:
+            resp = client.get(f"/api/stream/twitter_space/{SPACE_ID}", headers=AUTH)
+        assert resp.status_code == 202
+        assert resp.json() == {"status": "extracting", "retry_after": 5}
+
+    def test_fd_survives_unlink_after_open(self, authed_client, monkeypatch):
+        """fd 前置打开后文件被清理 → unlink-while-open 保读者，交付 200 完整内容。"""
+        payload = b"unlink-while-open-still-readable"
+        _make_final(SPACE_ID, payload)
+        real_open_final = space_cache.open_final
+
+        def open_then_unlink(space_id):
+            fh = real_open_final(space_id)
+            if fh is not None:
+                space_cache.final_path(space_id).unlink()  # 模拟交付中 sweep unlink
+            return fh
+
+        monkeypatch.setattr(space_cache, "open_final", open_then_unlink)
+        resp = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
+        assert resp.status_code == 200
+        assert resp.content == payload
+        assert resp.headers["content-length"] == str(len(payload))
 
 
 class TestEmptySegmentGuard:

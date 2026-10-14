@@ -31,9 +31,14 @@ def _reset_space_cache(monkeypatch, tmp_path):
     monkeypatch.setattr(space_cache, "_started", False)
     monkeypatch.setattr(space_cache, "_lock", None)
     monkeypatch.setattr(space_cache, "_sweeper_task", None, raising=False)
+    failures = getattr(space_cache, "_failures", None)
+    if failures is not None:
+        failures.clear()
     yield
     space_cache._tasks.clear()
     space_cache._sweeper_task = None
+    if failures is not None:
+        failures.clear()
 
 
 def _make_final(space_id: str, payload: bytes = b"final-bytes") -> Path:
@@ -139,6 +144,77 @@ class TestSingleFlight:
         assert calls == 1
         release.set()
 
+    async def test_failed_entry_migrates_to_bounded_registry_tasks_popped(self):
+        """R2 major：失败条目迁有界注册表，done Task（含 traceback）不滞留 _tasks。"""
+
+        async def boom():
+            raise RuntimeError("proxy exploded")
+
+        await space_cache.start(SPACE_ID, boom)
+        with pytest.raises(RuntimeError):
+            await space_cache._tasks[SPACE_ID]
+        assert space_cache.status(SPACE_ID) is space_cache.SpaceCacheStatus.FAILED
+        assert SPACE_ID not in space_cache._tasks
+        exc = space_cache.consume_failure(SPACE_ID)
+        assert isinstance(exc, RuntimeError)
+        assert space_cache.consume_failure(SPACE_ID) is None
+        assert space_cache.status(SPACE_ID) is space_cache.SpaceCacheStatus.ABSENT
+
+    async def test_registry_cap_evicts_oldest_fifo(self):
+        """cap 满：FIFO 逐出最旧失败条目（dict 插入序），新条目保留。"""
+        for i in range(space_cache._FAILED_CAP + 1):
+            space_cache._record_failure(f"1A{i:011d}", RuntimeError(f"fail-{i}"))
+        assert len(space_cache._failures) == space_cache._FAILED_CAP
+        oldest = f"1A{0:011d}"
+        assert oldest not in space_cache._failures
+        assert space_cache.consume_failure(oldest) is None
+        assert space_cache.status(oldest) is space_cache.SpaceCacheStatus.ABSENT
+        newest = f"1A{space_cache._FAILED_CAP:011d}"
+        assert isinstance(space_cache.consume_failure(newest), RuntimeError)
+
+    async def test_evicted_failure_respawns_instead_of_erroring(self):
+        """逐出语义 = 忘掉失败态：下次 GET 按 ABSENT 重拉，不报错。"""
+        sid = "1B" + "b" * 11
+        space_cache._record_failure(sid, RuntimeError("old"))
+        for i in range(space_cache._FAILED_CAP):
+            space_cache._record_failure(f"1C{i:011d}", RuntimeError("flood"))
+        assert space_cache.status(sid) is space_cache.SpaceCacheStatus.ABSENT
+        spawned: list[str] = []
+
+        async def runner():
+            spawned.append(sid)
+
+        assert await space_cache.start(sid, runner) is True
+        await space_cache._tasks[sid]
+        assert spawned == [sid]
+
+    async def test_success_done_entry_popped_on_query(self):
+        """成功态由 final 文件承载：done 条目在查询时归位弹出，不滞留 _tasks。"""
+
+        async def ok():
+            space_cache.ensure_dir()
+            space_cache.part_path(SPACE_ID).write_bytes(b"x")
+            space_cache.publish_final(SPACE_ID)
+
+        await space_cache.start(SPACE_ID, ok)
+        await space_cache._tasks[SPACE_ID]
+        assert space_cache.status(SPACE_ID) is space_cache.SpaceCacheStatus.FINAL
+        assert SPACE_ID not in space_cache._tasks
+
+    async def test_task_exception_is_idempotent_across_reads(self):
+        """增补4：task.exception() 可重复取（无消费语义），reap 读异常不影响后续 consume。"""
+
+        async def boom():
+            raise RuntimeError("once")
+
+        await space_cache.start(SPACE_ID, boom)
+        task = space_cache._tasks[SPACE_ID]
+        with pytest.raises(RuntimeError):
+            await task
+        assert task.exception() is task.exception()
+        assert space_cache.status(SPACE_ID) is space_cache.SpaceCacheStatus.FAILED
+        assert isinstance(space_cache.consume_failure(SPACE_ID), RuntimeError)
+
     async def test_failed_entry_consumed_once_then_respawn_allowed(self):
         async def boom():
             raise RuntimeError("proxy exploded")
@@ -160,9 +236,10 @@ class TestSingleFlight:
             space_cache.publish_final(SPACE_ID)
 
         await space_cache.start(SPACE_ID, ok)
-        await asyncio.sleep(0.05)
-        assert SPACE_ID not in space_cache._tasks
+        await space_cache._tasks[SPACE_ID]
+        # 无 done callback（R2 改惰性归位）：查询驱动归位弹出
         assert space_cache.status(SPACE_ID) is space_cache.SpaceCacheStatus.FINAL
+        assert SPACE_ID not in space_cache._tasks
 
     async def test_restart_reset_is_startup_part_scan(self):
         """重启后单飞失效：崩溃遗留 .part 被启动扫描回收即重置（锁定决策 6）。"""
@@ -243,7 +320,11 @@ class TestSweep:
 
     def test_sweep_without_cache_dir_is_noop(self, monkeypatch):
         monkeypatch.setattr(settings, "SPACE_CACHE_DIR", "/nonexistent/space-cache-x")
-        assert space_cache.sweep() == {"ttl_removed": 0, "watermark_removed": 0}
+        assert space_cache.sweep() == {
+            "ttl_removed": 0,
+            "watermark_removed": 0,
+            "part_removed": 0,
+        }
 
     def test_unlink_while_open_reader_finishes(self, monkeypatch):
         """清理与交付并发：POSIX unlink-while-open——读者 fd 继续读完（锁定决策 6/7）。"""
@@ -254,6 +335,18 @@ class TestSweep:
             assert stats["ttl_removed"] == 1
             assert not final.exists()
             assert reader.read() == b"download-in-progress-bytes"
+
+    def test_sweep_removes_stale_orphan_part_keeps_fresh(self):
+        """矩阵增补（.part × 长运行进程 × 孤儿）：.part 纳入 TTL 清理。
+        活任务持续写 .part（mtime 持续更新）不受影响；宽限期内被跳过的孤儿
+        否则在无重启的长运行进程中永不回收。"""
+        orphan = _make_part("1N" + "n" * 11)
+        fresh = _make_part("1P" + "p" * 11)
+        _age(orphan, settings.SPACE_CACHE_TTL_HOURS * 3600 + 60)
+        stats = space_cache.sweep()
+        assert stats["part_removed"] == 1
+        assert not orphan.exists()
+        assert fresh.exists()
 
 
 class TestEnsureStarted:
@@ -267,6 +360,37 @@ class TestEnsureStarted:
         _age(again, space_cache._STALE_PART_GRACE_SECONDS + 60)
         space_cache.ensure_started()
         assert again.exists()
+        await _cancel_sweeper()
+
+    async def test_init_failure_does_not_poison_started_flag(self, monkeypatch):
+        """R2 minor 反投毒：init 任一步失败 → _started 不置位，下次调用重试
+        （否则 sweeper 永不 spawn，周期清理修复被击穿）。"""
+        real_ensure_dir = space_cache.ensure_dir
+        calls = {"n": 0}
+
+        def flaky_dir():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise PermissionError(13, "Permission denied")
+            real_ensure_dir()
+
+        monkeypatch.setattr(space_cache, "ensure_dir", flaky_dir)
+        with pytest.raises(PermissionError):
+            space_cache.ensure_started()
+        assert space_cache._started is False
+        space_cache.ensure_started()
+        assert space_cache._started is True
+        assert space_cache.cache_dir().is_dir()
+        await _cancel_sweeper()
+
+    async def test_sweeper_spawn_is_guarded_against_duplicate(self, monkeypatch):
+        """init 重试路径防重：sweeper 已在跑时不产生第二个常驻任务。"""
+        space_cache.ensure_started()
+        first = space_cache._sweeper_task
+        assert first is not None
+        monkeypatch.setattr(space_cache, "_started", False)  # 强制重走 init 全程
+        space_cache.ensure_started()
+        assert space_cache._sweeper_task is first
         await _cancel_sweeper()
 
 
@@ -298,7 +422,7 @@ class TestPeriodicSweeper:
             calls["n"] += 1
             if calls["n"] == 2:  # 第 1 次是 ensure_started 首轮同步 sweep；周期轮才注入失败
                 raise OSError(28, "No space left on device")
-            return {"ttl_removed": 0, "watermark_removed": 0}
+            return {"ttl_removed": 0, "watermark_removed": 0, "part_removed": 0}
 
         monkeypatch.setattr(space_cache, "sweep", flaky_sweep)
         sink_id = logger.add(

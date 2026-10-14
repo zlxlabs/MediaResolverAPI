@@ -6,15 +6,17 @@ import asyncio
 import base64
 from contextlib import asynccontextmanager
 from pathlib import Path
+import os
 import re
-from typing import AsyncIterator, Optional, Protocol
+from typing import AsyncIterator, BinaryIO, Optional, Protocol
 from urllib.parse import urljoin
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from loguru import logger
 from pydantic import BaseModel
+from starlette.responses import Response
 
 from ..core.config import settings
 from .deps import verify_api_key
@@ -934,11 +936,89 @@ async def _forward_ffmpeg_output(
         _cleanup_ffmpeg(process, drain, writer)
 
 
+class _FinalDownloadResponse(Response):
+    """从已打开 fd 交付 final（R2 minor）：打开动作前置到端点内，「status 判定 →
+    打开」之间被清理的竞态窗口由此消除——fd 一经打开，unlink 不影响本读者。
+    Starlette FileResponse 在响应阶段先发状态码再 open，无法在打开失败时改发
+    未命中响应，故自写；Range 支持单区间（断点续传/拖动进度条均为单区间），
+    多区间与畸形 Range 回 200 全量（RFC 9110 允许忽略 Range）。
+    """
+
+    _CHUNK = 64 * 1024
+    _RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
+
+    def __init__(self, fh: BinaryIO, *, media_type: str, download_name: str) -> None:
+        self._fh = fh
+        self._size = os.fstat(fh.fileno()).st_size
+        self._disposition = f'attachment; filename="{download_name}"'
+        super().__init__(content=b"", media_type=media_type)
+
+    def _resolve_range(self, raw: Optional[str]) -> tuple[int, int]:
+        """解析请求 Range 为闭区间 [start, end]；无/畸形/多区间/空文件 → 全量。"""
+        start, end = 0, self._size - 1
+        if raw and self._size:
+            m = self._RANGE_RE.fullmatch(raw.strip())
+            if m and (m[1] or m[2]):
+                if m[1]:
+                    start = int(m[1])
+                    if m[2]:
+                        end = min(int(m[2]), self._size - 1)
+                else:
+                    start = max(0, self._size - int(m[2]))
+        return start, end
+
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            range_header = None
+            if scope["type"] == "http":
+                range_header = next(
+                    (v.decode("latin-1") for k, v in scope["headers"] if k == b"range"),
+                    None,
+                )
+            start, end = self._resolve_range(range_header)
+            if self._size and start >= self._size:
+                await send({
+                    "type": "http.response.start",
+                    "status": 416,
+                    "headers": [(b"content-range", f"bytes */{self._size}".encode("latin-1"))],
+                })
+                await send({"type": "http.response.body", "body": b"", "more_body": False})
+                return
+            length = max(0, end - start + 1)
+            partial = self._size > 0 and (start > 0 or end != self._size - 1)
+            headers = [
+                (b"content-type", (self.media_type or "application/octet-stream").encode("latin-1")),
+                (b"content-disposition", self._disposition.encode("latin-1")),
+                (b"accept-ranges", b"bytes"),
+                (b"content-length", str(length).encode("latin-1")),
+            ]
+            if partial:
+                headers.append(
+                    (b"content-range", f"bytes {start}-{end}/{self._size}".encode("latin-1"))
+                )
+            await send({
+                "type": "http.response.start",
+                "status": 206 if partial else 200,
+                "headers": headers,
+            })
+            self._fh.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = self._fh.read(min(self._CHUNK, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                await send({"type": "http.response.body", "body": chunk, "more_body": remaining > 0})
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
+        finally:
+            self._fh.close()
+
+
 @router.get("/stream/twitter_space/{space_id}")
 async def stream_twitter_space(space_id: str):
     """X Space 回放两阶段交付（交付形态 v2，锁定决策 3/4/8）。
 
-    命中 final → 普通文件下载（Content-Length + Range 断点续传，FileResponse 原生）；
+    命中 final → 普通文件下载（Content-Length + Range 断点续传，fd 前置打开）；
     未命中 → spawn 后台获取任务并立即 202（任务脱离客户端连接、持有上游并发槽）；
     任务进行中 → 202；任务失败 → 400/404/502 一次，下次 GET 重新 spawn（失败态不持久）。
     playlist URL 短命，绝不进缓存、绝不进响应，日志中脱敏。
@@ -955,13 +1035,14 @@ async def stream_twitter_space(space_id: str):
 
     st = space_cache.status(space_id)
     if st is space_cache.SpaceCacheStatus.FINAL:
-        return FileResponse(
-            str(space_cache.final_path(space_id)),
-            media_type="audio/mp4",
-            headers={
-                "Content-Disposition": f'attachment; filename="space-{space_id}.m4a"',
-            },
-        )
+        fh = space_cache.open_final(space_id)
+        if fh is not None:
+            return _FinalDownloadResponse(
+                fh, media_type="audio/mp4", download_name=f"space-{space_id}.m4a"
+            )
+        # 交付打开竞态（R2 minor）：status 判定后被 sweep 清理是合法状态迁移，
+        # 按未命中重拉（spawn + 202），非兜底；已打开的读者由 unlink-while-open 保护。
+        st = space_cache.SpaceCacheStatus.ABSENT
     if st is space_cache.SpaceCacheStatus.FAILED:
         exc = space_cache.consume_failure(space_id)
         if exc is not None:
