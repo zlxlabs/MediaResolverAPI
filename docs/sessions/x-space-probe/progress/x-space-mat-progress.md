@@ -27,3 +27,10 @@
 - 本段结论：gate primary round-1 四条 finding 全部修复——F2（major）：sweep 由「首次使用跑一次」改为常驻周期清理（`ensure_started` spawn `_sweep_loop`，3600s 常量、无新配置项；单轮失败 logger.error 不静默、循环不死）；F1（主脑降 P2 的廉价加固）：`startup_scan` 只回收 mtime 老于 600s 宽限期的 `.part`，README Space 节新增第 10 条「缓存目录是单进程契约」；F3：`ensure_started`/`start` 的 OSError 映射 502 固定文案（不裸抛 500）；F4：502 detail 绝对路径清洗为 basename（`_strip_internal_paths`）。新增 7 测试（StartupScanGrace 2 + PeriodicSweeper 2 + CacheFailureSurface 3），全量 551 passed。红验三处均断言失败红型：F1 注入去 grace → `assert 2 == 1`；F3 注入裸抛 → `assert 500 == 502`；F4 注入不清洗 → detail 含 tmp 路径 `not in` 断言红；均只还原注入行、还原后绿（commit 70c7c29 / 23164e0 之后注入，工作区干净）。
 - 关键决策与已否决方案：周期清理用 asyncio.Task 而非 loop.call_later（feedback 字面为「常驻后台 asyncio 清理任务」；Task 版测试内 finally cancel 可干净收敛）；F3 用 `raise_server_exceptions=False` 的本地 TestClient 锁死——注入消失时 PermissionError 裸抛会表现为 500 响应而非测试 error，保住「红验红型必须是断言失败」的可核对性。无新增配置项/抽象（周期与宽限均为常量，反熵条款）。
 - 下一步唯一动作：写 report.md（回执 + 四问），push，收工。
+
+## 2026-10-14 收口轮：R2 生命周期×资源矩阵全边角修复完毕，全量 562 passed
+
+- 当前阶段：deliverable（等 gate primary 复审 + 主脑验收）
+- 本段结论：R2 三条 finding + 主脑两条增补检查 + 矩阵重推两项增补全部落地——R2 major：失败态迁有界注册表（cap 1024 FIFO 逐出，逐出=忘掉失败态下次重拉；done Task 连 traceback 不再滞留 _tasks，成功/取消查询时归位弹出）；R2 minor 交付竞态：实证 Starlette FileResponse 先发状态码后开文件（响应阶段无法转 202），改为 fd 前置打开（space_cache.open_final）+ 自写 _FinalDownloadResponse（单区间 Range，fd 一开 unlink 永不影响本读者；打开失败=被清理的合法状态迁移→未命中 spawn+202）；R2 minor 反投毒：_started 移到全部 init 成功后，sweeper spawn 防重。矩阵重推增补两项：A）孤儿 .part 纳入 sweep TTL（宽限期跳过的新鲜孤儿在无重启长运行进程中原本永不回收）；B）done 条目归位改查询驱动+周期推式双保险（客户端失败后不再轮询时，sweeper 每周期全量 reap，否则 traceback 滞留、cap 失效——R2 major 的马甲场景）。红验四处全断言失败红型：R2-1 `assert 1025 == 1024`、R2-2 `assert 500 == 202`、R2-3 `assert False is True`、ADD-B（done 条目滞留断言）；均只还原注入行。全量 562 passed，累计 diff 1689/2600 hard。
+- 关键决策与已否决方案：交付竞态否决「端点内探测 open + 仍用 FileResponse」（探测→FileResponse 开文件的窗口防不住锁死测试的注入时序，且响应阶段异常已不可转 202）与「手写多区间 Range」（单区间覆盖断点续传与拖动，多区间回 200 全量 RFC 合法，diff 减半）；init 串行化否决「asyncio.Lock」（ensure_started 是同步函数不可 await；单线程事件循环内同步代码天然串行，跨 loop 双跑靠幂等+spawn 防重）。_tasks 表不设 cap：条目规模由活跃请求 id 数界定、done 必归位（推拉双保险），引入排队 cap 即任务队列（非目标）。
+- 下一步唯一动作：push + report.md（含矩阵增补节），收工。
