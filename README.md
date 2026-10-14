@@ -47,6 +47,7 @@ risk-tier: internal
 5. **只支持回放，且只有约 30 天。** 正在直播或未开播的 Space 会明确报错（`live_status` 为 `is_live`/`is_upcoming`/缺失；`post_live` 即已结束可回放）；X 只保留回放约 30 天，过期后 resolve 返回明确错误、下载端点返回 404，服务不做任何兑底取回。
 6. **并发与视频号共用上限。** 流式下载共用 `MAX_CONCURRENT_STREAMS`（默认 4），超限返回 429。
 7. **仅支持 x.com / twitter.com 直链**，不支持 t.co 短链包裹的 Space 链接。
+8. **生产出口被墙时配 `YTDLP_PROXY`。** 部署机到 `x.com` / `pscp.tv`（音频 CDN）被 DNS 污染或 TCP 封锁时，设 `YTDLP_PROXY=http://user:pass@proxy.example:7890`（占位示例；真实值含凭据，只写部署机 `.env`，不进仓），提取与分段抓取整条 X 链路走该 HTTP 代理；留空则直连，行为与未配置完全一致。TikHub / Cobalt / 翻译等其他平台的网络路径不受该变量影响。
 
 ---
 
@@ -82,6 +83,7 @@ cp .env.example .env
 | `PUBLIC_BASE_URL` | 对外公开基址，决定 `POST /api/resolve` 返回的 `data.video_url` 前缀。显式配置了就用它，没配置就用当前请求的 `Host`（`request.base_url`）推导 | 空字符串 `""` | **反向代理后面且代理未透传正确 Host 时必须设置**，否则 `video_url` 会变成内网地址（如 `http://127.0.0.1:8000/api/stream/...`），下游拿到无法使用 |
 | `MAX_CONCURRENT_STREAMS` | 流式下载（视频号 + X Space）的**每进程**并发上限，超限返回 429，不会排队 | `4` | 一般不用改；单进程扛不住并发、或要用 `uvicorn --workers N` / 多副本时需按进程数自行核算（此项不是全局限制） |
 | `YTDLP_EXTRACT_TIMEOUT_SECONDS` | X Space 回放的 yt-dlp 单次提取超时（秒）；解析与流式下载两处消费 | `30` | 一般不用改；网络到 X 较慢时可放宽 |
+| `YTDLP_PROXY` | X 链路出口 HTTP 代理：yt-dlp 提取与 X Space 分段抓取共用；留空直连，其他平台出口不受影响 | 空字符串 `""` | 部署机网络到 X / pscp CDN 被墙（DNS 污染或封锁）时必须设为可用 HTTP 代理 |
 | `STREAM_WINDOW_BYTES` | 视频号流式代理向 CDN 请求的有界窗口大小（字节）。每个窗口整块读完才向客户端吐数据 | `4194304` | 一般不用改；要压内存或适应更慢的客户端时才设 |
 | `STREAM_CHUNK_SIZE` | 流式转发的分块大小（字节） | `65536` | 一般不用改；要调整转发缓冲时才设 |
 | `COBALT_API_BASE` | Cobalt 自建服务地址，作为部分平台的兜底数据源 | 空字符串 `""`（未配置则 Cobalt 不可用） | 需要 Cobalt 兜底时必须设为实际服务地址；视频号无 Cobalt 兜底，不设不影响视频号 |
