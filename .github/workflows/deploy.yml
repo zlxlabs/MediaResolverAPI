@@ -1,6 +1,7 @@
-# D3 自动部署：push master 自动 build→ACR→SSH 部署→探针→失败自动回滚。
+# D3 自动部署：push master 自动 build→ACR→SSH 部署→探针；探针失败自动回滚（last_good_tag）。
 # 设计与接入记录：docs/sessions/261014-d3-release/design.md
-# 手工脚本 docker/push_to_acr.sh 仅 break-glass 应急，与本流水线互斥使用。
+# 拉取/重标记/启动阶段失败不自动回滚（上游契约）：job 红线 + 人工恢复点 media-resolver-api:pre-d3-baseline，见 docs/sessions/261014-d3-release/design.md §2.5。
+# 手工部署脚本已删除（D3 与手工路径互斥）；break-glass 恢复见 docs/sessions/261014-d3-release/design.md §2.8（git show a0cd8bf 取回）。
 name: deploy
 on:
   push:

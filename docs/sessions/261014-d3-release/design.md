@@ -98,16 +98,16 @@
    `pre-d3-baseline`（§2.5）、ACR 回滚 tag 的 manifest 核实 + digest 记录（§2.5）、
    `.deploy-state/last_good_tag`+`last_good_digest` 预置（§2.5）、部署密钥生成与授权（§2.6）。
 2. `gh secret set` 配 6 个缺失 secrets（§2.6），`gh secret list` 断言 7 个齐（含已有 webhook）。
-3. 仓内改动：新增 `.github/workflows/deploy.yml`（参数见 §2）；两个手工脚本头部注释标
-   break-glass 身份；本设计文档落盘 `docs/sessions/261014-d3-release/design.md`。
+3. 仓内改动：新增 `.github/workflows/deploy.yml`（参数见 §2）；（已随锁定决策 #8 重开作废——
+   手工脚本于 080c0e9 删除，见 §7-5）；本设计文档落盘 `docs/sessions/261014-d3-release/design.md`。
 4. draft PR → 本地漏斗（`make test`）绿 → ready；**主脑验收合并**；merge push 自动首跑。
 5. 完成标志（可命令验证，主脑合并后核）：deploy run conclusion=success（job 级，非
    aggregator reason）；`ssh fordeal 'cat …/.deploy-state/last_good_tag'` == master HEAD SHA；
    容器 `StartedAt` 晚于合并时间且镜像 `GIT_SHA` == HEAD；宿主 `curl localhost:8206/health`
    200；飞书收到成功回执（notify_on_success: true）。
 
-回滚点：删 deploy.yml + 服务器 compose 符号链接摘除 + `pre-d3-baseline` 快照恢复 + 手工脚本
-照旧可用；last_good_tag 预置保证探针失败路径有真实回退镜像。
+回滚点：删 deploy.yml + 服务器 compose 符号链接摘除 + `pre-d3-baseline` 快照恢复 +
+break-glass = git show a0cd8bf 取回脚本（§2.8）；last_good_tag 预置保证探针失败路径有真实回退镜像。
 
 ### 卡 B（app，S，--class quick）：版本规范化 v1.1.0
 
