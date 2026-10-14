@@ -4,6 +4,7 @@ Application configuration module.
 Loads settings from environment variables using Pydantic.
 """
 
+import importlib.metadata
 import os
 from pathlib import Path
 from typing import List, Optional
@@ -11,12 +12,19 @@ from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
 
+def _dist_version() -> str:
+    """从已安装发行包元数据取版本，唯一字面量在 pyproject.toml。"""
+    return importlib.metadata.version("media-resolver-api")
+
+
 class Settings(BaseSettings):
     """Application configuration."""
 
     # Application settings
     APP_NAME: str = "MediaResolverAPI"
-    APP_VERSION: str = "1.0.0"
+    APP_VERSION: str = _dist_version()
+    # 镜像构建时由 build-arg 注入，用于 /health 可观测与故障对账
+    GIT_SHA: str = "unknown"
     DEBUG: bool = False
     HOST: str = "0.0.0.0"
     PORT: int = 8000

@@ -43,3 +43,29 @@ pytest
 2. 确保 `pytest` 全绿。
 3. 在 `CHANGELOG.md` 的 `[Unreleased]` 段落记录变更。
 4. 提交 PR 并描述动机与影响范围。
+
+## 发版流程
+
+日常发版是全自动的：PR 合入 `master` 后，D3 流水线自动 build 镜像 → 部署 → 探针检查，
+失败会自动回滚到上一个可用版本。你只需要盯两处：`gh run list --workflow deploy`
+看流水线结论，以及飞书部署回执。
+
+版本号规则：**唯一字面量在 `pyproject.toml`**，其余地方（`/health`、启动日志）都是
+运行时从安装元数据读的，不要手改。
+
+发版动作清单：
+
+1. 把 `CHANGELOG.md` 的 `[Unreleased]` 段切版为 `## [X.Y.Z] - 日期`，按 Keep a
+   Changelog 惯例重建空的 `[Unreleased]` 段。
+2. `pyproject.toml` 的 `version` bump 到同一个 `X.Y.Z`，两个号必须一致。
+3. 合入 `master`，等 D3 部署完成。
+4. 主脑打标签：`git tag vX.Y.Z && git push origin vX.Y.Z`。
+
+线上对账：部署完成后，`curl https://<生产地址>/health` 返回的 `version` 必须等于
+`pyproject.toml` 的版本，`git_sha` 必须等于 `master` HEAD 的 commit SHA。对不上就
+说明发版链路有漏步，先查部署日志再排查。
+
+`docker/push_to_acr.sh` 等手工发布脚本已从仓库删除（互斥由仓库形态保证）。
+break-glass（仅 D3 不可用时）从 git 历史取回：
+`git show a0cd8bf:docker/push_to_acr.sh`，它与 `last_good_tag` 回滚状态互斥，
+不要同时走两条发布路径；下次 D3 恢复后会自动重新对齐 `last_good_tag`。
