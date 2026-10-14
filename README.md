@@ -18,6 +18,7 @@ risk-tier: internal
 | Facebook | ✅ | Cobalt |
 | 微信视频号 (WeChat Channels) | ✅ | TikHub |
 | X (Twitter) | ✅ | TikHub（单端点）→ Cobalt |
+| X Space (Twitter Spaces) | ❌（不支持 t.co 短链包裹） | yt-dlp（本机提取）→ 本服务 ffmpeg 拼装 |
 
 > 含多个数据源的平台会按优先级依次尝试，前者失败自动降级到后者。
 >
@@ -31,6 +32,21 @@ risk-tier: internal
 > - **YouTube**：`web/get_video_info（预解析直链）→ web/get_video_info_v2（streamingData 合流）`；解析器自适应两套 schema。有 Cobalt 兜底。
 > - **微信视频号**：TikHub 单源单端点（`wechat_channels/v2/fetch_video_detail`），无 Cobalt 兜底，故链内不判终态。瞬态 `retryable` 在单端点上重试，最多 3 次尝试、退避 0.3s；`attempts` 带脱敏原因（`data_missing` / `object_type_mismatch` / `error_body`）。平台标识是 `wechat_channels`（不是 `wechat`）。
 > - **X (Twitter)**：TikHub 单端点（`twitter/web/fetch_tweet_detail`）按 status ID 获取元数据，失败后降级 Cobalt；只返回本帖最高码率 MP4，忽略 HLS 与引用帖视频。平台标识是 `twitter`（同时支持 `x.com` 与 `twitter.com`）。
+> - **X Space**：yt-dlp 进程内提取（guest token 路径，无 cookie），仅回放（`was_live`/`post_live`）；`video_url` 指向本服务 ffmpeg 拼装的流式端点。平台标识是 `twitter_space`（与推文 `twitter` 互斥）。详见「X Space 回放下载」节。
+
+---
+
+## X Space 回放下载
+
+`https://x.com/i/spaces/<13位ID>`（含 `/peek` 尾段）解析后返回一个指向本服务的稳定下载 URL，服务端把 HLS 回放拼装成**单个 m4a 文件**流式返回，客户端不需要处理 HLS 或认证。
+
+1. **`video_url` 指向本服务，必须带 `X-API-Key`。** 与视频号同规则：`GET /api/stream/twitter_space/{space_id}`，响应 `Content-Type: audio/mp4`、`Content-Disposition: attachment`，直接保存即得可播放的 m4a（AAC 不重编码，服务端只做容器拼装/remux，不改变「不做转码」承诺）。
+2. **无 Range / 断点续传。** 流式响应无 `Content-Length`、不支持 `Range`，进度条不可拖动；中断后只能整段重新下载。
+3. **时长未知。** X 的 Space 元数据不提供时长（`data.duration` 恒为 `null`），文件大小无法预知，只能边下边收。
+4. **首次字节延迟约 4~5 秒。** 每次下载都要先现场提取一次回放清单（约 2~3 秒，受 `YTDLP_EXTRACT_TIMEOUT_SECONDS` 约束），再加 ffmpeg 连接与首片拼装；之后按约 10~30 倍速持续出字节（实测 1 MiB 约 7 秒含首延迟）。清单 URL 短命，绝不缓存、绝不出现在任何响应里。
+5. **只支持回放，且只有约 30 天。** 正在直播或未开播的 Space 会明确报错（`live_status` 为 `is_live`/`is_upcoming`/缺失；`post_live` 即已结束可回放）；X 只保留回放约 30 天，过期后 resolve 返回明确错误、下载端点返回 404，服务不做任何兑底取回。
+6. **并发与视频号共用上限。** 流式下载共用 `MAX_CONCURRENT_STREAMS`（默认 4），超限返回 429。
+7. **仅支持 x.com / twitter.com 直链**，不支持 t.co 短链包裹的 Space 链接。
 
 ---
 
@@ -64,7 +80,8 @@ cp .env.example .env
 | `TIKHUB_API_KEY` | TikHub 数据源密钥，解析各平台元数据时使用 | 空字符串 `""` | 要解析视频（含视频号）时必须设，否则上游请求失败 |
 | `TIKHUB_API_BASE` | TikHub API 基址 | `https://api.tikhub.io` | 一般不用改；只用自建/代理 TikHub 时才设 |
 | `PUBLIC_BASE_URL` | 对外公开基址，决定 `POST /api/resolve` 返回的 `data.video_url` 前缀。显式配置了就用它，没配置就用当前请求的 `Host`（`request.base_url`）推导 | 空字符串 `""` | **反向代理后面且代理未透传正确 Host 时必须设置**，否则 `video_url` 会变成内网地址（如 `http://127.0.0.1:8000/api/stream/...`），下游拿到无法使用 |
-| `MAX_CONCURRENT_STREAMS` | 视频号流式下载的**每进程**并发上限，超限返回 429，不会排队 | `4` | 一般不用改；单进程扛不住并发、或要用 `uvicorn --workers N` / 多副本时需按进程数自行核算（此项不是全局限制） |
+| `MAX_CONCURRENT_STREAMS` | 流式下载（视频号 + X Space）的**每进程**并发上限，超限返回 429，不会排队 | `4` | 一般不用改；单进程扛不住并发、或要用 `uvicorn --workers N` / 多副本时需按进程数自行核算（此项不是全局限制） |
+| `YTDLP_EXTRACT_TIMEOUT_SECONDS` | X Space 回放的 yt-dlp 单次提取超时（秒）；解析与流式下载两处消费 | `30` | 一般不用改；网络到 X 较慢时可放宽 |
 | `STREAM_WINDOW_BYTES` | 视频号流式代理向 CDN 请求的有界窗口大小（字节）。每个窗口整块读完才向客户端吐数据 | `4194304` | 一般不用改；要压内存或适应更慢的客户端时才设 |
 | `STREAM_CHUNK_SIZE` | 流式转发的分块大小（字节） | `65536` | 一般不用改；要调整转发缓冲时才设 |
 | `COBALT_API_BASE` | Cobalt 自建服务地址，作为部分平台的兜底数据源 | 空字符串 `""`（未配置则 Cobalt 不可用） | 需要 Cobalt 兜底时必须设为实际服务地址；视频号无 Cobalt 兜底，不设不影响视频号 |
@@ -216,7 +233,7 @@ audio 模式不代表 MP3 或其他容器格式，服务不做转码；请使用
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `success` | bool | 是否解析成功 |
-| `data.platform` | string | 平台标识：`douyin` `tiktok` `kuaishou` `youtube` `xiaohongshu` `instagram` `pinterest` `facebook` `wechat_channels` `twitter` |
+| `data.platform` | string | 平台标识：`douyin` `tiktok` `kuaishou` `youtube` `xiaohongshu` `instagram` `pinterest` `facebook` `wechat_channels` `twitter` `twitter_space` |
 | `data.video_id` | string | 平台视频 ID |
 | `data.title` | string | 视频标题 |
 | `data.description` | string | 视频描述原文 |
@@ -224,8 +241,8 @@ audio 模式不代表 MP3 或其他容器格式，服务不做转码；请使用
 | `data.translation_status` | string \| null | 翻译状态：`ok`、`skipped_chinese`、`skipped_disabled`、`skipped_not_requested` 或 `failed`；失败时译文为 `null`，不代表整次解析失败 |
 | `data.author_name` | string | 作者昵称 |
 | `data.author_id` | string | 作者 ID |
-| `data.video_url` | string | 视频无水印直链。其他平台为第三方 CDN；视频号指向本服务的流式端点（见「视频号的下载方式」） |
-| `data.media_type` | `video` \| `audio` | `video_url` 的媒体类型；未指定 `download_mode` 时为 `video` |
+| `data.video_url` | string | 视频无水印直链。其他平台为第三方 CDN；视频号与 X Space 指向本服务的流式端点（见「视频号的下载方式」「X Space 回放下载」） |
+| `data.media_type` | `video` \| `audio` | `video_url` 的媒体类型；未指定 `download_mode` 时为 `video`。X Space 恒为 `audio` |
 | `data.width` | int | 视频宽度（像素） |
 | `data.height` | int | 视频高度（像素） |
 | `data.duration` | int \| null | 视频时长（秒） |

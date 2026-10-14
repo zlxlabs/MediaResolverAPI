@@ -89,6 +89,9 @@ class Settings(BaseSettings):
     STREAM_CHUNK_SIZE: int = 65536
     STREAM_WINDOW_BYTES: int = 4194304
 
+    # yt-dlp extraction (X Space replays; consumed by resolve and stream)
+    YTDLP_EXTRACT_TIMEOUT_SECONDS: int = 30
+
     # Logging
     LOG_LEVEL: str = "INFO"
     LOG_FILE_PATH: str = "./logs"
@@ -107,6 +110,7 @@ class Settings(BaseSettings):
     PROVIDER_PRIORITY_KUAISHOU: str = ""
     PROVIDER_PRIORITY_WECHAT_CHANNELS: str = ""
     PROVIDER_PRIORITY_TWITTER: str = ""
+    PROVIDER_PRIORITY_TWITTER_SPACE: str = ""
 
     model_config = {
         "env_file": ".env",

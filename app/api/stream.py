@@ -7,6 +7,7 @@ import base64
 from contextlib import asynccontextmanager
 import re
 from typing import AsyncIterator, Optional, Protocol
+from urllib.parse import urljoin
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -18,6 +19,11 @@ from ..core.config import settings
 from .deps import verify_api_key
 from ..services.providers.base import ProviderError, VideoNotFoundError
 from ..services.providers.tikhub import TikHubProvider
+from ..services.providers.ytdlp import (
+    SpaceNotReplayError,
+    YtdlpProvider,
+    redact_playlist_url,
+)
 from ..services.wechat_channels_crypto import (
     KEYSTREAM_SIZE,
     generate_keystream,
@@ -394,15 +400,27 @@ async def _fetch_media(sph_code: str) -> dict:
     return await provider.fetch_wechat_channels_media(sph_code)
 
 
-async def _stream_slot(sph_code: str) -> AsyncIterator[None]:
+@asynccontextmanager
+async def _stream_slot_cm(label: str) -> AsyncIterator[None]:
+    """共享并发槽：同一 stream_limiter（MAX_CONCURRENT_STREAMS 信号量）服务两个流式端点。"""
     async with stream_limiter.slot() as acquired:
         if not acquired:
             logger.warning(
-                "wechat stream 429 sph_code={} active={}",
-                sph_code,
+                "stream 429 slot={} active={}",
+                label,
                 stream_limiter.active,
             )
             raise _json_http_error(429, "Too many concurrent streams")
+        yield
+
+
+async def _stream_slot(sph_code: str) -> AsyncIterator[None]:
+    async with _stream_slot_cm(f"wechat_channels:{sph_code}"):
+        yield
+
+
+async def _twitter_space_slot(space_id: str) -> AsyncIterator[None]:
+    async with _stream_slot_cm(f"twitter_space:{space_id}"):
         yield
 
 
@@ -587,6 +605,369 @@ async def stream_wechat_channels(sph_code: str, request: Request):
         status_code=status_code,
         media_type="video/mp4",
         headers=headers,
+    )
+
+
+_SPACE_ID_PATTERN = re.compile(r"^[0-9A-Za-z]{13}$")
+
+
+class SegmentFetchError(RuntimeError):
+    """段/播放列表抓取失败（message 已脱敏）。"""
+
+
+# 收尸等待上界：EOF 后进程应早已退出，5s 仍无确定退出码即按失败处理。
+_REAP_TIMEOUT_SECONDS = 5
+
+
+def _http_timeout() -> httpx.Timeout:
+    return httpx.Timeout(
+        connect=settings.HTTP_TIMEOUT_SECONDS,
+        read=settings.HTTP_TIMEOUT_SECONDS,
+        write=settings.HTTP_TIMEOUT_SECONDS,
+        pool=settings.HTTP_TIMEOUT_SECONDS,
+    )
+
+
+def _playlist_uris(text: str) -> list[str]:
+    """播放列表中非注释行（variant URI 或分段子行）。"""
+    return [
+        stripped
+        for line in text.splitlines()
+        if (stripped := line.strip()) and not stripped.startswith("#")
+    ]
+
+
+async def _fetch_text(url: str, headers: dict) -> str:
+    try:
+        async with httpx.AsyncClient(
+            timeout=_http_timeout(), follow_redirects=True, headers=headers
+        ) as client:
+            resp = await client.get(url)
+    except httpx.HTTPError as exc:
+        raise SegmentFetchError(
+            f"playlist fetch failed: {redact_playlist_url(str(exc))}"
+        ) from exc
+    if resp.status_code >= 400:
+        raise SegmentFetchError(f"playlist HTTP {resp.status_code}")
+    return resp.text
+
+
+async def _fetch_media_segments(playlist_url: str, headers: dict) -> list[str]:
+    """现取播放列表并解析分段子行；master playlist 跟随第一个 variant。
+
+    相对 URL 按所在播放列表的基址解析（urljoin）。
+    """
+    text, base = await _fetch_text(playlist_url, headers), playlist_url
+    if "#EXT-X-STREAM-INF" in text:
+        variants = _playlist_uris(text)
+        if not variants:
+            raise SegmentFetchError("master playlist has no variant URI")
+        base = urljoin(playlist_url, variants[0])
+        text = await _fetch_text(base, headers)
+    segments = [urljoin(base, uri) for uri in _playlist_uris(text)]
+    if not segments:
+        raise SegmentFetchError("playlist has no segments")
+    return segments
+
+
+async def _stream_url_chunks(
+    url: str, headers: dict, chunk_size: int,
+    client: Optional[httpx.AsyncClient] = None,
+):
+    """逐段流式抓取；读超时复用 HTTP_TIMEOUT_SECONDS，非 2xx 视为段失败。
+
+    client 传入时复用（整场回放共用一个连接池），不传则自建（兼容单段调用）。
+    """
+    owns_client = client is None
+    if owns_client:
+        client = httpx.AsyncClient(
+            timeout=_http_timeout(), follow_redirects=True, headers=headers
+        )
+    try:
+        async with client.stream("GET", url) as resp:
+            if resp.status_code >= 400:
+                raise SegmentFetchError(f"segment HTTP {resp.status_code}")
+            sent = 0
+            async for chunk in resp.aiter_bytes(chunk_size):
+                sent += len(chunk)
+                yield chunk
+    finally:
+        if owns_client:
+            await client.aclose()
+    if sent == 0:
+        # ADTS 段零字节不可能是合法内容：200 + 空体按段失败处理（round-6 major），
+        # 与 404 同路径（pump 杀 ffmpeg 上抛），绝不静默跳过。
+        raise SegmentFetchError("segment HTTP 200 with empty body")
+
+
+async def _pump_segments(
+    segment_urls: list[str], headers: dict, process: asyncio.subprocess.Process
+) -> None:
+    """逐段抓取写入 ffmpeg stdin；任何段失败：杀 ffmpeg 并上抛（无假成功）。
+
+    stdin 背压天然限流：ffmpeg 停止消费时 write 阻塞，上游抓取随之暂停。
+    """
+    stdin = process.stdin
+    try:
+        async with httpx.AsyncClient(
+            timeout=_http_timeout(), follow_redirects=True, headers=headers
+        ) as client:
+            for url in segment_urls:
+                async for chunk in _stream_url_chunks(
+                    url, headers, settings.STREAM_CHUNK_SIZE, client
+                ):
+                    stdin.write(chunk)      # 同步缓冲写（StreamWriter.write 非协程）
+                    await stdin.drain()     # 背压：缓冲满时阻塞，上游抓取随之暂停
+        stdin.close()
+        await stdin.wait_closed()   # 注意是 wait_closed：StreamWriter 没有 wait()
+    except Exception as exc:
+        if process.returncode is None:
+            process.kill()
+        detail = redact_playlist_url(str(exc)) or type(exc).__name__
+        logger.error(
+            "twitter_space segment pump aborted segments={} first={} err={}",
+            len(segment_urls),
+            redact_playlist_url(segment_urls[0]) if segment_urls else "-",
+            detail,
+        )
+        raise SegmentFetchError(f"segment fetch failed: {detail}") from exc
+
+
+async def _spawn_ffmpeg() -> asyncio.subprocess.Process:
+    """ADTS(stdin) → fragmented MP4 remux 到 stdout；-c copy 不重编码（remux 非转码）。
+
+    分段 HTTP 抓取由服务端完成（round-4 major 裁定：ffmpeg 自取分段在中间段
+    404 时 exit 0 空 stderr 静默截断，实测见 design.md 测量记录），故输入是
+    pipe:0，不再需要 -user_agent/-headers。
+    """
+    return await asyncio.create_subprocess_exec(
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "aac",
+        "-i",
+        "pipe:0",
+        "-c",
+        "copy",
+        "-bsf:a",
+        "aac_adtstoasc",
+        "-f",
+        "mp4",
+        "-movflags",
+        "frag_keyframe+empty_moov",
+        # audio-only 下 frag_keyframe 永不触发（无视频关键帧），不显式给切片参数
+        # 会把整场音频堆在 muxer 缓冲里不吐字节（实测卡 32B moov，2026-10-14）。
+        "-frag_duration",
+        "4000000",
+        "pipe:1",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+
+async def _drain_stderr(stderr, sink: bytearray) -> None:
+    """持续排干 ffmpeg stderr，防 64KB 管道缓冲卡死子进程；尾部 4KB 留作诊断。"""
+    while True:
+        chunk = await stderr.read(settings.STREAM_CHUNK_SIZE)
+        if not chunk:
+            return
+        sink.extend(chunk)
+        del sink[:-4096]
+
+
+def _cleanup_ffmpeg(
+    process: asyncio.subprocess.Process,
+    drain: asyncio.Task,
+    writer: Optional[asyncio.Task] = None,
+) -> None:
+    """同步清理：kill 未退出的 ffmpeg、取消 stderr 排干与段泵任务（writer 未建则跳过）。"""
+    if process.returncode is None:
+        process.kill()
+    drain.cancel()
+    if writer is not None:
+        writer.cancel()
+
+
+async def _forward_ffmpeg_output(
+    process: asyncio.subprocess.Process,
+    writer: asyncio.Task,
+    drain: asyncio.Task,
+    first: bytes,
+    stderr_tail: bytearray,
+    space_id: str,
+) -> AsyncIterator[bytes]:
+    """把 ffmpeg stdout 转发给客户端；EOF/断连后同步清理子进程（不留尸）。
+
+    fail-loud 语义：段抓取失败、中途异常退出或读挂死超时都抛错中断响应
+    （客户端看到传输中断），不把截断文件当成功流收尾。完整性不变式：
+    响应正常收尾 ⇔ 所有段抓取成功且 ffmpeg exit 0。
+    """
+    sent = len(first)
+    try:
+        yield first
+        while True:
+            try:
+                chunk = await asyncio.wait_for(
+                    process.stdout.read(settings.STREAM_CHUNK_SIZE),
+                    timeout=settings.HTTP_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    "twitter_space stream ffmpeg stdout stalled space_id={} sent={}",
+                    space_id,
+                    sent,
+                )
+                raise RuntimeError(
+                    f"ffmpeg stdout stalled over {settings.HTTP_TIMEOUT_SECONDS}s"
+                )
+            if not chunk:
+                break
+            sent += len(chunk)
+            yield chunk
+        # 正常 EOF：等 stderr 排干与段泵收尾——均有界，未知状态不当成功
+        try:
+            await asyncio.wait_for(drain, timeout=_REAP_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            if process.returncode is None:
+                process.kill()
+            logger.error(
+                "twitter_space stream stderr drain hung space_id={} sent={}",
+                space_id,
+                sent,
+            )
+            raise RuntimeError("ffmpeg stderr drain did not finish after stream end")
+        try:
+            await asyncio.wait_for(writer, timeout=settings.HTTP_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            if process.returncode is None:
+                process.kill()
+            logger.error(
+                "twitter_space stream segment pump hung space_id={} sent={}",
+                space_id,
+                sent,
+            )
+            raise RuntimeError("segment pump did not finish after stream end")
+        if process.returncode is None:
+            # stdout EOF 即进程应已退出；显式等收尸拿确定退出码。
+            # 收尸超时即 kill + 上抛：未知状态绝不当成功（round-6 major）。
+            try:
+                await asyncio.wait_for(process.wait(), timeout=_REAP_TIMEOUT_SECONDS)
+            except asyncio.TimeoutError:
+                if process.returncode is None:
+                    process.kill()
+                logger.error(
+                    "twitter_space stream ffmpeg reap timeout space_id={} sent={}",
+                    space_id,
+                    sent,
+                )
+                raise RuntimeError(
+                    "ffmpeg did not exit after stream completion; "
+                    "output is incomplete"
+                )
+        if process.returncode not in (0, None):
+            logger.error(
+                "twitter_space stream ffmpeg exited code={} space_id={} sent={} tail={}",
+                process.returncode,
+                space_id,
+                sent,
+                redact_playlist_url(bytes(stderr_tail).decode("utf-8", "replace")),
+            )
+            raise RuntimeError(
+                f"ffmpeg exited {process.returncode} before stream completion"
+            )
+    finally:
+        _cleanup_ffmpeg(process, drain, writer)
+
+
+@router.get(
+    "/stream/twitter_space/{space_id}",
+    dependencies=[Depends(_twitter_space_slot)],
+)
+async def stream_twitter_space(space_id: str):
+    """X Space 回放单文件流：playlist 每次现取（短命，design 不变式 2），ffmpeg 拼装 m4a 回流。
+
+    无 Range/断点续传（下载器场景，见 README）；playlist URL 是短命凭证，
+    绝不进缓存、绝不进响应，日志中脱敏。
+    """
+    if _SPACE_ID_PATTERN.fullmatch(space_id) is None:
+        raise _json_http_error(400, "Invalid X Space id")
+
+    provider = YtdlpProvider()
+    try:
+        info = await provider.fetch_video_info(
+            platform="twitter_space",
+            video_id=space_id,
+            original_url=f"https://x.com/i/spaces/{space_id}",
+        )
+    except SpaceNotReplayError as exc:
+        raise _json_http_error(
+            400, f"X Space is not a downloadable replay: {exc}"
+        ) from exc
+    except VideoNotFoundError as exc:
+        raise _json_http_error(404, f"X Space replay unavailable: {exc}") from exc
+    except ProviderError as exc:
+        raise _json_http_error(502, f"X Space extraction failed: {exc}") from exc
+
+    playlist_url = str(info.get("url") or "")
+    if not playlist_url:
+        raise _json_http_error(502, "X Space extraction returned no playlist URL")
+
+    headers = info.get("http_headers") or {}
+    try:
+        segment_urls = await _fetch_media_segments(playlist_url, headers)
+    except SegmentFetchError as exc:
+        logger.warning(
+            "twitter_space playlist resolve failed space_id={}: {}", space_id, exc
+        )
+        raise _json_http_error(
+            502,
+            f"X Space playlist fetch failed: {redact_playlist_url(str(exc))}",
+        ) from exc
+    if not segment_urls:
+        raise _json_http_error(502, "X Space playlist has no segments")
+
+    process = await _spawn_ffmpeg()
+    stderr_tail: bytearray = bytearray()
+    drain = asyncio.create_task(_drain_stderr(process.stderr, stderr_tail))
+    # 泵任务必须先于预读启动：-f aac -i pipe:0 的 ffmpeg 在收到 stdin 输入前
+    # 不产出任何 stdout，先预读会白等 30s 超时（stdin/stdout 互锁）。
+    writer = asyncio.create_task(
+        _pump_segments(segment_urls, headers, process)
+    )
+    try:
+        # 预读首块：ffmpeg 瞬时失败（playlist 已坏/起不来）时 headers 还没发，可升级成 502。
+        try:
+            first = await asyncio.wait_for(
+                process.stdout.read(settings.STREAM_CHUNK_SIZE),
+                timeout=settings.HTTP_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            raise _json_http_error(
+                502, f"ffmpeg stalled over {settings.HTTP_TIMEOUT_SECONDS}s before first byte"
+            )
+        if not first:
+            await drain
+            logger.error(
+                "twitter_space stream ffmpeg failed before first byte "
+                "space_id={} returncode={} tail={}",
+                space_id,
+                process.returncode,
+                redact_playlist_url(bytes(stderr_tail).decode("utf-8", "replace")),
+            )
+            raise _json_http_error(502, "ffmpeg failed to assemble the Space stream")
+    except BaseException:
+        _cleanup_ffmpeg(process, drain, writer)
+        raise
+
+    return StreamingResponse(
+        _forward_ffmpeg_output(process, writer, drain, first, stderr_tail, space_id),
+        media_type="audio/mp4",
+        headers={
+            "Content-Disposition": f'attachment; filename="space-{space_id}.m4a"',
+        },
     )
 
 
