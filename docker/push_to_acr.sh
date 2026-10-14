@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# BREAK-GLASS：D3 自动部署(deploy.yml)的应急通道，日常发版禁止走本脚本（与 D3 的 last_good_tag 状态互斥）。
 set -euo pipefail
 
 ACR_REGISTRY="crpi-0vsre5argteykh9m.cn-guangzhou.personal.cr.aliyuncs.com"
