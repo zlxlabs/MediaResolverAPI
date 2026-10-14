@@ -143,6 +143,9 @@ async def start(space_id: str, factory: Callable[[], Coroutine[None, None, None]
             _reap_done_entry(active_id)
         if len(_tasks) >= _MAX_MATERIALIZATION_TASKS:
             raise SpaceCacheAdmissionError("X Space materialization queue is full")
+        min_free_bytes = settings.SPACE_CACHE_MIN_FREE_MB * 1024 * 1024
+        if min_free_bytes > 0 and _disk_free_bytes() < min_free_bytes:
+            raise SpaceCacheAdmissionError("storage below watermark")
         created = asyncio.create_task(factory())
         _tasks[space_id] = created
         return True

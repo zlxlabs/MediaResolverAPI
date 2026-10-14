@@ -708,6 +708,30 @@ class TestCacheFailureSurface:
             finally:
                 gate.set()
 
+    def test_low_disk_watermark_rejects_before_starting_materialization(
+        self, monkeypatch
+    ):
+        """spawn 前用当前可用空间做 admission，低于水位返回固定 503。"""
+        gate = threading.Event()
+
+        async def hold_materialization(space_id):
+            await asyncio.to_thread(gate.wait)
+
+        monkeypatch.setattr(settings, "SPACE_CACHE_MIN_FREE_MB", 1)
+        monkeypatch.setattr(space_cache, "_disk_free_bytes", lambda: 1024 * 1024 - 1)
+        monkeypatch.setattr(stream_mod, "_materialize_space", hold_materialization)
+        with self._client_no_raise() as client:
+            try:
+                resp = client.get(
+                    f"/api/stream/twitter_space/{SPACE_ID}", headers=AUTH
+                )
+                assert resp.status_code == 503
+                assert resp.json()["detail"] == "storage below watermark"
+                assert not space_cache.part_path(SPACE_ID).exists()
+                assert SPACE_ID not in space_cache._tasks
+            finally:
+                gate.set()
+
     def test_502_body_hides_internal_paths(self, authed_client, monkeypatch):
         """任务失败异常 str 含绝对路径（如 ENOSPC）：502 detail 只留 basename（F4）。"""
         part = space_cache.part_path(SPACE_ID)
