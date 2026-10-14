@@ -489,6 +489,83 @@ class TestEmptySegmentGuard:
             assert b"".join(got) == b"adtsdata"
 
 
+class TestProxyWiring:
+    """YTDLP_PROXY 接线（x-space-egress-proxy）：X 链路三处 httpx.AsyncClient
+    （_fetch_text / _stream_url_chunks 自建分支 / _pump_segments）设置时带
+    proxy=，空时不传该参（空值路径零行为变化）。假占位代理，禁止真实凭据入仓。
+    """
+
+    FAKE_PROXY = "http://user:pass@proxy.example:7890"
+
+    @staticmethod
+    def _spy_async_client(monkeypatch):
+        """包装 httpx.AsyncClient 记录构造 kwargs（断言点），再注入 MockTransport。
+
+        proxy= 必须从测试替身里剥掉：httpx 0.28 的代理挂载优先于自定义
+        transport，带着假代理会真拨号 DNS。代理能否眥通是 httpx 自身契约，
+        本卡只断言「生产代码把 proxy= 传进了构造器」。
+        """
+        recorded = []
+        real = httpx.AsyncClient
+
+        def factory(*args, **kwargs):
+            recorded.append(dict(kwargs))  # 副本：随后会从 kwargs 剥 proxy，不能共用引用
+            kwargs.pop("proxy", None)
+            return real(
+                *args,
+                transport=httpx.MockTransport(
+                    lambda request: httpx.Response(200, content=b"adtsdata")
+                ),
+                **kwargs,
+            )
+
+        monkeypatch.setattr(httpx, "AsyncClient", factory)
+        return recorded
+
+    async def test_fetch_text_passes_proxy_when_set(self, monkeypatch):
+        recorded = self._spy_async_client(monkeypatch)
+        monkeypatch.setattr(settings, "YTDLP_PROXY", self.FAKE_PROXY)
+        await stream_mod._fetch_text("https://playlist.example/live.m3u8", {})
+        assert recorded[0].get("proxy") == self.FAKE_PROXY
+
+    async def test_fetch_text_omits_proxy_when_unset(self, monkeypatch):
+        recorded = self._spy_async_client(monkeypatch)
+        monkeypatch.setattr(settings, "YTDLP_PROXY", "")
+        await stream_mod._fetch_text("https://playlist.example/live.m3u8", {})
+        assert "proxy" not in recorded[0]
+
+    async def test_stream_url_chunks_passes_proxy_when_set(self, monkeypatch):
+        recorded = self._spy_async_client(monkeypatch)
+        monkeypatch.setattr(settings, "YTDLP_PROXY", self.FAKE_PROXY)
+        got = [chunk async for chunk in stream_mod._stream_url_chunks(
+            "https://s/1.aac", {}, 65536
+        )]
+        assert b"".join(got) == b"adtsdata"
+        assert recorded[0].get("proxy") == self.FAKE_PROXY
+
+    async def test_stream_url_chunks_omits_proxy_when_unset(self, monkeypatch):
+        recorded = self._spy_async_client(monkeypatch)
+        monkeypatch.setattr(settings, "YTDLP_PROXY", "")
+        _ = [chunk async for chunk in stream_mod._stream_url_chunks(
+            "https://s/1.aac", {}, 65536
+        )]
+        assert "proxy" not in recorded[0]
+
+    async def test_pump_segments_passes_proxy_when_set(self, monkeypatch):
+        recorded = self._spy_async_client(monkeypatch)
+        monkeypatch.setattr(settings, "YTDLP_PROXY", self.FAKE_PROXY)
+        process = FakeProcess(out_chunks=[], err_chunks=[], exit_code=0)
+        await stream_mod._pump_segments(["https://s/1.aac"], {}, process)
+        assert recorded[0].get("proxy") == self.FAKE_PROXY
+
+    async def test_pump_segments_omits_proxy_when_unset(self, monkeypatch):
+        recorded = self._spy_async_client(monkeypatch)
+        monkeypatch.setattr(settings, "YTDLP_PROXY", "")
+        process = FakeProcess(out_chunks=[], err_chunks=[], exit_code=0)
+        await stream_mod._pump_segments(["https://s/1.aac"], {}, process)
+        assert "proxy" not in recorded[0]
+
+
 class TestForwardLoopLifecycle:
     """直接驱动转发生成器，验证断连清理与双向 stall（与视频号 _iter_windows 测试同法）。"""
 
