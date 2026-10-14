@@ -49,6 +49,14 @@ def _make_final(space_id: str, payload: bytes = b"final-bytes") -> Path:
     return final
 
 
+def _publishable(payload: bytes = b"complete-materialized-bytes") -> bytes:
+    """Success-path part bytes: keep a recognizable prefix, meet the min-size gate."""
+    min_size = space_cache._MIN_FINAL_BYTES
+    if len(payload) >= min_size:
+        return payload
+    return payload + b"\x00" * (min_size - len(payload))
+
+
 def _make_part(space_id: str, payload: bytes = b"partial") -> Path:
     space_cache.ensure_dir()
     part = space_cache.part_path(space_id)
@@ -90,10 +98,11 @@ class _FakeDiskUsage:
 class TestPathsAndPublish:
     def test_publish_is_atomic_rename_part_gone_final_intact(self):
         """os.replace 发布：part 消失、final 内容完整（缺改名=直接写 final 时此测试转红）。"""
-        part = _make_part(SPACE_ID, b"complete-materialized-bytes")
+        payload = _publishable()
+        part = _make_part(SPACE_ID, payload)
         published = space_cache.publish_final(SPACE_ID)
         assert published == space_cache.final_path(SPACE_ID)
-        assert published.read_bytes() == b"complete-materialized-bytes"
+        assert published.read_bytes() == payload
         assert not part.exists()
         assert space_cache.status(SPACE_ID) is space_cache.SpaceCacheStatus.FINAL
 
@@ -102,13 +111,23 @@ class TestPathsAndPublish:
             space_cache.publish_final(SPACE_ID)
         assert not space_cache.final_path(SPACE_ID).exists()
 
+    def test_publish_rejects_empty_or_tiny_part_no_final(self):
+        """空/极小 .part 不得改名为 final（R5-1：零字节静默发布的门禁）。"""
+        for payload in (b"", b"x" * 1023):
+            part = _make_part(SPACE_ID, payload)
+            with pytest.raises(RuntimeError, match="too small"):
+                space_cache.publish_final(SPACE_ID)
+            assert part.exists()
+            assert not space_cache.final_path(SPACE_ID).exists()
+            part.unlink()
+
     async def test_materialization_lifecycle_part_during_final_after(self):
         """获取期间只有 .part（final 绝不提前出现）；发布后 .part 消失。"""
         seen: dict[str, Path] = {}
 
         async def runner():
             seen["part"] = space_cache.part_path(SPACE_ID)
-            seen["part"].write_bytes(b"mid-flight")
+            seen["part"].write_bytes(_publishable(b"mid-flight"))
             assert not space_cache.final_path(SPACE_ID).exists()
             space_cache.publish_final(SPACE_ID)
 
@@ -214,7 +233,7 @@ class TestSingleFlight:
 
         async def ok():
             space_cache.ensure_dir()
-            space_cache.part_path(SPACE_ID).write_bytes(b"x")
+            space_cache.part_path(SPACE_ID).write_bytes(_publishable(b"x"))
             space_cache.publish_final(SPACE_ID)
 
         await space_cache.start(SPACE_ID, ok)
@@ -256,7 +275,7 @@ class TestSingleFlight:
     async def test_success_entry_released_dict_not_kept(self):
         async def ok():
             space_cache.ensure_dir()
-            space_cache.part_path(SPACE_ID).write_bytes(b"x")
+            space_cache.part_path(SPACE_ID).write_bytes(_publishable(b"x"))
             space_cache.publish_final(SPACE_ID)
 
         await space_cache.start(SPACE_ID, ok)

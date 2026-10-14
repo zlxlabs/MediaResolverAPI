@@ -43,13 +43,17 @@ PLAYLIST_TEXT = (
 
 @pytest.fixture(autouse=True)
 def _space_cache_isolated(monkeypatch, tmp_path):
-    """物化缓存目录指到本测试 tmp；模块级单飞状态逐测试清零。"""
+    """物化缓存目录指到本测试 tmp；模块级单飞/失败/清理态逐测试清零。"""
     monkeypatch.setattr(settings, "SPACE_CACHE_DIR", str(tmp_path / "space-cache"))
     space_cache._tasks.clear()
     monkeypatch.setattr(space_cache, "_started", False)
     monkeypatch.setattr(space_cache, "_lock", None)
+    monkeypatch.setattr(space_cache, "_sweeper_task", None, raising=False)
+    space_cache._failures.clear()
     yield
     space_cache._tasks.clear()
+    space_cache._sweeper_task = None
+    space_cache._failures.clear()
 
 
 def _meta() -> dict:
@@ -200,6 +204,17 @@ def _make_final(space_id: str, payload: bytes) -> Path:
     return final
 
 
+def _stub_ffmpeg_chunks() -> list[bytes]:
+    """Happy-path ffmpeg stdout: recognizable prefix, padded past min publish size."""
+    prefix = b"frag1frag2"
+    pad = max(0, space_cache._MIN_FINAL_BYTES - len(prefix))
+    return [b"frag1", b"frag2" + b"\0" * pad]
+
+
+def _stub_ffmpeg_body() -> bytes:
+    return b"".join(_stub_ffmpeg_chunks())
+
+
 @pytest.fixture
 def spawn_record(monkeypatch):
     recorded: list[tuple] = []
@@ -209,7 +224,7 @@ def spawn_record(monkeypatch):
         assert kwargs.get("stdout") == asyncio.subprocess.PIPE
         assert kwargs.get("stderr") == asyncio.subprocess.PIPE
         assert kwargs.get("stdin") == asyncio.subprocess.PIPE
-        return FakeProcess(out_chunks=[b"frag1", b"frag2"], exit_code=0)
+        return FakeProcess(out_chunks=_stub_ffmpeg_chunks(), exit_code=0)
 
     monkeypatch.setattr(stream_mod.asyncio, "create_subprocess_exec", fake_exec)
     return recorded
@@ -256,8 +271,8 @@ class TestStreamEndpoint:
             resp.headers["content-disposition"]
             == f'attachment; filename="space-{SPACE_ID}.m4a"'
         )
-        assert resp.headers["content-length"] == str(len(b"frag1frag2"))
-        assert resp.content == b"frag1frag2"
+        assert resp.headers["content-length"] == str(len(_stub_ffmpeg_body()))
+        assert resp.content == _stub_ffmpeg_body()
         assert len(spawn_record) == 1
         _assert_common_argv(spawn_record[0])
         # 改名即完整态：final 在盘上，.part 已消失
@@ -270,7 +285,7 @@ class TestStreamEndpoint:
         stdin = FakeStdin()
 
         async def fake_exec(*cmd, **kwargs):
-            return FakeProcess(out_chunks=[b"frag1", b"frag2"], exit_code=0, stdin=stdin)
+            return FakeProcess(out_chunks=_stub_ffmpeg_chunks(), exit_code=0, stdin=stdin)
 
         monkeypatch.setattr(stream_mod.asyncio, "create_subprocess_exec", fake_exec)
         _patch_segment_chunks(
@@ -301,11 +316,11 @@ class TestStreamEndpoint:
         assert second.status_code == 202
         resp = _poll_until_terminal(authed_client)
         assert resp.status_code == 200
-        assert resp.content == b"frag1frag2"
+        assert resp.content == _stub_ffmpeg_body()
         assert fetch_calls == [SPACE_ID]
         cached = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
         assert cached.status_code == 200
-        assert cached.content == b"frag1frag2"
+        assert cached.content == _stub_ffmpeg_body()
         assert fetch_calls == [SPACE_ID]  # 缓存命中：零重复提取
 
     def test_final_delivery_supports_range_resume(self, authed_client, monkeypatch):
@@ -328,6 +343,15 @@ class TestStreamEndpoint:
         )
         assert tail.status_code == 206
         assert tail.content == payload[100:]
+        open_ended = authed_client.get(
+            f"/api/stream/twitter_space/{SPACE_ID}", headers={"Range": "bytes=0-"}
+        )
+        assert open_ended.status_code == 206
+        assert open_ended.headers["content-range"] == (
+            f"bytes 0-{len(payload) - 1}/{len(payload)}"
+        )
+        assert open_ended.headers["content-length"] == str(len(payload))
+        assert open_ended.content == payload
 
     def test_range_satisfiability_and_malformed_range_handling(
         self, authed_client
@@ -347,6 +371,12 @@ class TestStreamEndpoint:
         assert resp.status_code == 200
         assert resp.content == payload
         assert "content-range" not in resp.headers
+        multi = authed_client.get(
+            f"/api/stream/twitter_space/{SPACE_ID}", headers={"Range": "bytes=0-1,2-3"}
+        )
+        assert multi.status_code == 200
+        assert multi.content == payload
+        assert "content-range" not in multi.headers
 
     def test_rejects_bad_space_id(self, authed_client):
         resp = authed_client.get("/api/stream/twitter_space/1AKEmvYqbrOK")
@@ -499,6 +529,23 @@ class TestStreamEndpoint:
         assert resp.status_code == 502
         assert "pscp.tv" not in resp.text  # 短命 playlist URL 不回显给客户端
         assert not space_cache.final_path(SPACE_ID).exists()
+
+    def test_empty_ffmpeg_output_maps_502_no_final(self, authed_client, monkeypatch):
+        """ffmpeg exit 0 但 stdout 为空：502、清 .part、无 final（R5-1）。"""
+
+        async def fake_exec(*cmd, **kwargs):
+            return FakeProcess(out_chunks=[], exit_code=0)
+
+        monkeypatch.setattr(stream_mod.asyncio, "create_subprocess_exec", fake_exec)
+        _patch_provider(monkeypatch, [_meta()])
+        _patch_playlist(monkeypatch, PLAYLIST_TEXT, [SEG_1])
+        _patch_segment_chunks(monkeypatch, {SEG_1: [b"seg"]})
+        first = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
+        assert first.status_code == 202
+        resp = _poll_until_terminal(authed_client)
+        assert resp.status_code == 502
+        assert not space_cache.final_path(SPACE_ID).exists()
+        assert not space_cache.part_path(SPACE_ID).exists()
 
     def test_no_playlist_url_maps_502(self, authed_client, monkeypatch):
         payload = _meta() | {"url": ""}
@@ -1362,3 +1409,16 @@ class TestM3u8Parsing:
 
         with pytest.raises(stream_mod.SegmentFetchError, match="no segments"):
             asyncio.run(result())
+
+
+class TestSpaceCacheModuleIsolation:
+    """R5-5：_failures / _sweeper_task 必须被 autouse fixture 逐测试清零。"""
+
+    def test_sibling_writes_module_state(self):
+        space_cache._failures["1LEAK0000000"] = (502, "leaked-from-sibling")
+        space_cache._sweeper_task = object()
+        assert "1LEAK0000000" in space_cache._failures
+
+    def test_autouse_clears_failures_and_sweeper_from_sibling(self):
+        assert "1LEAK0000000" not in space_cache._failures
+        assert space_cache._sweeper_task is None

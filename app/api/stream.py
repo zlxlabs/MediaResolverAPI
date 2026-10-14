@@ -952,8 +952,12 @@ class _FinalDownloadResponse(Response):
         self._disposition = f'attachment; filename="{download_name}"'
         super().__init__(content=b"", media_type=media_type)
 
-    def _resolve_range(self, raw: Optional[str]) -> tuple[int, int]:
-        """解析请求 Range 为闭区间 [start, end]；无/畸形/多区间/空文件 → 全量。"""
+    def _resolve_range(self, raw: Optional[str]) -> tuple[int, int, bool]:
+        """解析请求 Range 为闭区间 [start, end] 与是否命中单区间。
+
+        无/畸形/多区间/空文件 → 全量（ranged=False）。合法单区间（含 ``bytes=0-``
+        这种 start=0、end 空、覆盖整文件的写法）ranged=True，调用方发 206。
+        """
         start, end = 0, self._size - 1
         if raw and self._size:
             m = self._RANGE_RE.fullmatch(raw.strip())
@@ -964,7 +968,8 @@ class _FinalDownloadResponse(Response):
                         end = min(int(m[2]), self._size - 1)
                 else:
                     start = max(0, self._size - int(m[2]))
-        return start, end
+                return start, end, True
+        return start, end, False
 
     async def __call__(self, scope, receive, send) -> None:
         try:
@@ -974,7 +979,7 @@ class _FinalDownloadResponse(Response):
                     (v.decode("latin-1") for k, v in scope["headers"] if k == b"range"),
                     None,
                 )
-            start, end = self._resolve_range(range_header)
+            start, end, ranged = self._resolve_range(range_header)
             if self._size and (start >= self._size or end < start):
                 await send({
                     "type": "http.response.start",
@@ -984,20 +989,19 @@ class _FinalDownloadResponse(Response):
                 await send({"type": "http.response.body", "body": b"", "more_body": False})
                 return
             length = max(0, end - start + 1)
-            partial = self._size > 0 and (start > 0 or end != self._size - 1)
             headers = [
                 (b"content-type", (self.media_type or "application/octet-stream").encode("latin-1")),
                 (b"content-disposition", self._disposition.encode("latin-1")),
                 (b"accept-ranges", b"bytes"),
                 (b"content-length", str(length).encode("latin-1")),
             ]
-            if partial:
+            if ranged:
                 headers.append(
                     (b"content-range", f"bytes {start}-{end}/{self._size}".encode("latin-1"))
                 )
             await send({
                 "type": "http.response.start",
-                "status": 206 if partial else 200,
+                "status": 206 if ranged else 200,
                 "headers": headers,
             })
             self._fh.seek(start)

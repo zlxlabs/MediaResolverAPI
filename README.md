@@ -42,14 +42,14 @@ risk-tier: internal
 
 1. **`video_url` 指向本服务，必须带 `X-API-Key`。** 端点：`GET /api/stream/twitter_space/{space_id}`。文件就绪时返回 `200`（`Content-Type: audio/mp4`、`Content-Disposition: attachment`，直接保存即得可播放的 m4a）；AAC 不重编码，服务端只做容器拼装/remux，不改变「不做转码」承诺。
 2. **任务式等待协议：先 202、再轮询。** 文件未就绪时 GET 返回 `202 + {"status": "extracting", "retry_after": 5}`——获取任务在服务端后台进行（约 4~5 秒提取 + 按约 10~30 倍速拉完全场，2 小时场约 10 分钟），**断开连接不影响任务**；客户端按 `retry_after` 秒间隔轮询同一 URL 直到 200。进行中的重复请求复用同一个任务，不会重复消耗代理。
-3. **支持 Range / 断点续传。** 就绪文件是普通文件响应：带 `Content-Length`，支持 `Range`（`206 Partial Content`），下载中断后可用 `curl -C -` 等续传，不必整段重来。**续传窗口 72 小时**：final 文件按 mtime 保留 `SPACE_CACHE_TTL_HOURS`（默认 72h），过期清理；磁盘可用空间低于 `SPACE_CACHE_MIN_FREE_MB`（默认 2048 MB）时按最旧优先淘汰 final 与超过 600 秒宽限期的孤儿 `.part`（正在运行的任务文件不受水位淘汰影响，已打开的 final 读句柄能读完）。
+3. **支持 Range / 断点续传。** 就绪文件是普通文件响应：带 `Content-Length`，支持 `Range`（`206 Partial Content`），下载中断后可用 `curl -C -` 等续传，不必整段重来。**续传窗口 72 小时**：final 文件按 mtime 保留 `SPACE_CACHE_TTL_HOURS`（默认 72h），过期清理；磁盘可用空间低于 `SPACE_CACHE_MIN_FREE_MB`（默认 2048 MB）时按最旧优先淘汰 final 与超过 600 秒宽限期的孤儿 `.part`（正在运行的任务文件不受水位淘汰影响，已打开的 final 读句柄能读完）。水位是尽力防护，非跨写入者硬隔离。
 4. **时长未知，大小以响应为准。** X 的 Space 元数据不提供时长（`data.duration` 恒为 `null`），文件大小在 200 响应的 `Content-Length` 里。
 5. **只支持回放，且只有约 30 天。** 正在直播或未开播的 Space 会明确报错（`live_status` 为 `is_live`/`is_upcoming`/缺失；`post_live` 即已结束可回放，错误在轮询时以 400/404 呈现）；X 只保留回放约 30 天，过期后 resolve 返回明确错误、下载端点轮询返回 404，服务不做任何兑底取回。
 6. **完整性承诺的边界。** 服务保证交付「回放清单声明内容的完整文件」：清单必须已完结（`#EXT-X-ENDLIST`）、声明段数与实际写入段数对账、ffmpeg exit 0，三者齐备才发布文件；任何一段失败都不产文件（轮询得 502，可重试）。这不等于「源内容完整」——清单与原始广播之间的残差上游不可证。
 7. **并发与视频号共用上限。** 后台获取共用 `MAX_CONCURRENT_STREAMS`（默认 4）：槽位用满时新任务**排队等待**，202 照常返回；待运行与运行中物化任务合计最多 8 个，队列满时新任务返回 503；下载（交付）阶段读磁盘，不占并发槽。此限制是每进程的，不是全局限制。
 8. **仅支持 x.com / twitter.com 直链**，不支持 t.co 短链包裹的 Space 链接。
 9. **生产出口被墙时配 `YTDLP_PROXY`。** 部署机到 `x.com` / `pscp.tv`（音频 CDN）被 DNS 污染或 TCP 封锁时，设 `YTDLP_PROXY=http://user:pass@proxy.example:7890`（占位示例；真实值含凭据，只写部署机 `.env`，不进仓），提取与分段抓取整条 X 链路走该 HTTP 代理；留空则直连，行为与未配置完全一致。TikHub / Cobalt / 翻译等其他平台的网络路径不受该变量影响。
-10. **缓存目录是单进程契约。** `SPACE_CACHE_DIR` 下的单飞登记、原子发布、孤儿回收与 TTL/水位清理都按单进程设计，不提供跨进程互斥：`uvicorn --workers N` 或多副本**不得共享同一缓存目录**（多实例必须各自独立目录）；默认单进程部署（Docker 镜像 CMD 不带 `--workers`）不受影响。
+10. **缓存目录是单进程契约。** `SPACE_CACHE_DIR` 下的单飞登记、原子发布、孤儿回收与 TTL/水位清理都按单进程设计，不提供跨进程互斥：`uvicorn --workers N` 或多副本**不得共享同一缓存目录**（多实例必须各自独立目录）；默认单进程部署（Docker 镜像 CMD 不带 `--workers`）不受影响。启动回收只收陈旧遗留（>600s）；新鲜孤儿由周期清理按水位/TTL 回收。
 
 #### 失败语义
 

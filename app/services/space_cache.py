@@ -39,6 +39,8 @@ _FAILED_CAP = 1024
 _FAILED_TEXT_MAX = 512
 # Pending and running materializations share one process-wide admission bound.
 _MAX_MATERIALIZATION_TASKS = 8
+# 发布门禁：正常 m4a 以数 MB 计；阈值只拦「明显非空」，与 ENDLIST/段数/exit 0 并列。
+_MIN_FINAL_BYTES = 1024
 _ABSOLUTE_PATH_RE = re.compile(r"/[^\s'\"]+")
 
 
@@ -171,12 +173,16 @@ def publish_final(space_id: str) -> Path:
     """校验齐备后的原子发布：``.part`` --os.replace--> ``.m4a``（锁定决策 1/5）。
 
     同目录内改名保证同一文件系统（os.replace 原子性的前提）。缺 .part 说明产物
-    文件被异常清理，fail-loud 上抛，绝不产 final。
+    文件被异常清理，fail-loud 上抛，绝不产 final。体积小于 ``_MIN_FINAL_BYTES``
+    视为空/极小输出（R5-1），上抛后由调用方走既有失败路径（清 .part、无 final）。
     """
     part = part_path(space_id)
     final = final_path(space_id)
     if not part.is_file():
         raise FileNotFoundError(f"materialized part file missing: {part.name}")
+    size = part.stat().st_size
+    if size < _MIN_FINAL_BYTES:
+        raise RuntimeError(f"materialized part file too small: {size} bytes")
     os.replace(part, final)
     return final
 
