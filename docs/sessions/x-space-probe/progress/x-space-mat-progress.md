@@ -34,3 +34,18 @@
 - 本段结论：R2 三条 finding + 主脑两条增补检查 + 矩阵重推两项增补全部落地——R2 major：失败态迁有界注册表（cap 1024 FIFO 逐出，逐出=忘掉失败态下次重拉；done Task 连 traceback 不再滞留 _tasks，成功/取消查询时归位弹出）；R2 minor 交付竞态：实证 Starlette FileResponse 先发状态码后开文件（响应阶段无法转 202），改为 fd 前置打开（space_cache.open_final）+ 自写 _FinalDownloadResponse（单区间 Range，fd 一开 unlink 永不影响本读者；打开失败=被清理的合法状态迁移→未命中 spawn+202）；R2 minor 反投毒：_started 移到全部 init 成功后，sweeper spawn 防重。矩阵重推增补两项：A）孤儿 .part 纳入 sweep TTL（宽限期跳过的新鲜孤儿在无重启长运行进程中原本永不回收）；B）done 条目归位改查询驱动+周期推式双保险（客户端失败后不再轮询时，sweeper 每周期全量 reap，否则 traceback 滞留、cap 失效——R2 major 的马甲场景）。红验四处全断言失败红型：R2-1 `assert 1025 == 1024`、R2-2 `assert 500 == 202`、R2-3 `assert False is True`、ADD-B（done 条目滞留断言）；均只还原注入行。全量 562 passed，累计 diff 1689/2600 hard。
 - 关键决策与已否决方案：交付竞态否决「端点内探测 open + 仍用 FileResponse」（探测→FileResponse 开文件的窗口防不住锁死测试的注入时序，且响应阶段异常已不可转 202）与「手写多区间 Range」（单区间覆盖断点续传与拖动，多区间回 200 全量 RFC 合法，diff 减半）；init 串行化否决「asyncio.Lock」（ensure_started 是同步函数不可 await；单线程事件循环内同步代码天然串行，跨 loop 双跑靠幂等+spawn 防重）。_tasks 表不设 cap：条目规模由活跃请求 id 数界定、done 必归位（推拉双保险），引入排队 cap 即任务队列（非目标）。
 - 下一步唯一动作：push + report.md（含矩阵增补节），收工。
+
+## 2026-10-14 R3 收敛：4 条 finding + 物化任务生命周期矩阵闭环
+
+- 当前阶段：deliverable（窄/全量验证通过，待最终提交后复验与 push）。
+- R3-1：`_materialize_to_file` 先打开 `.part` 再 spawn ffmpeg；打开失败时无子进程、drain/pump 任务或生成器需要清理。测试 `test_part_open_failure_does_not_spawn_process_or_tasks` 锁死打开失败时子进程数与残留任务均为 0。
+- R3-2：`space_cache.start` 以模块常量 `_MAX_MATERIALIZATION_TASKS = 8` 限制 pending+running；先归位所有 done 项，再在同一锁内判容量。队列满抛 `SpaceCacheAdmissionError`，HTTP 层返回 `503 / X Space materialization queue is full`；已接受任务不被拒绝路径取消。
+- R3-3：`start` 在创建任务前比较当前磁盘 free 与 `SPACE_CACHE_MIN_FREE_MB`；低于水位抛 `SpaceCacheAdmissionError`，返回 `503 / storage below watermark`。周期 sweep 的水位清理保留。
+- R3-4：合法但不可满足区间（起点超出文件，或结束点小于起点）返回 `416 + Content-Range: bytes */<size>`；无法解析的 Range 忽略并返回全量 `200`。
+- 矩阵自查：①排队/占槽：未 spawn 的 task 仅占有界队列；slot 仍按原 blocking 语义释放，不改运行中任务；②sink open 失败：先 open，故无 process/task/agen；③spawn 失败：文件上下文关闭，外层异常路径删除 `.part`，无 drain/pump/agen；④首块/分段/读取失败：已启动 agen 的 finally 清 process、drain、writer，外层失败清 `.part`；⑤sink 中途写 ENOSPC：新增 `test_sink_write_failure_closes_generator_and_reaps_tasks` 锁住 aclose 清理；⑥正常完成：stdout EOF 后 drain、writer、exit code 与段数对账通过才原子发布，现有成功与真实子进程用例覆盖；⑦运行中取消：agen finally 清进程与子任务、blocking slot 释放，新增 `CancelledError` 分支删除 `.part` 后原样重抛，测试锁住四项；⑧显式 `agen.aclose()`：现有 `test_disconnect_kills_process_and_cancels_tasks` 验证 kill 一次且 drain/writer 被取消。矩阵未留下需要扩展的并发机制。
+- 矩阵额外发现：`CancelledError` 不继承 `Exception`，原 `_materialize_space` 异常清理路径不会删除取消时的 `.part`；新增专用清理并重抛，不吞取消。
+- 红验：R3-1 把 spawn 提前后断言显示 `spawned=[Process ...]`；R3-2 把容量比较 `>=` 注入为 `>` 后 `202 != 503`；R3-3 把水位比较 `<` 注入为 `>` 后 `202 != 503`；R3-4 去掉 `end < start` 判断后 `206 != 416`；矩阵取消把取消分支注入为 `except Exception` 后 `.part` 仍存在。以上均为 `AssertionError`，只还原注入行。
+- 真实路径命令证据：队列 probe 用实际 ASGI GET 得到首请求 `202`、第二个 ID `503 X Space materialization queue is full`、pending=1；水位 probe 用临时目录的真实 `shutil.disk_usage`，阈值临时设为 free+1MiB，返回 `503 storage below watermark`、pending=0；R3-1 测试在失败版本会启动并回收真实 Python 子进程，修复版本 spawn 数为 0。
+- 验证：`uv run --extra dev pytest tests/test_twitter_space_stream.py tests/test_space_cache.py -q` → 81 passed；`uv run --extra dev pytest -q` → 569 passed。派发时主干基线查询失败，继承红仍未能判定。
+- 新增/修订测试只落在 `tests/test_twitter_space_stream.py`；`tests/pytest-test-durations.json` 在当前 checkout 中不存在，未创建。
+- 下一步唯一动作：最终提交后重跑全量测试，采集 git 回执，push 本卡分支并写完整报告。

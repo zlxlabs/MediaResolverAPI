@@ -309,7 +309,7 @@ class TestStreamEndpoint:
         assert fetch_calls == [SPACE_ID]  # 缓存命中：零重复提取
 
     def test_final_delivery_supports_range_resume(self, authed_client, monkeypatch):
-        """阶段二：对 final 普通文件下载，Range/断点续传由 Starlette FileResponse 原生承担。"""
+        """阶段二：fd 前置文件响应支持普通下载与 Range/断点续传。"""
         payload = bytes(range(256)) * 64
         _make_final(SPACE_ID, payload)
         full = authed_client.get(f"/api/stream/twitter_space/{SPACE_ID}")
@@ -865,6 +865,9 @@ class TestCacheFailureSurface:
         detail = resp.json()["detail"]
         assert str(space_cache.cache_dir()) not in detail
         assert f"'{part.name}'" in detail  # basename 保留供诊断
+        assert not part.exists()
+        assert not space_cache.final_path(SPACE_ID).exists()
+        assert SPACE_ID not in space_cache._tasks
 
 
 def _no_raise_client() -> TestClient:
