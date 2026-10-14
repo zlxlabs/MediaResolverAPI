@@ -329,7 +329,7 @@ class TestStreamEndpoint:
         assert tail.status_code == 206
         assert tail.content == payload[100:]
 
-    def test_unsatisfiable_range_returns_416_with_representation_length(
+    def test_range_satisfiability_and_malformed_range_handling(
         self, authed_client
     ):
         payload = b"0123456789"
@@ -341,10 +341,6 @@ class TestStreamEndpoint:
             assert resp.status_code == 416
             assert resp.headers["content-range"] == f"bytes */{len(payload)}"
             assert resp.content == b""
-
-    def test_malformed_range_is_ignored_as_full_response(self, authed_client):
-        payload = b"0123456789"
-        _make_final(SPACE_ID, payload)
         resp = authed_client.get(
             f"/api/stream/twitter_space/{SPACE_ID}", headers={"Range": "bytes=abc"}
         )
