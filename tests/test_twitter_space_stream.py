@@ -19,10 +19,12 @@ from urllib.parse import urljoin
 
 import httpx
 import pytest
+from fastapi.testclient import TestClient
 
 import app.api.stream as stream_mod
 import app.services.space_cache as space_cache
 from app.core.config import settings
+from app.main import app
 from app.services.providers.base import ProviderError, VideoNotFoundError
 from app.services.providers.ytdlp import SpaceNotReplayError, YtdlpProvider
 
@@ -586,6 +588,54 @@ class TestMaterializationIntegrity:
         assert "reconciliation" in resp.json()["detail"]
         assert not space_cache.final_path(SPACE_ID).exists()
         assert not space_cache.part_path(SPACE_ID).exists()
+
+
+class TestCacheFailureSurface:
+    """缓存初始化失败 → 502 固定文案（非裸 500，review F3）；502 响应体不泄漏内部路径（F4）。"""
+
+    @staticmethod
+    def _client_no_raise() -> TestClient:
+        """raise_server_exceptions=False：服务端异常变 500 响应而非直接抛出，
+        使「裸抛 PermissionError」类回归表现为可断言的状态码（而非测试 error）。"""
+        return TestClient(app, raise_server_exceptions=False)
+
+    def test_cache_init_failure_maps_502_fixed_copy(self, monkeypatch):
+        """ensure_started 抛 OSError（如目录不可写）：502 固定文案，不裸抛。"""
+        def boom() -> None:
+            raise PermissionError(13, "Permission denied", "/data/space-cache")
+
+        monkeypatch.setattr(space_cache, "ensure_started", boom)
+        with self._client_no_raise() as client:
+            resp = client.get(f"/api/stream/twitter_space/{SPACE_ID}", headers=AUTH)
+        assert resp.status_code == 502
+        assert resp.json()["detail"] == "X Space cache storage is unavailable"
+
+    def test_cache_start_oserror_maps_502_fixed_copy(self, monkeypatch):
+        """start 内 ensure_dir 抛 OSError：502 固定文案，不裸抛。"""
+        async def boom(space_id, factory):
+            raise OSError(28, "No space left on device", str(space_cache.cache_dir()))
+
+        monkeypatch.setattr(space_cache, "start", boom)
+        with self._client_no_raise() as client:
+            resp = client.get(f"/api/stream/twitter_space/{SPACE_ID}", headers=AUTH)
+        assert resp.status_code == 502
+        assert resp.json()["detail"] == "X Space cache storage is unavailable"
+
+    def test_502_body_hides_internal_paths(self, authed_client, monkeypatch):
+        """任务失败异常 str 含绝对路径（如 ENOSPC）：502 detail 只留 basename（F4）。"""
+        part = space_cache.part_path(SPACE_ID)
+
+        def fake_exec(*cmd, **kwargs):
+            raise OSError(28, f"No space left on device: '{part}'")
+
+        monkeypatch.setattr(stream_mod.asyncio, "create_subprocess_exec", fake_exec)
+        _patch_provider(monkeypatch, [_meta()])
+        _patch_playlist(monkeypatch, PLAYLIST_TEXT, [SEG_1])
+        resp = _poll_until_terminal(authed_client)
+        assert resp.status_code == 502
+        detail = resp.json()["detail"]
+        assert str(space_cache.cache_dir()) not in detail
+        assert f"'{part.name}'" in detail  # basename 保留供诊断
 
 
 class TestEmptySegmentGuard:

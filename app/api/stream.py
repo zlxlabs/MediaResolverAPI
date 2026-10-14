@@ -945,7 +945,13 @@ async def stream_twitter_space(space_id: str):
     """
     if _SPACE_ID_PATTERN.fullmatch(space_id) is None:
         raise _json_http_error(400, "Invalid X Space id")
-    space_cache.ensure_started()
+    # 缓存目录初始化失败（权限/磁盘等 OSError）→ 502 固定文案（review F3）：
+    # README 承诺的可识别错误（fail-loud 拒绝新任务），不裸抛成 500。
+    try:
+        space_cache.ensure_started()
+    except OSError as exc:
+        logger.error("twitter_space cache init failed err={}", type(exc).__name__)
+        raise _json_http_error(502, _CACHE_UNAVAILABLE_DETAIL) from exc
 
     st = space_cache.status(space_id)
     if st is space_cache.SpaceCacheStatus.FINAL:
@@ -962,7 +968,11 @@ async def stream_twitter_space(space_id: str):
             raise _materialize_failure_to_http(exc)
         st = space_cache.SpaceCacheStatus.ABSENT  # 被并发请求抢先消费 → 按未命中重拉
     if st is space_cache.SpaceCacheStatus.ABSENT:
-        await space_cache.start(space_id, lambda: _materialize_space(space_id))
+        try:
+            await space_cache.start(space_id, lambda: _materialize_space(space_id))
+        except OSError as exc:
+            logger.error("twitter_space cache start failed err={}", type(exc).__name__)
+            raise _json_http_error(502, _CACHE_UNAVAILABLE_DETAIL) from exc
     return _202_extracting()
 
 
@@ -973,6 +983,15 @@ def _202_extracting() -> JSONResponse:
     )
 
 
+_CACHE_UNAVAILABLE_DETAIL = "X Space cache storage is unavailable"
+_ABSOLUTE_PATH_RE = re.compile(r"/[^\s'\"]+")
+
+
+def _strip_internal_paths(text: str) -> str:
+    """502 响应体脱敏（review F4）：内部文件系统绝对路径只留 basename，不暴露部署目录结构。"""
+    return _ABSOLUTE_PATH_RE.sub(lambda m: m.group(0).rsplit("/", 1)[-1], text)
+
+
 def _materialize_failure_to_http(exc: BaseException) -> HTTPException:
     """任务失败 → 客户端状态码：沿用既有错误契约（直播 400/不可用 404/其余 502 脱敏）。"""
     if isinstance(exc, SpaceNotReplayError):
@@ -980,7 +999,9 @@ def _materialize_failure_to_http(exc: BaseException) -> HTTPException:
     if isinstance(exc, VideoNotFoundError):
         return _json_http_error(404, f"X Space replay unavailable: {exc}")
     detail = redact_playlist_url(str(exc)) or type(exc).__name__
-    return _json_http_error(502, f"X Space materialization failed: {detail}")
+    return _json_http_error(
+        502, f"X Space materialization failed: {_strip_internal_paths(detail)}"
+    )
 
 
 async def _materialize_space(space_id: str) -> None:
