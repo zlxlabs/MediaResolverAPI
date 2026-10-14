@@ -94,6 +94,15 @@ class Settings(BaseSettings):
     # X 链路出口代理（提取 + 分段抓取共用）。空 = 直连，行为与未配置完全一致。
     YTDLP_PROXY: str = ""
 
+    # X Space 物化缓存（两阶段交付：后台获取 + 文件下载，交付形态 v2）。
+    # 容器内默认路径需可写：Dockerfile 不预建 /data，部署必须挂卷或改指已挂载目录
+    # （docker/docker-compose.deploy.yml 有注释示例）。
+    SPACE_CACHE_DIR: str = "/data/space-cache"
+    # final 保留时长（按 mtime）；由「断点续传窗口」承诺推导（72h，codex 咨询定稿）
+    SPACE_CACHE_TTL_HOURS: int = 72
+    # 磁盘可用空间低于该值（MB）时按 mtime 淘汰最旧 final 直至回升（水位熔断）
+    SPACE_CACHE_MIN_FREE_MB: int = 2048
+
     # Logging
     LOG_LEVEL: str = "INFO"
     LOG_FILE_PATH: str = "./logs"
