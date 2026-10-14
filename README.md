@@ -40,6 +40,22 @@ risk-tier: internal
 
 `https://x.com/i/spaces/<13位ID>`（含 `/peek` 尾段）解析后返回一个指向本服务的稳定下载 URL。交付是**两阶段物化**：首次请求触发服务端后台获取（提取 HLS 回放清单、逐段抓取、ffmpeg 拼装成单个 m4a 落盘，完整性校验通过后原子发布），客户端轮询；文件就绪后按普通文件下载（带 `Content-Length`、支持 `Range` 断点续传）。客户端不需要处理 HLS 或认证。
 
+### 四步对接示例（curl）
+
+```bash
+KEY="你的 API_KEY"; BASE="http://<服务地址>:8206"
+# ① resolve：拿稳定下载 URL
+URL=$(curl -fsS -X POST -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  -d '{"url":"https://x.com/i/spaces/1AKEmvYqbrOKL"}' "$BASE/api/resolve" \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["data"]["video_url"])')
+# ② 首次 GET：202 + retry_after（任务后台进行，断开不影响）
+curl -sS -H "X-API-Key: $KEY" -o /dev/null -w "%{http_code}\n" "$URL"   # → 202
+# ③ 轮询到 200（2 小时场约 3~10 分钟；同 Space 之后秒回）
+until [ "$(curl -sS -o /dev/null -w "%{http_code}" -H "X-API-Key: $KEY" "$URL")" = "200" ]; do sleep 5; done
+# ④ 下载 + 断点续传（中断后重跑同一 curl -C - 即可，服务端 72h 内保文件）
+curl -C - -H "X-API-Key: $KEY" -o space.m4a "$URL"
+```
+
 1. **`video_url` 指向本服务，必须带 `X-API-Key`。** 端点：`GET /api/stream/twitter_space/{space_id}`。文件就绪时返回 `200`（`Content-Type: audio/mp4`、`Content-Disposition: attachment`，直接保存即得可播放的 m4a）；AAC 不重编码，服务端只做容器拼装/remux，不改变「不做转码」承诺。
 2. **任务式等待协议：先 202、再轮询。** 文件未就绪时 GET 返回 `202 + {"status": "extracting", "retry_after": 5}`——获取任务在服务端后台进行（约 4~5 秒提取 + 按约 10~30 倍速拉完全场，2 小时场约 10 分钟），**断开连接不影响任务**；客户端按 `retry_after` 秒间隔轮询同一 URL 直到 200。进行中的重复请求复用同一个任务，不会重复消耗代理。
 3. **支持 Range / 断点续传。** 就绪文件是普通文件响应：带 `Content-Length`，支持 `Range`（`206 Partial Content`），下载中断后可用 `curl -C -` 等续传，不必整段重来。**续传窗口 72 小时**：final 文件按 mtime 保留 `SPACE_CACHE_TTL_HOURS`（默认 72h），过期清理；磁盘可用空间低于 `SPACE_CACHE_MIN_FREE_MB`（默认 2048 MB）时按最旧优先淘汰 final 与超过 600 秒宽限期的孤儿 `.part`（正在运行的任务文件不受水位淘汰影响，已打开的 final 读句柄能读完）。水位是尽力防护，非跨写入者硬隔离。
