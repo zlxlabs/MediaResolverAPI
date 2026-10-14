@@ -46,6 +46,6 @@
 - 矩阵额外发现：`CancelledError` 不继承 `Exception`，原 `_materialize_space` 异常清理路径不会删除取消时的 `.part`；新增专用清理并重抛，不吞取消。
 - 红验：R3-1 把 spawn 提前后断言显示 `spawned=[Process ...]`；R3-2 把容量比较 `>=` 注入为 `>` 后 `202 != 503`；R3-3 把水位比较 `<` 注入为 `>` 后 `202 != 503`；R3-4 去掉 `end < start` 判断后 `206 != 416`；矩阵取消把取消分支注入为 `except Exception` 后 `.part` 仍存在。以上均为 `AssertionError`，只还原注入行。
 - 真实路径命令证据：队列 probe 用实际 ASGI GET 得到首请求 `202`、第二个 ID `503 X Space materialization queue is full`、pending=1；水位 probe 用临时目录的真实 `shutil.disk_usage`，阈值临时设为 free+1MiB，返回 `503 storage below watermark`、pending=0；R3-1 测试在失败版本会启动并回收真实 Python 子进程，修复版本 spawn 数为 0。
-- 验证：`uv run --extra dev pytest tests/test_twitter_space_stream.py tests/test_space_cache.py -q` → 81 passed；`uv run --extra dev pytest -q` → 569 passed。派发时主干基线查询失败，继承红仍未能判定。
+- 验证：`uv run --extra dev pytest tests/test_twitter_space_stream.py tests/test_space_cache.py -q` → 80 passed；`uv run --extra dev pytest -q` → 568 passed。派发时主干基线查询失败，继承红仍未能判定。
 - 新增/修订测试只落在 `tests/test_twitter_space_stream.py`；`tests/pytest-test-durations.json` 在当前 checkout 中不存在，未创建。
 - 下一步唯一动作：最终提交后重跑全量测试，采集 git 回执，push 本卡分支并写完整报告。
