@@ -1,0 +1,54 @@
+# D3 自动部署：push master 自动 build→ACR→SSH 部署→探针；探针失败自动回滚（last_good_tag）。
+# 设计与接入记录：docs/sessions/261014-d3-release/design.md
+# 拉取/重标记/启动阶段失败不自动回滚（上游契约）：job 红线 + 人工恢复点 media-resolver-api:pre-d3-baseline，见 docs/sessions/261014-d3-release/design.md §2.5。
+# 手工部署脚本已删除（D3 与手工路径互斥）；break-glass 恢复见 docs/sessions/261014-d3-release/design.md §2.8（git show a0cd8bf 取回）。
+name: deploy
+on:
+  push:
+    branches: [master]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.github/**'
+  workflow_dispatch:
+
+# 部署互斥：与上游 build-deploy.yml 按 host 排队（deploy-${{ inputs.host }}）叠加为双保险；
+# cancel-in-progress=false 部署中途不被取消，只排队（gate primary #3）。
+concurrency:
+  group: deploy-media-resolver-api
+  cancel-in-progress: false
+
+jobs:
+  ship:
+    # push(master) 自动部署；workflow_dispatch 仅默认分支放行（补发口），分支 dispatch 直接 skip，
+    # 关闭从非 master ref 构建生产镜像的入口（gate primary #2）。
+    if: github.event_name == 'push' || github.ref_name == 'master'
+    uses: zlxlabs/ci-templates/.github/workflows/build-deploy.yml@v2
+    with:
+      image_name: media-resolver-api
+      host: 100.107.95.24
+      ssh_user: lixing
+      # /srv 别名 → 服务器 home 部署目录（服务器侧 symlink，主脑预置已验证）。with 不支持
+      # secrets 上下文（官方 contexts 表：with 仅 github/needs/strategy/matrix/inputs/vars），必须字面量。
+      deploy_dir: /srv/media-resolver-api/docker
+      # Dockerfile 在 docker/ 子目录；上游 build 用 -f "${BUILD_CONTEXT}/${DOCKERFILE}"，
+      # DOCKERFILE 默认 Dockerfile、BUILD_CONTEXT 默认 \.，不传则首跑 build 必失败。
+      dockerfile: docker/Dockerfile
+      healthcheck_url: http://localhost:8206/health
+      healthcheck_warmup: 10
+      healthcheck_retries: 12
+      healthcheck_interval: 5
+      ci_templates_ref: v2
+      notify_on_success: true
+    secrets:                                         # 逐个显式传，最小权限(禁止 secrets: inherit)
+      ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+      ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+      SSH_DEPLOY_KEY: ${{ secrets.SSH_DEPLOY_KEY }}
+      KNOWN_HOSTS: ${{ secrets.KNOWN_HOSTS }}
+      # runner=self 时 Tailscale step 整步跳过(build-deploy.yml L218-229 if runner=='hosted')，
+      # 占位值运行时不触达；未来切 hosted 必须先换真值。
+      TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
+      # ci-templates 已 public，checkout 用默认 token(L162-167 注释)，此 PAT 不再消费，
+      # 契约兼容保留；上游 v2 摘除后可删。
+      CI_TEMPLATES_PAT: ${{ secrets.CI_TEMPLATES_PAT }}
+      FEISHU_CI_WEBHOOK: ${{ secrets.FEISHU_CI_WEBHOOK }}

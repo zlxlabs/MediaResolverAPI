@@ -206,6 +206,8 @@ curl -s -G 'https://api.tikhub.io/api/v1/kuaishou/web/fetch_one_video' \
 
 ## 7. 部署与生产验证
 
+> 2026-10-14 起本节脚本已删除，发版走 D3（.github/workflows/deploy.yml）；break-glass 恢复见 docs/sessions/261014-d3-release/design.md §2.8。
+
 部署走 `docker-deploy` skill（先 build）。目标部署目录由环境变量 `MEDIARESOLVERAPI_DEPLOY_DIR`
 提供（缺失即报错；真实路径不入仓）：
 
