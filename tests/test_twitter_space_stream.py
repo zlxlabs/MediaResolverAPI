@@ -13,6 +13,7 @@ import errno
 import json
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 from urllib.parse import urljoin
@@ -513,6 +514,63 @@ class TestMaterializationIntegrity:
         assert "ENDLIST" in resp.json()["detail"]
         assert not space_cache.final_path(SPACE_ID).exists()
         assert not space_cache.part_path(SPACE_ID).exists()
+
+    @pytest.mark.asyncio
+    async def test_part_open_failure_does_not_spawn_process_or_tasks(
+        self, monkeypatch, tmp_path
+    ):
+        """打开 .part 失败时，尚未 spawn ffmpeg，也没有 drain/pump 残留。"""
+        part = tmp_path / "space.part"
+        spawned = []
+        original_open = Path.open
+
+        async def spawn_process():
+            process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-c",
+                "import time; time.sleep(60)",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            spawned.append(process)
+            return process
+
+        def fail_part_open(path, mode="r", *args, **kwargs):
+            if path == part and mode == "wb":
+                raise PermissionError("cannot open part")
+            return original_open(path, mode, *args, **kwargs)
+
+        monkeypatch.setattr(stream_mod, "_spawn_ffmpeg", spawn_process)
+        monkeypatch.setattr(Path, "open", fail_part_open)
+        _patch_provider(monkeypatch, [_meta()])
+        _patch_playlist(monkeypatch, PLAYLIST_TEXT, [SEG_1])
+        before = asyncio.all_tasks()
+        try:
+            with pytest.raises(PermissionError, match="cannot open part"):
+                await stream_mod._materialize_to_file(SPACE_ID, part)
+            leaked = [
+                task
+                for task in asyncio.all_tasks() - before
+                if task.get_coro().__qualname__.split(".")[-1]
+                in {"_drain_stderr", "_pump_segments"}
+            ]
+            assert (spawned, leaked) == ([], [])
+        finally:
+            for process in spawned:
+                if process.returncode is None:
+                    process.kill()
+                await process.wait()
+            pending = [
+                task
+                for task in asyncio.all_tasks() - before
+                if task.get_coro().__qualname__.split(".")[-1]
+                in {"_drain_stderr", "_pump_segments"}
+            ]
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
 
     def test_middle_segment_404_no_final_no_part(
         self, authed_client, spawn_record, monkeypatch

@@ -1128,20 +1128,22 @@ async def _materialize_to_file(space_id: str, part: Path) -> None:
             "playlist has no #EXT-X-ENDLIST (not a completed replay)"
         )
     progress: dict = {"segments_done": 0}
-    process = await _spawn_ffmpeg()
-    stderr_tail: bytearray = bytearray()
-    drain = asyncio.create_task(_drain_stderr(process.stderr, stderr_tail))
-    writer = asyncio.create_task(
-        _pump_segments(segment_urls, headers, process, progress)
-    )
-    agen = _forward_ffmpeg_output(process, writer, drain, b"", stderr_tail, space_id)
-    try:
-        with part.open("wb") as sink:
+    # Open the destination before spawning: if filesystem admission fails (for
+    # example ENOSPC or permissions), there is no child process or task to reap.
+    with part.open("wb") as sink:
+        process = await _spawn_ffmpeg()
+        stderr_tail: bytearray = bytearray()
+        drain = asyncio.create_task(_drain_stderr(process.stderr, stderr_tail))
+        writer = asyncio.create_task(
+            _pump_segments(segment_urls, headers, process, progress)
+        )
+        agen = _forward_ffmpeg_output(process, writer, drain, b"", stderr_tail, space_id)
+        try:
             async for chunk in agen:
                 sink.write(chunk)
-    finally:
-        # 异常路径由此触发生成器 finally：kill ffmpeg、取消 drain/writer（不留尸）
-        await agen.aclose()
+        finally:
+            # 异常路径由此触发生成器 finally：kill ffmpeg、取消 drain/writer（不留尸）
+            await agen.aclose()
     if progress["segments_done"] != len(segment_urls):
         # 段数对账（锁定决策 5）：pump 内逐段 fail-fast 之下的常态化 tripwire，
         # 锁住未来「跳段静默成功」类回归（声明段数 == 实际写入段数）。
