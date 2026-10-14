@@ -49,6 +49,7 @@ risk-tier: internal
 7. **并发与视频号共用上限。** 后台获取共用 `MAX_CONCURRENT_STREAMS`（默认 4）：超限时新任务**排队等待**而非报错，202 照常返回；下载（交付）阶段读磁盘，不占该上限。此限制是每进程的，不是全局限制。
 8. **仅支持 x.com / twitter.com 直链**，不支持 t.co 短链包裹的 Space 链接。
 9. **生产出口被墙时配 `YTDLP_PROXY`。** 部署机到 `x.com` / `pscp.tv`（音频 CDN）被 DNS 污染或 TCP 封锁时，设 `YTDLP_PROXY=http://user:pass@proxy.example:7890`（占位示例；真实值含凭据，只写部署机 `.env`，不进仓），提取与分段抓取整条 X 链路走该 HTTP 代理；留空则直连，行为与未配置完全一致。TikHub / Cobalt / 翻译等其他平台的网络路径不受该变量影响。
+10. **缓存目录是单进程契约。** `SPACE_CACHE_DIR` 下的单飞登记、原子发布、孤儿回收与 TTL/水位清理都按单进程设计，不提供跨进程互斥：`uvicorn --workers N` 或多副本**不得共享同一缓存目录**（多实例必须各自独立目录）；默认单进程部署（Docker 镜像 CMD 不带 `--workers`）不受影响。
 
 ---
 
@@ -85,7 +86,7 @@ cp .env.example .env
 | `MAX_CONCURRENT_STREAMS` | 上游流式任务的**每进程**并发上限：视频号流式转发超限返回 429；X Space 后台获取超限排队等待（202 照常返回）。下载交付阶段读磁盘、不占此上限 | `4` | 一般不用改；单进程扛不住并发、或要用 `uvicorn --workers N` / 多副本时需按进程数自行核算（此项不是全局限制） |
 | `YTDLP_EXTRACT_TIMEOUT_SECONDS` | X Space 回放的 yt-dlp 单次提取超时（秒）；解析与后台获取两处消费 | `30` | 一般不用改；网络到 X 较慢时可放宽 |
 | `YTDLP_PROXY` | X 链路出口 HTTP 代理：yt-dlp 提取与 X Space 分段抓取共用；留空直连，其他平台出口不受影响 | 空字符串 `""` | 部署机网络到 X / pscp CDN 被墙（DNS 污染或封锁）时必须设为可用 HTTP 代理 |
-| `SPACE_CACHE_DIR` | X Space 物化缓存目录：后台获取的 `.part` 临时文件与就绪的 `.m4a` final 都在这里。容器内默认路径**不预建、必须可写**：用 volume 挂到该路径，或改指已挂载的可写目录（见 `docker/docker-compose.deploy.yml` 注释示例） | `/data/space-cache` | 部署必须保证可写（挂卷或改路径），否则 X Space 获取任务全部失败（502） |
+| `SPACE_CACHE_DIR` | X Space 物化缓存目录：后台获取的 `.part` 临时文件与就绪的 `.m4a` final 都在这里（单进程契约，多 worker/多副本不得共享，见「X Space 回放下载」第 10 条）。容器内默认路径**不预建、必须可写**：用 volume 挂到该路径，或改指已挂载的可写目录（见 `docker/docker-compose.deploy.yml` 注释示例） | `/data/space-cache` | 部署必须保证可写（挂卷或改路径），否则 X Space 获取任务全部失败（502） |
 | `SPACE_CACHE_TTL_HOURS` | X Space final 文件保留时长（按 mtime），即断点续传窗口 | `72` | 客户端需要更长的续传窗口时调大；调小会缩短可续传时间 |
 | `SPACE_CACHE_MIN_FREE_MB` | 缓存所在磁盘可用空间低于该值（MB）时，按 mtime 最旧优先淘汰 final 直到回升；正在下载的文件不受影响 | `2048` | 缓存盘容量大、Space 多时可下调；磁盘紧张时上调以保护同盘其他数据 |
 | `STREAM_WINDOW_BYTES` | 视频号流式代理向 CDN 请求的有界窗口大小（字节）。每个窗口整块读完才向客户端吐数据 | `4194304` | 一般不用改；要压内存或适应更慢的客户端时才设 |

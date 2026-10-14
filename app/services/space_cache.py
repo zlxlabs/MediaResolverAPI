@@ -25,11 +25,18 @@ from ..core.config import settings
 FINAL_SUFFIX = ".m4a"
 PART_SUFFIX = ".part"
 
+# 常驻周期清理间隔（review F2：sweep 不能只在首次使用跑一次，长期运行进程必须周期回收）。
+_SWEEP_INTERVAL_SECONDS = 3600.0
+# 启动扫描的孤儿回收宽限期（review F1 廉价防护）：新于该值的 .part 不回收，
+# 避免多进程误部署时删掉他进程在制品；真部署单进程（Dockerfile CMD 无 --workers）。
+_STALE_PART_GRACE_SECONDS = 600.0
+
 # 惰性互斥锁与单飞登记表（与 stream.StreamLimiter 同一 lazy 模式：锁在首次使用的
 # 事件循环创建；测试与多个 TestClient portal loop 复用时仅在争用路径才触碰循环绑定）。
 _tasks: dict[str, asyncio.Task] = {}
 _lock: Optional[asyncio.Lock] = None
 _started = False
+_sweeper_task: Optional[asyncio.Task] = None
 
 
 class SpaceCacheStatus(enum.Enum):
@@ -143,13 +150,21 @@ def discard_part(space_id: str) -> None:
 
 
 def startup_scan() -> int:
-    """崩溃遗留 .part 全量回收（锁定决策 6：重启即弃，客户端重试重新拉取）。"""
+    """崩溃遗留 .part 全量回收（锁定决策 6：重启即弃，客户端重试重新拉取）。
+
+    只收陈旧件：新于 ``_STALE_PART_GRACE_SECONDS`` 的 .part 跳过（review F1）——
+    契约外多进程误部署时不删他进程在制品；本进程正常路径无新鲜 .part 可见
+    （扫描仅在进程首次使用时跑，刚重启的进程自己还没产出过 .part）。
+    """
     directory = cache_dir()
     if not directory.is_dir():
         return 0
     removed = 0
+    now = time.time()
     for part in directory.glob(f"*{PART_SUFFIX}"):
         try:
+            if now - part.stat().st_mtime < _STALE_PART_GRACE_SECONDS:
+                continue
             part.unlink()
             removed += 1
         except FileNotFoundError:
@@ -159,19 +174,38 @@ def startup_scan() -> int:
     return removed
 
 
-def ensure_started() -> None:
-    """惰性启动扫描（main.py lifespan 不在本卡修改边界内的等价替代）：
+async def _sweep_loop() -> None:
+    """常驻周期清理（review F2）：首轮 ensure_started 已扫，此后每周期一轮 sweep。
 
-    首次使用时建目录 + 回收崩溃遗留 .part + 一轮 TTL/水位清理。任何 spawn 必经
-    端点（端点先调本函数），故不存在「扫描晚于本进程产出 .part」的窗口。
+    单轮失败记 error 不静默，也不杀进程/循环——磁盘竞态等暂时性失败下一周期重试。
     """
-    global _started
+    while True:
+        await asyncio.sleep(_SWEEP_INTERVAL_SECONDS)
+        try:
+            stats = sweep()
+        except Exception as exc:
+            logger.error("twitter_space cache periodic sweep failed err={}", type(exc).__name__)
+            continue
+        if stats["ttl_removed"] or stats["watermark_removed"]:
+            logger.info("twitter_space cache periodic sweep {}", stats)
+
+
+def ensure_started() -> None:
+    """惰性启动扫描 + 常驻周期清理的 spawn 点（仅首个调用者生效）。
+
+    main.py lifespan 不在本卡修改边界内的等价替代：任何 spawn 必经端点（端点先调
+    本函数），故不存在「扫描晚于本进程产出 .part」的窗口。``_sweep_loop`` 需要
+    运行中的事件循环，从 async 端点首次进入时 spawn；无 loop 的调用在此 fail-fast
+    上抛（生产无此路径，调用方只有 async 端点）。
+    """
+    global _started, _sweeper_task
     if _started:
         return
     _started = True
     ensure_dir()
     startup_scan()
     sweep()
+    _sweeper_task = asyncio.get_running_loop().create_task(_sweep_loop())
 
 
 def _disk_free_bytes() -> int:

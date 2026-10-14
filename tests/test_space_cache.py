@@ -8,12 +8,14 @@ TTL 72h + 磁盘水位淘汰；崩溃遗留 .part 由启动扫描回收。
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import time
 from collections import namedtuple
 from pathlib import Path
 
 import pytest
+from loguru import logger
 
 import app.services.space_cache as space_cache
 from app.core.config import settings
@@ -28,8 +30,10 @@ def _reset_space_cache(monkeypatch, tmp_path):
     space_cache._tasks.clear()
     monkeypatch.setattr(space_cache, "_started", False)
     monkeypatch.setattr(space_cache, "_lock", None)
+    monkeypatch.setattr(space_cache, "_sweeper_task", None, raising=False)
     yield
     space_cache._tasks.clear()
+    space_cache._sweeper_task = None
 
 
 def _make_final(space_id: str, payload: bytes = b"final-bytes") -> Path:
@@ -44,6 +48,22 @@ def _make_part(space_id: str, payload: bytes = b"partial") -> Path:
     part = space_cache.part_path(space_id)
     part.write_bytes(payload)
     return part
+
+
+def _age(path: Path, seconds: float) -> None:
+    """把文件 mtime 拨老 seconds 秒（造陈旧件，无需可控时钟）。"""
+    now = time.time()
+    os.utime(path, (now - seconds, now - seconds))
+
+
+async def _cancel_sweeper() -> None:
+    """测试收尾：取消本 loop spawn 的常驻清理任务，不留跨测试活任务。"""
+    task = space_cache._sweeper_task
+    space_cache._sweeper_task = None
+    if task is not None:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
 
 class _FakeDiskUsage:
@@ -147,10 +167,31 @@ class TestSingleFlight:
     async def test_restart_reset_is_startup_part_scan(self):
         """重启后单飞失效：崩溃遗留 .part 被启动扫描回收即重置（锁定决策 6）。"""
         stale = _make_part(SPACE_ID)
+        _age(stale, space_cache._STALE_PART_GRACE_SECONDS + 60)
         removed = space_cache.startup_scan()
         assert removed >= 1
         assert not stale.exists()
         assert space_cache.status(SPACE_ID) is space_cache.SpaceCacheStatus.ABSENT
+
+
+class TestStartupScanGrace:
+    """孤儿回收只收陈旧 .part：新于宽限期的视为可能的在制品，不碰（review F1）。"""
+
+    def test_startup_scan_keeps_fresh_part_removes_stale(self):
+        fresh = _make_part("1J" + "j" * 11)  # 刚写即新鲜
+        stale = _make_part("1K" + "k" * 11)
+        _age(stale, space_cache._STALE_PART_GRACE_SECONDS + 60)
+        removed = space_cache.startup_scan()
+        assert removed == 1
+        assert fresh.exists()
+        assert not stale.exists()
+
+    def test_fresh_part_ageing_into_grace_window_gets_collected_later(self):
+        """宽限期是相对 mtime 的，不是一次性标记：老化出宽限期后照常回收。"""
+        part = _make_part(SPACE_ID)
+        _age(part, space_cache._STALE_PART_GRACE_SECONDS + 1)
+        assert space_cache.startup_scan() == 1
+        assert not part.exists()
 
 
 class TestFaultMatrix:
@@ -216,11 +257,60 @@ class TestSweep:
 
 
 class TestEnsureStarted:
-    def test_ensure_started_scan_once_and_sweep(self, monkeypatch):
+    async def test_ensure_started_scan_once_and_sweep(self, monkeypatch):
         stale = _make_part("1F" + "f" * 11)
+        _age(stale, space_cache._STALE_PART_GRACE_SECONDS + 60)
         space_cache.ensure_started()
         assert not stale.exists()
         # 幂等：第二次不再扫描（新遗留只在真实重启后出现，重启即新进程重扫）
         again = _make_part("1G" + "g" * 11)
+        _age(again, space_cache._STALE_PART_GRACE_SECONDS + 60)
         space_cache.ensure_started()
         assert again.exists()
+        await _cancel_sweeper()
+
+
+class TestPeriodicSweeper:
+    """常驻周期清理（review F2）：sweep 不再只在首次使用跑一次；周期异常不静默。"""
+
+    async def test_periodic_sweep_removes_expired_final(self, monkeypatch):
+        """长期运行进程：过期 final 在后续周期被清，新鲜 final 不动。
+        可控节奏：monkeypatch 周期常量为 0.01s，真实 sweep 真删盘上文件。"""
+        monkeypatch.setattr(space_cache, "_SWEEP_INTERVAL_SECONDS", 0.01)
+        expired = _make_final("1H" + "h" * 11)
+        fresh = _make_final("1I" + "i" * 11)
+        _age(expired, settings.SPACE_CACHE_TTL_HOURS * 3600 + 60)
+        space_cache.ensure_started()
+        try:
+            await asyncio.sleep(0.08)  # 覆盖多个周期
+            assert not expired.exists()
+            assert fresh.exists()
+        finally:
+            await _cancel_sweeper()
+
+    async def test_sweep_failure_logs_error_and_loop_survives(self, monkeypatch):
+        """单轮 sweep 抛错：logger.error 不静默；循环不死，下一周期继续跑。"""
+        monkeypatch.setattr(space_cache, "_SWEEP_INTERVAL_SECONDS", 0.01)
+        calls = {"n": 0}
+        errors: list[str] = []
+
+        def flaky_sweep() -> dict[str, int]:
+            calls["n"] += 1
+            if calls["n"] == 2:  # 第 1 次是 ensure_started 首轮同步 sweep；周期轮才注入失败
+                raise OSError(28, "No space left on device")
+            return {"ttl_removed": 0, "watermark_removed": 0}
+
+        monkeypatch.setattr(space_cache, "sweep", flaky_sweep)
+        sink_id = logger.add(
+            lambda msg: errors.append(msg)
+            if msg.record["level"].name == "ERROR"
+            else None
+        )
+        space_cache.ensure_started()
+        try:
+            await asyncio.sleep(0.08)
+            assert calls["n"] >= 2  # 异常后循环继续
+            assert len(errors) >= 1  # 不静默：error 落日志
+        finally:
+            logger.remove(sink_id)
+            await _cancel_sweeper()
