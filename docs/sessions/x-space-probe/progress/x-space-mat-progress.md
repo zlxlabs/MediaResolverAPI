@@ -20,3 +20,10 @@
 - 本段结论：真实环境（本机 uvicorn + 活体 Space 1AKEmvYqbrOKL，直连无代理）走通全链：resolve→202→12 次轮询（约 3 分钟）→200（85,112,923 B）；Range 截断 50 MB 后 `curl -C -` 续传 206，`cmp` 逐字节一致；ffprobe=aac/48000Hz/2ch/mp4/7140s；缓存命中二次 GET 0.07s 零重复提取；限速 8k/s 挂起客户端期间其他 Range 请求毫秒级返回；重启带陈旧 .part → 启动扫描回收（日志 startup scan removed 1）、final 保留。服务日志零 ERROR/Traceback。全量 544 passed，diff 923+/230-（预算 1200 内）。
 - 关键决策与已否决方案：无新增（沿袭前两段）。
 - 下一步唯一动作：写 report.md（回执 + 四问 + 偏差清单），收工。
+
+## 2026-10-14 review-fix 轮：F1–F4 修复完毕，全量 551 passed
+
+- 当前阶段：deliverable（等 gate primary 复审）
+- 本段结论：gate primary round-1 四条 finding 全部修复——F2（major）：sweep 由「首次使用跑一次」改为常驻周期清理（`ensure_started` spawn `_sweep_loop`，3600s 常量、无新配置项；单轮失败 logger.error 不静默、循环不死）；F1（主脑降 P2 的廉价加固）：`startup_scan` 只回收 mtime 老于 600s 宽限期的 `.part`，README Space 节新增第 10 条「缓存目录是单进程契约」；F3：`ensure_started`/`start` 的 OSError 映射 502 固定文案（不裸抛 500）；F4：502 detail 绝对路径清洗为 basename（`_strip_internal_paths`）。新增 7 测试（StartupScanGrace 2 + PeriodicSweeper 2 + CacheFailureSurface 3），全量 551 passed。红验三处均断言失败红型：F1 注入去 grace → `assert 2 == 1`；F3 注入裸抛 → `assert 500 == 502`；F4 注入不清洗 → detail 含 tmp 路径 `not in` 断言红；均只还原注入行、还原后绿（commit 70c7c29 / 23164e0 之后注入，工作区干净）。
+- 关键决策与已否决方案：周期清理用 asyncio.Task 而非 loop.call_later（feedback 字面为「常驻后台 asyncio 清理任务」；Task 版测试内 finally cancel 可干净收敛）；F3 用 `raise_server_exceptions=False` 的本地 TestClient 锁死——注入消失时 PermissionError 裸抛会表现为 500 响应而非测试 error，保住「红验红型必须是断言失败」的可核对性。无新增配置项/抽象（周期与宽限均为常量，反熵条款）。
+- 下一步唯一动作：写 report.md（回执 + 四问），push，收工。
