@@ -11,6 +11,7 @@ import re
 from typing import AsyncIterator, BinaryIO, Optional, Protocol
 from urllib.parse import urljoin
 
+import anyio
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -1004,10 +1005,12 @@ class _FinalDownloadResponse(Response):
                 "status": 206 if ranged else 200,
                 "headers": headers,
             })
-            self._fh.seek(start)
+            await anyio.to_thread.run_sync(self._fh.seek, start)
             remaining = length
             while remaining > 0:
-                chunk = self._fh.read(min(self._CHUNK, remaining))
+                chunk = await anyio.to_thread.run_sync(
+                    self._fh.read, min(self._CHUNK, remaining)
+                )
                 if not chunk:
                     break
                 remaining -= len(chunk)
@@ -1137,12 +1140,13 @@ async def _materialize_to_file(space_id: str, part: Path) -> None:
         try:
             min_free_bytes = settings.SPACE_CACHE_MIN_FREE_MB * 1024 * 1024
             async for chunk in agen:
-                if (
-                    min_free_bytes > 0
-                    and space_cache._disk_free_bytes() - len(chunk) < min_free_bytes
-                ):
-                    raise SegmentFetchError("storage below watermark")
-                sink.write(chunk)
+                if min_free_bytes > 0:
+                    free_bytes = await anyio.to_thread.run_sync(
+                        space_cache._disk_free_bytes
+                    )
+                    if free_bytes - len(chunk) < min_free_bytes:
+                        raise SegmentFetchError("storage below watermark")
+                await anyio.to_thread.run_sync(sink.write, chunk)
         finally:
             # 异常路径由此触发生成器 finally：kill ffmpeg、取消 drain/writer（不留尸）
             await agen.aclose()
