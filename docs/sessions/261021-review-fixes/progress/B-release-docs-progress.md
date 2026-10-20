@@ -60,3 +60,10 @@
 - 本段结论：`cd` 路径、`docker tag` 的输入/目标标签、`docker compose up -d` 均有 `deploy.yml` 与 ci-templates v2 脚本的行级出处；远端脚本只在 `DEPLOY_DIR` 调默认 Compose，不上传仓内 compose 文件。命令语法检查通过。
 - 关键决策与已否决方案：`pre-d3-baseline` 只在 caller 注释给出，模板不使用它；依据模板的 `${IMAGE_NAME}:latest` retag 与 Compose 启动步骤写成手工恢复，不再保留无来源的 SHA 标签选项。
 - 下一步唯一动作：提交本段进度、推送分支并在报告附上逐命令来源及 `last_good_tag` / `pre-d3-baseline` 说明。
+
+## 退回修复：交付完成
+
+- 当前阶段：完成
+- 本段结论：服务器恢复示例已按上游 `IMAGE_NAME:latest` 与默认 `docker compose up -d` 路径修订，删除无证据的本地 SHA 标签备选；逐命令来源已写入本轮报告及 B 卡报告追加段。
+- 关键决策与已否决方案：不声称已验证服务器上的默认 Compose 文件或基线镜像实际存在。
+- 下一步唯一动作：无（交付完成）。
