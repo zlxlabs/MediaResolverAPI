@@ -72,11 +72,13 @@ pytest
 `master` HEAD。
 
 `docker/push_to_acr.sh` 等手工发布脚本已从仓库删除。D3 不可用时，先从默认分支补发部署：
-`gh workflow run deploy.yml --ref master`。若 D3 无法执行而需服务器侧恢复，在部署目录中可把
-已存在的 `pre-d3-baseline` 或本机已有的 12 位 SHA 镜像重标记为 compose 使用的 `latest`，再
-运行 `docker compose up -d`，例如：
-
-`pre-d3-baseline` 恢复命令：
+`gh workflow run deploy.yml --ref master`。若仍需服务器侧恢复，D3 使用的部署目录是
+`/srv/media-resolver-api/docker`；上游脚本在该目录运行默认 `docker compose`，先将镜像重标记为
+`${IMAGE_NAME}:latest`，再执行 `docker compose up -d`。该 Compose 文件来自服务器部署目录，
+不是仓内 `docker/docker-compose.yml`；流程依据见 [ci-templates 的 pull_and_deploy.sh@v2](https://github.com/zlxlabs/ci-templates/blob/v2/scripts/pull_and_deploy.sh#L331-L353)
+和 [build-deploy.yml@v2](https://github.com/zlxlabs/ci-templates/blob/v2/.github/workflows/build-deploy.yml#L378-L399)。
+本仓 deploy workflow 将 `IMAGE_NAME` 设为 `media-resolver-api`，并记录本地恢复镜像标签
+`media-resolver-api:pre-d3-baseline`，因此对应的恢复命令是：
 
 ```bash
 cd /srv/media-resolver-api/docker
@@ -84,13 +86,5 @@ docker tag media-resolver-api:pre-d3-baseline media-resolver-api:latest
 docker compose up -d
 ```
 
-若改用本机已有的 12 位 SHA 标签：
-
-```bash
-cd /srv/media-resolver-api/docker
-read -r -p '输入本机已有的 12 位 SHA 标签: ' SHA_TAG
-docker tag "media-resolver-api:${SHA_TAG}" media-resolver-api:latest
-docker compose up -d
-```
-
-**服务器侧恢复命令未在本卡验证**；执行前须确认所选来源镜像在服务器本地存在。
+**服务器侧恢复命令未在本卡验证**；执行前须确认服务器部署目录中的默认 Compose 文件可用，
+且本机存在 `media-resolver-api:pre-d3-baseline` 镜像。
