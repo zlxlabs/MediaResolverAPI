@@ -18,3 +18,10 @@
 - **本段结论**：指定窄测 9 项通过，`make test` 全套 585 项通过；Scope-Globs 检查确认 7 个变更文件均在范围内。`TranslationService.is_chinese` 经项目环境核实调用 `is_chinese_text`。
 - **关键决策与已否决方案**：无新增决策；不改 TTL、中文阈值、业务异常分支或未命中缓存写入。
 - **下一步唯一动作**：提交本进度段并将分支推送到远端，然后核对远端提交与工作区状态。
+
+## M4：加强缓存命中端到端判据
+
+- **当前阶段**：repairing（最终测试与反向红验完成）
+- **本段结论**：缓存测试改为保留实际 `TranslationService`、数据库与 resolve 路由，只替换翻译 HTTP 请求方法；缓存命中不构造 resolver，测试同时覆盖失败、禁用及成功翻译。将命中写入恢复为 `cache_video` 后，TTL 测试 3 项以 `cached_at` 期望值不等的 AssertionError 转红；还原该最小变更后窄测与 `make test` 均全绿（585 项）。
+- **关键决策与已否决方案**：缓存命中不需要 TikHub provider 调用，因此不注入 resolver 或 provider；测试只打桩实际会触发的翻译 HTTP 边界。
+- **下一步唯一动作**：提交此测试加强与进度段，重新运行最终范围检查并推送更新后的分支。

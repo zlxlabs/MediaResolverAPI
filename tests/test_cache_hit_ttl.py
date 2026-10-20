@@ -2,12 +2,13 @@
 
 from datetime import datetime, timedelta, timezone
 
+import httpx
 import pytest
 
 import app.api.resolve as resolve_mod
 from app.models.video_cache import VideoCache
 from app.services.platforms.base import VideoInfo
-from app.services.translation.openai import TranslationResult, TranslationStatus
+from app.services.translation.openai import TranslationService, TranslationStatus
 
 
 VIDEO_ID = "7592102779420115355"
@@ -29,25 +30,27 @@ def _video_info() -> VideoInfo:
     )
 
 
-class _TranslationStub:
-    def __init__(self, result):
-        self.result = result
-        self.calls = 0
+def _translation_service(monkeypatch, response_mode):
+    service = TranslationService()
+    service.models = ["test-model"]
+    service.enabled = response_mode != "disabled"
+    requests = []
 
-    def is_chinese(self, _text):
-        return False
+    async def fake_request(request_data):
+        requests.append(request_data)
+        if response_mode == "failed":
+            return httpx.Response(503, json={"error": "unavailable"})
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "新的中文译文"}}]},
+        )
 
-    async def translate_to_chinese(self, _text):
-        self.calls += 1
-        return self.result
+    monkeypatch.setattr(service, "_request", fake_request)
+    monkeypatch.setattr(resolve_mod, "_translation_service", service)
+    return requests
 
 
-class _UnexpectedResolver:
-    async def resolve(self, **_kwargs):
-        raise AssertionError("cache hit must not resolve video again")
-
-
-def _seed_cache(db, translated_desc="既有译文"):
+def _seed_cache(db, translated_desc="既有译文 old translated text"):
     now = datetime.now(timezone.utc)
     record = VideoCache(
         platform="tiktok",
@@ -65,42 +68,36 @@ def _seed_cache(db, translated_desc="既有译文"):
 
 
 @pytest.mark.parametrize(
-    "result",
+    ("response_mode", "expected_status"),
     [
-        TranslationResult(TranslationStatus.failed, None),
-        TranslationResult(TranslationStatus.skipped_disabled, None),
+        ("failed", TranslationStatus.failed),
+        ("disabled", TranslationStatus.skipped_disabled),
     ],
 )
 def test_repeated_cache_hits_without_translation_do_not_mutate_cache(
-    authed_client, db, monkeypatch, result
+    authed_client, db, monkeypatch, response_mode, expected_status
 ):
     before_cached_at, before_expires_at = _seed_cache(db)
-    translation = _TranslationStub(result)
-    monkeypatch.setattr(resolve_mod, "get_video_resolver", lambda: _UnexpectedResolver())
-    monkeypatch.setattr(resolve_mod, "get_translation_service", lambda: translation)
+    requests = _translation_service(monkeypatch, response_mode)
 
     for _ in range(2):
         response = authed_client.post("/api/resolve", json={"url": VIDEO_URL})
         assert response.status_code == 200
-        assert response.json()["data"]["translation_status"] == result.status.value
+        assert response.json()["data"]["translation_status"] == expected_status.value
         db.expire_all()
         cached = db.query(VideoCache).filter_by(video_id=VIDEO_ID).one()
         assert cached.cached_at == before_cached_at
         assert cached.expires_at == before_expires_at
-        assert cached.translated_desc == "既有译文"
+        assert cached.translated_desc == "既有译文 old translated text"
 
-    assert translation.calls == 2
+    assert len(requests) == (2 if response_mode == "failed" else 0)
 
 
 def test_successful_cache_hit_updates_translation_without_extending_ttl(
     authed_client, db, monkeypatch
 ):
     before_cached_at, before_expires_at = _seed_cache(db, translated_desc=None)
-    translation = _TranslationStub(
-        TranslationResult(TranslationStatus.ok, "新的中文译文")
-    )
-    monkeypatch.setattr(resolve_mod, "get_video_resolver", lambda: _UnexpectedResolver())
-    monkeypatch.setattr(resolve_mod, "get_translation_service", lambda: translation)
+    requests = _translation_service(monkeypatch, "success")
 
     response = authed_client.post("/api/resolve", json={"url": VIDEO_URL})
 
@@ -112,4 +109,4 @@ def test_successful_cache_hit_updates_translation_without_extending_ttl(
     assert cached.cached_at == before_cached_at
     assert cached.expires_at == before_expires_at
     assert cached.translated_desc == "新的中文译文"
-    assert translation.calls == 1
+    assert len(requests) == 1
