@@ -13,13 +13,20 @@ def test_app_version_matches_project_version():
     assert settings.APP_VERSION == project_version
 
 
-def test_app_version_ignores_environment_override(monkeypatch):
+def test_app_version_ignores_environment_override(client, monkeypatch):
+    import app.main as main_module
+
     monkeypatch.setenv("APP_VERSION", "0.0.0-bogus")
     new_settings = Settings()
+    monkeypatch.setattr(main_module, "settings", new_settings)
     with (Path(__file__).parents[1] / "pyproject.toml").open("rb") as project_file:
         project_version = tomllib.load(project_file)["project"]["version"]
 
+    response = client.get("/health")
+
     assert new_settings.APP_VERSION == project_version
+    assert response.status_code == 200
+    assert response.json()["version"] == project_version
 
 
 def test_health_exposes_version_and_git_sha(client):
