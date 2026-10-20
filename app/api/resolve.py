@@ -230,14 +230,14 @@ async def resolve_url(
                             cached_info.description
                         )
                         translated_desc = _translation_text(translation_result)
-                        cache_service.cache_video(
-                            platform,
-                            video_id,
-                            cached_info,
-                            translated_desc,
-                            request.download_mode,
-                            cache_quality,
-                        )
+                        if translated_desc:
+                            cache_service.update_translated_desc(
+                                platform,
+                                video_id,
+                                translated_desc,
+                                request.download_mode,
+                                cache_quality,
+                            )
                 else:
                     translation_result = TranslationResult(
                         TranslationStatus.skipped_not_requested, None

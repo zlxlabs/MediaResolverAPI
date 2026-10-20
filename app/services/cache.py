@@ -174,6 +174,25 @@ class CacheService:
             self.db.rollback()
             return False
 
+    def update_translated_desc(
+        self,
+        platform: str,
+        video_id: str,
+        translated_desc: str,
+        download_mode: str = "video",
+        quality: Optional[str] = None,
+    ) -> None:
+        """Update only the translation for an existing cache entry."""
+        quality = _normalize_quality(quality)
+        cache_record = self.db.query(VideoCache).filter(
+            VideoCache.platform == platform,
+            VideoCache.video_id == video_id,
+            VideoCache.download_mode == download_mode,
+            VideoCache.quality == quality,
+        ).one()
+        cache_record.translated_desc = translated_desc
+        self.db.commit()
+
     def clear_cache(
         self, platform: str, video_id: str, download_mode: Optional[str] = None
     ) -> bool:
