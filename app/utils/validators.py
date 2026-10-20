@@ -74,7 +74,7 @@ def is_chinese_text(text: str) -> bool:
         return False
 
     # 中文字符的Unicode范围
-    chinese_pattern = re.compile(r'[\u4e00-\u9fff]+')
+    chinese_pattern = re.compile(r'[\u4e00-\u9fff]')
     chinese_chars = len(chinese_pattern.findall(text))
     total_chars = len(text.strip())
 

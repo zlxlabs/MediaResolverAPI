@@ -313,9 +313,9 @@ async def resolve_url(
         log_data["error_msg"] = str(e)[:500]
         return ResolveResponse(success=False, error=str(e))
     except Exception as e:
-        logger.error(f"Unexpected error: {e}", exc_info=True)
+        logger.exception("RESOLVE-UNHANDLED-ERROR")
         log_data["error_msg"] = str(e)[:500]
-        return ResolveResponse(success=False, error=f"Internal error: {str(e)}")
+        return ResolveResponse(success=False, error="Internal error")
     finally:
         # Write usage log (never blocks response)
         duration_ms = int((time.monotonic() - start_time) * 1000)
