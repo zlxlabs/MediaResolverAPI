@@ -53,3 +53,10 @@
 - 本段结论：已从 `build-deploy.yml@v2` 与其调用的 `scripts/pull_and_deploy.sh@v2` 核实部署目录、镜像名/标签和直接 `docker compose up -d` 调用。已移除没有上游出处的本地 12 位 SHA 备选命令，只保留有证据支持的 `pre-d3-baseline` 恢复路径。
 - 关键决策与已否决方案：不猜服务器 Compose 文件名、不引用仓内 build-mode `docker/docker-compose.yml`，也不推断需要 `isec` 包装。
 - 下一步唯一动作：完成针对性文档判据，提交并推送，同时在报告列出逐命令来源行号。
+
+## 退回修复：上游命令来源核查完成
+
+- 当前阶段：验证通过，待推送和报告
+- 本段结论：`cd` 路径、`docker tag` 的输入/目标标签、`docker compose up -d` 均有 `deploy.yml` 与 ci-templates v2 脚本的行级出处；远端脚本只在 `DEPLOY_DIR` 调默认 Compose，不上传仓内 compose 文件。命令语法检查通过。
+- 关键决策与已否决方案：`pre-d3-baseline` 只在 caller 注释给出，模板不使用它；依据模板的 `${IMAGE_NAME}:latest` retag 与 Compose 启动步骤写成手工恢复，不再保留无来源的 SHA 标签选项。
+- 下一步唯一动作：提交本段进度、推送分支并在报告附上逐命令来源及 `last_good_tag` / `pre-d3-baseline` 说明。
