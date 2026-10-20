@@ -18,3 +18,10 @@
 - 本段结论：`make test` 全量 584 项通过；`grep -c 'compare_digest' app/api/deps.py` 为 1。文件 IO 线程归属、下载范围字节、低水位异常与 ffmpeg 清理均有定向判据。
 - 关键决策与已否决方案：未改范围外文件；未增加依赖或文件 IO 包装抽象。
 - 下一步唯一动作：对候选提交跑卡面 scope 检查并提交 IO 实现与测试。
+
+## 2026-10-21 — 提交与远端核验
+
+- 当前阶段：succeeded
+- 本段结论：鉴权与 IO 修复分两次提交，均已推送到 `origin/card/fix-c-sec-io`；远端 tip 与本地 HEAD 相同，工作树干净，最终 scope 检查通过。
+- 关键决策与已否决方案：push 响应提示仓库迁移，但推送成功；用 `git ls-remote` 核实远端分支 tip，不以本地跟踪引用代替。
+- 下一步唯一动作：将完整执行报告写入 `$DELEGATE_REPORT_PATH`。
