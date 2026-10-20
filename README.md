@@ -141,7 +141,7 @@ docker compose up -d
 
 ```bash
 curl http://localhost:8000/health
-# {"status": "ok", "version": "1.1.0", "git_sha": "<40 位 commit SHA，本地跑为 unknown>"}
+# {"status": "ok", "version": "1.1.0", "git_sha": "<12 位短 SHA，本地运行值为 unknown>"}
 ```
 
 ---
@@ -465,7 +465,7 @@ HTTP 200，`Content-Type: application/json`：
 
 ```bash
 curl http://localhost:8000/health
-# {"status": "ok", "version": "1.1.0", "git_sha": "<40 位 commit SHA，本地跑为 unknown>"}
+# {"status": "ok", "version": "1.1.0", "git_sha": "<12 位短 SHA，本地运行值为 unknown>"}
 ```
 
 ### GET /health/translation
