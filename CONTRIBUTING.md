@@ -76,11 +76,20 @@ pytest
 已存在的 `pre-d3-baseline` 或本机已有的 12 位 SHA 镜像重标记为 compose 使用的 `latest`，再
 运行 `docker compose up -d`，例如：
 
+`pre-d3-baseline` 恢复命令：
+
 ```bash
 cd /srv/media-resolver-api/docker
-# 选择一个本机确实存在的来源镜像标签（二选一）
 docker tag media-resolver-api:pre-d3-baseline media-resolver-api:latest
-# 或：docker tag media-resolver-api:<12位SHA> media-resolver-api:latest
+docker compose up -d
+```
+
+若改用本机已有的 12 位 SHA 标签：
+
+```bash
+cd /srv/media-resolver-api/docker
+read -r -p '输入本机已有的 12 位 SHA 标签: ' SHA_TAG
+docker tag "media-resolver-api:${SHA_TAG}" media-resolver-api:latest
 docker compose up -d
 ```
 
