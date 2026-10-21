@@ -7,7 +7,7 @@ Loads settings from environment variables using Pydantic.
 import importlib.metadata
 import os
 from pathlib import Path
-from typing import List, Optional
+from typing import ClassVar, List, Optional
 from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
@@ -22,7 +22,7 @@ class Settings(BaseSettings):
 
     # Application settings
     APP_NAME: str = "MediaResolverAPI"
-    APP_VERSION: str = _dist_version()
+    APP_VERSION: ClassVar[str] = _dist_version()
     # 镜像构建时由 build-arg 注入，用于 /health 可观测与故障对账
     GIT_SHA: str = "unknown"
     DEBUG: bool = False
