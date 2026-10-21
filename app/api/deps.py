@@ -4,6 +4,8 @@ Shared API dependencies.
 Authentication and other cross-cutting concerns for API routes.
 """
 
+import hmac
+
 from fastapi import HTTPException, Security
 from fastapi.security import APIKeyHeader
 
@@ -16,5 +18,7 @@ async def verify_api_key(api_key: str = Security(_api_key_header)):
     """Verify the API key from request header."""
     if not settings.API_KEY:
         return  # No API key configured, allow all requests
-    if not api_key or api_key != settings.API_KEY:
+    if not api_key or not hmac.compare_digest(
+        api_key.encode("utf-8"), settings.API_KEY.encode("utf-8")
+    ):
         raise HTTPException(status_code=401, detail="Invalid or missing API key")

@@ -2,6 +2,8 @@
 Tests for API Key authentication.
 """
 
+import hmac
+
 import pytest
 from app.core.config import settings
 
@@ -23,6 +25,37 @@ class TestAuthBlocking:
             resp = client.get(
                 "/api/dashboard/stats/overview",
                 headers={"X-API-Key": "wrong-key"},
+            )
+            assert resp.status_code == 401
+        finally:
+            settings.API_KEY = ""
+
+    def test_api_key_comparison_uses_utf8_bytes(self, client, monkeypatch):
+        settings.API_KEY = "test-key-123"
+        original_compare_digest = hmac.compare_digest
+        compared = []
+
+        def record_compare_digest(left, right):
+            compared.append((left, right))
+            return original_compare_digest(left, right)
+
+        monkeypatch.setattr(hmac, "compare_digest", record_compare_digest)
+        try:
+            resp = client.get(
+                "/api/dashboard/stats/overview",
+                headers={"X-API-Key": "test-key-123"},
+            )
+            assert resp.status_code == 200
+            assert compared == [(b"test-key-123", b"test-key-123")]
+        finally:
+            settings.API_KEY = ""
+
+    def test_non_ascii_api_key_returns_401_not_500(self, client):
+        settings.API_KEY = "test-key-123"
+        try:
+            resp = client.get(
+                "/api/dashboard/stats/overview",
+                headers={"X-API-Key": "密钥".encode("utf-8")},
             )
             assert resp.status_code == 401
         finally:
