@@ -1006,16 +1006,23 @@ class _FinalDownloadResponse(Response):
                 "headers": headers,
             })
             await anyio.to_thread.run_sync(self._fh.seek, start)
+            if length == 0:
+                await send(
+                    {"type": "http.response.body", "body": b"", "more_body": False}
+                )
+                return
             remaining = length
             while remaining > 0:
                 chunk = await anyio.to_thread.run_sync(
                     self._fh.read, min(self._CHUNK, remaining)
                 )
                 if not chunk:
+                    await send(
+                        {"type": "http.response.body", "body": b"", "more_body": False}
+                    )
                     break
                 remaining -= len(chunk)
                 await send({"type": "http.response.body", "body": chunk, "more_body": remaining > 0})
-            await send({"type": "http.response.body", "body": b"", "more_body": False})
         finally:
             self._fh.close()
 
