@@ -68,10 +68,14 @@
    PR 合并即首跑（push master 触发），合并后的运行就是首次全链验证。因此：
    pre-flight（服务器预置 + secrets）必须全部前置到合并之前；合并这个动作由主脑在验收后执行。
    `paths-ignore` 排除 `**.md`、`docs/**`、`.github/**`（纯文档/CI 改动不触发生产部署）。
+
+> 已废止：现行恢复流程见 CONTRIBUTING.md「发版流程」。
+
 8. **手工脚本处置**（2026-10-14 修订：已删除，见 §7-5）：`docker/push_to_acr.sh`、
    `docker/pull_and_deploy.sh` 已整文件删除（含此前加的 BREAK-GLASS 注释行），两条部署路径
    互斥由仓库形态保证。break-glass 恢复 = `git show a0cd8bf:docker/push_to_acr.sh` /
    `git show a0cd8bf:docker/pull_and_deploy.sh` 取回（a0cd8bf = 接入前 master HEAD）。
+> 已废止：现行恢复流程见 CONTRIBUTING.md「发版流程」。
    依据链：①gate primary 对「手工脚本 vs D3 部署交错」重复报 major 且 gate v2 对 major 无
    受控处置出口；②本设计明文「两条部署路径互斥，接入 D3 后删遗留」；③internal tier 判定
    该风险 ≤P2（单操作者、break-glass 场景 D3 本就无并发运行、下次 D3 部署自愈 last_good
@@ -105,6 +109,8 @@
    aggregator reason）；`ssh fordeal 'cat …/.deploy-state/last_good_tag'` == master HEAD SHA；
    容器 `StartedAt` 晚于合并时间且镜像 `GIT_SHA` == HEAD；宿主 `curl localhost:8206/health`
    200；飞书收到成功回执（notify_on_success: true）。
+
+> 已废止：现行恢复流程见 CONTRIBUTING.md「发版流程」。
 
 回滚点：删 deploy.yml + 服务器 compose 符号链接摘除 + `pre-d3-baseline` 快照恢复 +
 break-glass = git show a0cd8bf 取回脚本（§2.8）；last_good_tag 预置保证探针失败路径有真实回退镜像。
