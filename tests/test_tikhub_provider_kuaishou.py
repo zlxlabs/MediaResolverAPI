@@ -163,6 +163,22 @@ async def test_chain_http_error_on_one_endpoint_continues(monkeypatch):
 
 # ----------------- 逐端点 param 构造（硬要求 T11，防静默 422） -----------------
 
+async def test_idless_kuaishou_chain_skips_photo_id_endpoint(monkeypatch):
+    """无 video_id 时裁掉 web_v2，唯一请求为 web_share + 原始分享 URL。"""
+    provider = TikHubProvider()
+    calls = []
+
+    async def capture(self, name, path, params, per_timeout):
+        calls.append((name, params))
+        return load("empty")
+
+    monkeypatch.setattr(TikHubProvider, "_call_endpoint", capture)
+    with pytest.raises(VideoNotFoundError):
+        await provider.fetch_video_info("kuaishou", "", URL)
+
+    assert calls == [("web_share", {"share_text": URL})]
+
+
 async def test_param_construction_per_endpoint(monkeypatch):
     """
     web_v2 必须收到 {photo_id}，web_share 必须收到 {share_text=原始url}。
