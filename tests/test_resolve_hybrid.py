@@ -38,37 +38,24 @@ def fake_resolver(monkeypatch):
     return r
 
 
-def _patch_urlparser(monkeypatch, *, is_short, expanded, parsed, platform_id):
-    up = resolve_mod.url_parser
-    monkeypatch.setattr(up, "is_short_url", lambda u: is_short)
-
-    async def _expand(u):
-        return expanded
-
-    monkeypatch.setattr(up, "resolve_short_url", _expand)
-    monkeypatch.setattr(up, "parse_url", lambda u: parsed)
-    monkeypatch.setattr(up, "identify_platform", lambda u: platform_id)
-
-
-def test_normal_path_uses_video_id(authed_client, fake_resolver, monkeypatch):
-    """正常抖音链接：展开+解析拿到 id，走普通路径（非 hybrid）。"""
-    _patch_urlparser(
-        monkeypatch, is_short=True,
-        expanded="https://www.douyin.com/video/7592102779420115355",
-        parsed=("douyin", "7592102779420115355"), platform_id="douyin",
+def test_normal_path_uses_video_id(authed_client, fake_resolver):
+    """正常抖音长链接：真实解析拿到 id，走普通路径（非 hybrid）。"""
+    resp = authed_client.post(
+        "/api/resolve",
+        json={"url": "https://www.douyin.com/video/7592102779420115355", "translate": False},
     )
-    resp = authed_client.post("/api/resolve", json={"url": "https://v.douyin.com/x/", "translate": False})
     assert resp.status_code == 200 and resp.json()["success"]
     assert fake_resolver.calls[0]["use_hybrid"] is False
     assert fake_resolver.calls[0]["video_id"] == "7592102779420115355"
 
 
 def test_short_link_expansion_failure_falls_back_to_hybrid(authed_client, fake_resolver, monkeypatch):
-    """抖音短链展开失败：不 400，改走 hybrid。"""
-    _patch_urlparser(
-        monkeypatch, is_short=True, expanded=None,
-        parsed=(None, None), platform_id="douyin",
-    )
+    """抖音短链展开失败：不 400，改走 hybrid；平台识别使用真实 URL parser。"""
+
+    async def fail_expansion(url):
+        return None
+
+    monkeypatch.setattr(resolve_mod.url_parser, "resolve_short_url", fail_expansion)
     resp = authed_client.post("/api/resolve", json={"url": "https://v.douyin.com/broken/", "translate": False})
     assert resp.status_code == 200 and resp.json()["success"]
     assert fake_resolver.calls[0]["use_hybrid"] is True
@@ -76,23 +63,45 @@ def test_short_link_expansion_failure_falls_back_to_hybrid(authed_client, fake_r
     assert resp.json()["data"]["video_id"] == "7592102779420115355"
 
 
-def test_id_extraction_failure_falls_back_to_hybrid(authed_client, fake_resolver, monkeypatch):
-    """抖音长链 ID 提取失败：改走 hybrid。"""
-    _patch_urlparser(
-        monkeypatch, is_short=False, expanded=None,
-        parsed=("douyin", None), platform_id="douyin",
+def test_id_extraction_failure_falls_back_to_hybrid(authed_client, fake_resolver):
+    """抖音用户主页没有视频 ID：真实解析后改走 hybrid。"""
+    resp = authed_client.post(
+        "/api/resolve",
+        json={"url": "https://www.douyin.com/user/MS4wLjABAAAAxxxx", "translate": False},
     )
-    resp = authed_client.post("/api/resolve", json={"url": "https://www.douyin.com/new-format/", "translate": False})
     assert resp.status_code == 200 and resp.json()["success"]
     assert fake_resolver.calls[0]["use_hybrid"] is True
 
 
-def test_non_douyin_expansion_failure_still_400(authed_client, fake_resolver, monkeypatch):
-    """非抖音短链展开失败：维持原 400 行为。"""
-    _patch_urlparser(
-        monkeypatch, is_short=True, expanded=None,
-        parsed=(None, None), platform_id="tiktok",
+def test_id_extraction_failure_with_no_playable_result_is_http_200_failure(
+    authed_client, fake_resolver, monkeypatch
+):
+    """Owner 接受的抖音无 ID 行为：hybrid 无可播放结果仍 HTTP 200、success=false。"""
+
+    async def fail_hybrid(platform, video_id, original_url, use_hybrid=False):
+        fake_resolver.calls.append(
+            {"platform": platform, "video_id": video_id,
+             "original_url": original_url, "use_hybrid": use_hybrid}
+        )
+        raise resolve_mod.VideoResolverError("no playable result")
+
+    monkeypatch.setattr(fake_resolver, "resolve", fail_hybrid)
+    resp = authed_client.post(
+        "/api/resolve",
+        json={"url": "https://www.douyin.com/user/MS4wLjABAAAAxxxx", "translate": False},
     )
+    assert resp.status_code == 200
+    assert resp.json() == {"success": False, "data": None, "error": "no playable result"}
+    assert fake_resolver.calls[0]["use_hybrid"] is True
+
+
+def test_non_douyin_expansion_failure_still_400(authed_client, fake_resolver, monkeypatch):
+    """非抖音短链展开失败：维持原 400；平台识别使用真实 URL parser。"""
+
+    async def fail_expansion(url):
+        return None
+
+    monkeypatch.setattr(resolve_mod.url_parser, "resolve_short_url", fail_expansion)
     resp = authed_client.post("/api/resolve", json={"url": "https://vm.tiktok.com/broken/", "translate": False})
     assert resp.status_code == 400
     assert fake_resolver.calls == []

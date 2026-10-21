@@ -83,7 +83,7 @@ class URLParser:
             url: 原始URL
 
         Returns:
-            Tuple[Optional[str], Optional[str]]: (平台名称, 视频ID)
+            Tuple[Optional[str], Optional[str]]: (平台名称, 视频ID)；已识别平台即使无 ID 也保留平台名。
         """
         if not is_valid_url(url):
             logger.warning(f"无效的URL: {url}")
@@ -103,13 +103,8 @@ class URLParser:
         # 提取视频ID
         video_id = self._extract_video_id(url, platform)
         if not video_id:
-            # 视频号分享短链里的 sph 码不是 object_id，解析阶段拿不到真实 id 是预期的；
-            # 返回平台名让路由层走 URL_FALLBACK_PLATFORMS 用原始 url 兜底。
-            if platform == "wechat_channels":
-                logger.info(f"视频号分享链无 object_id，走 url 兜底: {url}")
-                return platform, None
             logger.warning(f"无法提取视频ID: {url}")
-            return None, None
+            return platform, None
 
         logger.info(f"成功解析URL - 平台: {platform}, 视频ID: {video_id}")
         return platform, video_id

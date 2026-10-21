@@ -12,7 +12,27 @@ def parser():
 
 
 # T1: Video ID extraction for each platform
+PLATFORM_URLS_WITHOUT_ID = {
+    "douyin": "https://www.douyin.com/user/MS4wLjABAAAAxxxx",
+    "tiktok": "https://www.tiktok.com/@user",
+    "kuaishou": "https://www.kuaishou.com/f/X9aBcDeF",
+    "youtube": "https://www.youtube.com/channel/UCabc",
+    "xiaohongshu": "https://www.xiaohongshu.com/user/profile/abc",
+    "instagram": "https://www.instagram.com/share/BAcDeFgHi",
+    "pinterest": "https://www.pinterest.com/user/name/",
+    "facebook": "https://www.facebook.com/profile.php?id=123",
+    "twitter": "https://x.com/0xCodez",
+}
+
+
 class TestVideoIdExtraction:
+
+    @pytest.mark.parametrize("platform,url", PLATFORM_URLS_WITHOUT_ID.items())
+    def test_known_platform_without_video_id_preserves_platform(self, parser, platform, url):
+        assert parser.parse_url(url) == (platform, None)
+
+    def test_every_domain_platform_has_an_idless_contract_case(self):
+        assert set(URLParser.PLATFORM_DOMAINS.values()) == set(PLATFORM_URLS_WITHOUT_ID)
 
     def test_douyin_long_url(self, parser):
         platform, vid = parser.parse_url(
@@ -104,12 +124,12 @@ class TestVideoIdExtraction:
     def test_twitter_status_url(self, parser, url):
         assert parser.parse_url(url) == ("twitter", "2098782845183410287")
 
-    def test_twitter_profile_url_is_not_a_video(self, parser):
-        assert parser.parse_url("https://x.com/0xCodez") == (None, None)
+    def test_twitter_profile_url_is_platform_without_video_id(self, parser):
+        assert parser.parse_url("https://x.com/0xCodez") == ("twitter", None)
 
     def test_twitter_status_id_not_taken_from_query(self, parser):
-        assert parser.parse_url("https://x.com/home?next=/someone/status/2098782845183410287") == (None, None)
-        assert parser.parse_url("https://x.com/home#status/2098782845183410287") == (None, None)
+        assert parser.parse_url("https://x.com/home?next=/someone/status/2098782845183410287") == ("twitter", None)
+        assert parser.parse_url("https://x.com/home#status/2098782845183410287") == ("twitter", None)
 
 
 # T2: Short URL detection
@@ -226,12 +246,12 @@ class TestTwitterSpaceIdentification:
         "space_id",
         ["1AKEmvYqbrOK", "1AKEmvYqbrOKLL", "1AKEmvYqbrOK_"],
     )
-    def test_space_id_wrong_length_is_rejected(self, parser, space_id):
-        """非 13 位 ID 不是 Space 链接，也不得落进 status 提取器。"""
-        assert parser.parse_url(f"https://x.com/i/spaces/{space_id}") == (None, None)
+    def test_space_id_wrong_length_keeps_known_domain(self, parser, space_id):
+        """非 13 位 ID 不得落进 status 提取器，但 X 域名仍已识别。"""
+        assert parser.parse_url(f"https://x.com/i/spaces/{space_id}") == ("twitter", None)
 
-    def test_space_url_without_id_is_rejected(self, parser):
-        assert parser.parse_url("https://x.com/i/spaces/") == (None, None)
+    def test_space_url_without_id_keeps_known_domain(self, parser):
+        assert parser.parse_url("https://x.com/i/spaces/") == ("twitter", None)
 
     def test_space_path_on_other_domain_is_rejected(self, parser):
         """/i/spaces/ 路径形态只在 x.com/twitter.com（含子域）生效。"""
