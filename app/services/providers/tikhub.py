@@ -676,11 +676,7 @@ class TikHubProvider(BaseProvider):
         两端同一 camelCase manifest schema，解析器自适应。快手为单源平台（无 cobalt），
         但当前分类器不出终态（无真实终态样本），私密/删除走完链 → VideoNotFoundError。
         """
-        chain = [
-            endpoint
-            for endpoint in self.KUAISHOU_CHAIN
-            if video_id or endpoint[2] != "photo_id"
-        ]
+        chain = [ep for ep in self.KUAISHOU_CHAIN if video_id or ep[2] != "photo_id"]
 
         def build_params(endpoint: Tuple) -> Dict:
             _name, _path, param = endpoint
