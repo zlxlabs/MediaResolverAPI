@@ -7,8 +7,12 @@ Just One API 视频信息提供者（按次计费备源）
 
 计费语义（官方文档）：业务 code==0 才扣费；301 可重试且不扣费；
 100/302/303/400/500/600/601/602 不扣费。本 provider 每平台一次成功只打一枪，
-禁止对业务码叠打——因此不套用 HTTPClient（其默认 max_retries=3 会把不计费
-失败打成叠打），与 CobaltProvider 一致直接用异步 httpx，单次超时独立预算。
+不对同一业务结果叠打。HTTP 走裸异步 httpx 而不是仓内 HTTPClient，两条真实理由：
+- HTTPClient 默认 max_retries=3 会对 HTTP 5xx 叠打（实测 HTTP 500 打 4 次），
+  一次业务结果因此可能发出多次请求；业务码 301 只打 1 次，不受影响。
+- HTTPClient 的错误日志会写出 httpx 异常原文，其中可能内嵌带 token 的完整 URL。
+
+与 CobaltProvider 一致直接用异步 httpx，单次超时独立预算。
 
 安全约束：token 只作 query 参数；日志与异常字符串禁止出现带 token 的完整 URL
 （httpx 异常文本可能内嵌完整 URL，故只记异常类型名与 path）。
