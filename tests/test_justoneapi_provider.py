@@ -105,15 +105,6 @@ def stub_http(monkeypatch):
     return calls, install
 
 
-@pytest.fixture()
-def joa_token():
-    """用例内启用非空 JOA token 并保证还原。"""
-    original = settings.JUSTONEAPI_TOKEN
-    settings.JUSTONEAPI_TOKEN = TOKEN
-    yield TOKEN
-    settings.JUSTONEAPI_TOKEN = original
-
-
 # ----------------------------- 空 token（约束 1） -----------------------------
 
 def test_empty_token_no_httpx_calls(stub_http):
@@ -175,7 +166,7 @@ EXPECTED_ENDPOINTS = {
 
 
 @pytest.mark.parametrize("platform", sorted(EXPECTED_ENDPOINTS))
-def test_platform_single_shot_endpoint(joa_token, stub_http, platform):
+def test_platform_single_shot_endpoint(justoneapi_token, stub_http, platform):
     """有平台 ID：只打锁定的一枪，路径/入参硬断言，禁止 share-url-transfer。"""
     calls, install = stub_http
     path, param, video_id = EXPECTED_ENDPOINTS[platform]
@@ -192,10 +183,10 @@ def test_platform_single_shot_endpoint(joa_token, stub_http, platform):
     assert path in calls[0]["url"]
     assert "share-url-transfer" not in calls[0]["url"]
     assert calls[0]["params"].get(param) == video_id
-    assert calls[0]["params"].get("token") == joa_token
+    assert calls[0]["params"].get("token") == justoneapi_token
 
 
-def test_missing_platform_id_skips_share_url_transfer(joa_token, stub_http):
+def test_missing_platform_id_skips_share_url_transfer(justoneapi_token, stub_http):
     """无平台 ID：不打 share-url-transfer（短链展开本仓已做），直接失败。"""
     calls, install = stub_http
     install()
@@ -230,7 +221,7 @@ def _wechat_responses(basic_info=True, download=True):
     return responses
 
 
-def test_wechat_media_with_object_id_single_shot(joa_token, stub_http):
+def test_wechat_media_with_object_id_single_shot(justoneapi_token, stub_http):
     """已有 objectId：只打 download-url，不含 get-video-basic-info。"""
     calls, install = stub_http
     install(*_wechat_responses(basic_info=False))
@@ -243,7 +234,7 @@ def test_wechat_media_with_object_id_single_shot(joa_token, stub_http):
     assert media["file_size"] == 456301568
 
 
-def test_wechat_media_with_sph_code_two_shots(joa_token, stub_http):
+def test_wechat_media_with_sph_code_two_shots(justoneapi_token, stub_http):
     """只有 sph_code：先 basic-info 拿 objectId 再 download（stream 层允许的两枪）。"""
     calls, install = stub_http
     install(*_wechat_responses())
@@ -257,7 +248,7 @@ def test_wechat_media_with_sph_code_two_shots(joa_token, stub_http):
     assert media["decrypt"] is False
 
 
-def test_wechat_media_requires_object_id_from_basic_info(joa_token, stub_http):
+def test_wechat_media_requires_object_id_from_basic_info(justoneapi_token, stub_http):
     """basic-info 不回 objectId：ProviderError，不打 download 一枪。"""
     calls, install = stub_http
     basic = load("wechat_basic_info")
@@ -269,7 +260,7 @@ def test_wechat_media_requires_object_id_from_basic_info(joa_token, stub_http):
     assert all("get-video-download-url" not in c["url"] for c in calls)
 
 
-def test_wechat_media_missing_download_url(joa_token, stub_http):
+def test_wechat_media_missing_download_url(justoneapi_token, stub_http):
     calls, install = stub_http
     download = load("wechat_download_url")
     download["data"].pop("download_url")
@@ -282,7 +273,7 @@ def test_wechat_media_missing_download_url(joa_token, stub_http):
         asyncio.run(provider.fetch_wechat_channels_media(sph_code=SPH_CODE))
 
 
-def test_wechat_detail_uses_basic_info_only(joa_token, stub_http):
+def test_wechat_detail_uses_basic_info_only(justoneapi_token, stub_http):
     """resolve 级只要元数据一枪 basic-info（video_url 恒为本服务流端点，
     无需 download-url，不重复付费）。"""
     calls, install = stub_http
@@ -301,7 +292,7 @@ def test_wechat_detail_uses_basic_info_only(joa_token, stub_http):
     assert payload["data"]["objectId"] == OBJECT_ID
 
 
-def test_wechat_object_id_only_never_hits_basic_info(joa_token, stub_http):
+def test_wechat_object_id_only_never_hits_basic_info(justoneapi_token, stub_http):
     """只有 objectId（纯数字）、没有 sph 链接：不打 get-video-basic-info（约束 3）。"""
     calls, install = stub_http
     install(*_wechat_responses(basic_info=False))
@@ -325,7 +316,7 @@ def _one_call_stub(stub_http, payload, status_code=200):
 
 
 @pytest.mark.parametrize("code", [0])
-def test_business_code_zero_success(joa_token, stub_http, code):
+def test_business_code_zero_success(justoneapi_token, stub_http, code):
     calls = _one_call_stub(stub_http, {"code": code, "data": {"ok": True}})
     provider = JustOneApiProvider()
 
@@ -339,7 +330,7 @@ def test_business_code_zero_success(joa_token, stub_http, code):
 @pytest.mark.parametrize(
     "code", [301, 100, 302, 303, 400, 500, 600, 601, 602, 999]
 )
-def test_business_codes_nonzero_fail_without_retry(joa_token, stub_http, code):
+def test_business_codes_nonzero_fail_without_retry(justoneapi_token, stub_http, code):
     """非 0 业务码：不计费失败不得叠打（单次调用只打一枪）。999 为表外码，同样不重试。"""
     calls = _one_call_stub(stub_http, {"code": code, "message": "boom"})
     provider = JustOneApiProvider()
@@ -352,7 +343,7 @@ def test_business_codes_nonzero_fail_without_retry(joa_token, stub_http, code):
     assert len(calls) == 1
 
 
-def test_http_500_raises_provider_error(joa_token, stub_http):
+def test_http_500_raises_provider_error(justoneapi_token, stub_http):
     calls = _one_call_stub(stub_http, {"error": "server"}, status_code=500)
     provider = JustOneApiProvider()
 
@@ -363,7 +354,7 @@ def test_http_500_raises_provider_error(joa_token, stub_http):
     assert len(calls) == 1
 
 
-def test_empty_data_raises(joa_token, stub_http):
+def test_empty_data_raises(justoneapi_token, stub_http):
     calls = _one_call_stub(stub_http, {"code": 0, "data": {}})
     provider = JustOneApiProvider()
 
@@ -376,7 +367,7 @@ def test_empty_data_raises(joa_token, stub_http):
 
 # ----------------------------- token 不进日志/异常（约束 8） -----------------------------
 
-def test_no_token_in_logs_or_errors(joa_token, stub_http, capture_loguru):
+def test_no_token_in_logs_or_errors(justoneapi_token, stub_http, capture_loguru):
     """网络异常：上抛的 ProviderError 只含异常类型名与 path（不含上游原始文本），
     日志禁止出现带 token 的完整 URL。"""
     calls, install = stub_http
@@ -398,7 +389,7 @@ def test_no_token_in_logs_or_errors(joa_token, stub_http, capture_loguru):
         assert TOKEN not in log
 
 
-def test_no_token_in_http_status_error(joa_token, stub_http, capture_loguru):
+def test_no_token_in_http_status_error(justoneapi_token, stub_http, capture_loguru):
     """非 200：错误信息只含状态码与 path，不含 query/token。"""
     calls, install = stub_http
     install((lambda u, p: True, _response({"bad": True}, status_code=403)))

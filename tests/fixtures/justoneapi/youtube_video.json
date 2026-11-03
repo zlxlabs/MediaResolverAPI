@@ -9,8 +9,7 @@
     "likeCount": "100",
     "videos": {
       "items": [
-        {"url": "https://cdn.example.test/youtube/videoplayback_720.mp4", "width": 1280, "height": 720, "quality": "hd720", "hasAudio": true},
-        {"url": "https://cdn.example.test/youtube/videoplayback_360.mp4", "width": 640, "height": 360, "quality": "360p", "hasAudio": true}
+        {"url": "https://cdn.example.test/youtube/videoplayback_720.mp4", "width": 1280, "height": 720, "quality": "hd720", "hasAudio": true}
       ]
     }
   }

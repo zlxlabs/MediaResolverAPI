@@ -135,7 +135,9 @@ class JustOneApiAdapter:
         manifest = photo.get("streamManifest")
         if not isinstance(manifest, dict) or not manifest:
             return None
-        return {"data": {"photo": {**photo, "manifest": manifest}}}
+        # 改写：去掉原 streamManifest 键，避免同一内容双键并存。
+        rest = {k: v for k, v in photo.items() if k != "streamManifest"}
+        return {"data": {"photo": {**rest, "manifest": manifest}}}
 
     def _align_xiaohongshu(self, data: Dict, **_) -> Optional[Dict]:
         """小红书 v6 的 data 节点即笔记（video_info_v2.media.stream.h264），
@@ -242,9 +244,13 @@ class JustOneApiAdapter:
             "forward_count": count("forwardCount", "forward_count"),
             "comment_count": count("commentCount", "comment_count"),
             "media": media,
-            "params": {"share_url": f"https://weixin.qq.com/sph/{code}"},
         }
-        return {"data": node}
+        # TikHub 原始信封里 params.share_url 在顶层（非 data 节点内），
+        # WechatChannelsService._parse_response 按顶层读取。
+        return {
+            "params": {"share_url": f"https://weixin.qq.com/sph/{code}"},
+            "data": node,
+        }
 
     # ------------------------- 小工具 -------------------------
 

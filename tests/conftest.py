@@ -56,6 +56,18 @@ def test_justoneapi_token_empty():
     settings.JUSTONEAPI_TOKEN = original
 
 
+JOA_TEST_TOKEN = "test-joa-token-abcdef"
+
+
+@pytest.fixture()
+def justoneapi_token():
+    """用例内启用非空 JOA token 并保证还原。"""
+    original = settings.JUSTONEAPI_TOKEN
+    settings.JUSTONEAPI_TOKEN = JOA_TEST_TOKEN
+    yield JOA_TEST_TOKEN
+    settings.JUSTONEAPI_TOKEN = original
+
+
 @pytest.fixture(autouse=True)
 def disable_translation_startup_probe():
     """测试默认不让 TestClient 触发真实翻译上游探测。"""
