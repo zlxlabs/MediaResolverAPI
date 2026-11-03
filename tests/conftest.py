@@ -45,6 +45,18 @@ def test_tikhub_api_key():
 
 
 @pytest.fixture(autouse=True)
+def test_justoneapi_token_empty():
+    """worktree 会软链主仓 .env：必须把 JOA token 置空，防止链上意外打真上游计费。
+
+    JOA 相关测试自行在用例内设置非空 token 并负责还原。
+    """
+    original = settings.JUSTONEAPI_TOKEN
+    settings.JUSTONEAPI_TOKEN = ""
+    yield
+    settings.JUSTONEAPI_TOKEN = original
+
+
+@pytest.fixture(autouse=True)
 def disable_translation_startup_probe():
     """测试默认不让 TestClient 触发真实翻译上游探测。"""
     original_probe = settings.TRANSLATION_STARTUP_PROBE
