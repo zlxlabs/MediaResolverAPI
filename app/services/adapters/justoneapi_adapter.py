@@ -175,8 +175,18 @@ class JustOneApiAdapter:
                 "bit_rate": self._int(entry.get("BandWidth")),
                 "gear_name": str(entry.get("GearName") or ""),
             })
+        if not h264_urls:
+            # JOA's primary bitrate entry is the fallback when the H264 node is absent.
+            bit_rate = bit_rate[:1]
         if not h264_urls and not bit_rate:
             return None
+        aligned_video = {"bit_rate": bit_rate}
+        if h264_urls:
+            aligned_video["play_addr_h264"] = {
+                "url_list": h264_urls,
+                "width": self._int(video.get("width")),
+                "height": self._int(video.get("height")),
+            }
         aweme = {
             "aweme_id": str(
                 data.get("aweme_id") or data.get("awemeId") or video_id or ""
@@ -187,14 +197,7 @@ class JustOneApiAdapter:
                 data.get("statistics") if isinstance(data.get("statistics"), dict) else {}
             ),
             "create_time": data.get("create_time"),
-            "video": {
-                "play_addr_h264": {
-                    "url_list": h264_urls,
-                    "width": self._int(video.get("width")),
-                    "height": self._int(video.get("height")),
-                },
-                "bit_rate": bit_rate,
-            },
+            "video": aligned_video,
         }
         return {"data": {"aweme_detail": aweme}}
 

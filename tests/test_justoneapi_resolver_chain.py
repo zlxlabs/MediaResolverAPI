@@ -174,6 +174,22 @@ def test_adapter_tiktok_maps_pascal_case_bitrate():
     assert info.width == 1080 and info.height == 1920
 
 
+def test_adapter_tiktok_uses_bitrate_when_play_addr_struct_missing():
+    fixture = load("tiktok_post")
+    video = fixture["data"]["video"]
+    expected_url = video["bitrateInfo"][0]["PlayAddr"]["UrlList"][0]
+    assert expected_url == "https://cdn.example.test/tiktok/h264_720.mp4"
+    video.pop("PlayAddrStruct")
+
+    adapter = JustOneApiAdapter()
+    aligned = adapter._align_tiktok(fixture["data"])
+    assert "play_addr_h264" not in aligned["data"]["aweme_detail"]["video"]
+    info = adapter.adapt(fixture, "tiktok", "7267439653153003782")
+    assert info is not None
+    assert info.video_url
+    assert info.video_url == expected_url
+
+
 def test_adapter_kuaishou_fails_without_stream_manifest():
     fixture = load("kuaishou_video")
     fixture["data"]["photos"][0].pop("streamManifest")
