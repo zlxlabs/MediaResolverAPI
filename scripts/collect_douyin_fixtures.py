@@ -2,7 +2,7 @@
 """
 抖音 TikHub 真实响应采集脚本（用于测试 fixtures）
 
-对应设计文档 docs/douyin-fallback-design.md 的 #13（脱敏真实样本）。
+对应 TikHub 抖音端点链（见 docs/architecture.md）的脱敏真实样本采集。
 
 把一个抖音分享链接 / 长链 / aweme_id 打到多级降级链涉及的各个 TikHub 端点，
 原样保存响应到 tests/fixtures/douyin/，供单元/整合测试 mock 使用。

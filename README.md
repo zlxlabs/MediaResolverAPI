@@ -8,30 +8,30 @@ risk-tier: internal
 
 | 平台 | 短链解析 | 数据源 |
 |------|---------|--------|
-| 抖音 (Douyin) | ✅ | TikHub（多级端点降级） |
-| TikTok | ✅ | TikHub（多级端点降级）→ Cobalt |
-| 快手 (Kuaishou) | ✅ | TikHub（多级端点降级） |
-| YouTube | ✅ | TikHub（多级端点降级）→ Cobalt |
-| 小红书 (Xiaohongshu) | ✅ | TikHub（多级端点降级） |
-| Instagram | ✅ | TikHub（多级端点降级）→ Cobalt |
+| 抖音 (Douyin) | ✅ | TikHub（多级端点降级）→ Just One API |
+| TikTok | ✅ | TikHub（多级端点降级）→ Cobalt → Just One API |
+| 快手 (Kuaishou) | ✅ | TikHub（多级端点降级）→ Just One API |
+| YouTube | ✅ | TikHub（多级端点降级）→ Cobalt → Just One API |
+| 小红书 (Xiaohongshu) | ✅ | TikHub（多级端点降级）→ Just One API |
+| Instagram | ✅ | TikHub（多级端点降级）→ Cobalt → Just One API |
 | Pinterest | ✅ | Cobalt |
 | Facebook | ✅ | Cobalt |
-| 微信视频号 (WeChat Channels) | ✅ | TikHub |
-| X (Twitter) | ✅ | TikHub（单端点）→ Cobalt |
+| 微信视频号 (WeChat Channels) | ✅ | TikHub → Just One API |
+| X (Twitter) | ✅ | TikHub（单端点）→ Cobalt → Just One API |
 | X Space (Twitter Spaces) | ❌（不支持 t.co 短链包裹） | yt-dlp（本机提取）→ 本服务后台物化 → 文件下载 |
 
-> 含多个数据源的平台会按优先级依次尝试，前者失败自动降级到后者。
+> 含多个数据源的平台会按优先级依次尝试，前者失败自动降级到后者。表中的 **Just One API** 只在配置了 `JUSTONEAPI_TOKEN` 时存在：token 留空则该数据源整体不出现，既不会尝试也不会向上游发请求（此时抖音/快手/小红书/视频号只剩 TikHub）。运行时实际链以 `GET /api/platforms` 的返回为准。
 >
-> **多级端点降级（通用引擎）**：TikHub 支持的平台均在内部按「同一 ID 串行打多个端点、命中即停、终态短路、总预算兜底」的统一引擎做多级降级，单端点被 TikHub 下线不再等于平台解析全挂。引擎设计与各平台链配置见 [docs/generic-fallback-engine.md](docs/generic-fallback-engine.md)。
+> **多级端点降级（通用引擎）**：TikHub 支持的平台均在内部按「同一 ID 串行打多个端点、命中即停、终态短路、总预算兜底」的统一引擎做多级降级，单端点被 TikHub 下线不再等于平台解析全挂。引擎机制与各平台链配置见 [docs/architecture.md](docs/architecture.md)。
 >
-> - **抖音**：`web/fetch_one_video → web/fetch_one_video_v2 → app/v3/fetch_one_video_v3`；私密/部分可见终态短路；短链展开或 ID 提取失败回退 `hybrid/video_data`。详见 [docs/douyin-fallback-design.md](docs/douyin-fallback-design.md)。
-> - **小红书**：`app_v2/get_video_note_detail（仅 note_id）→ web_v3/fetch_note_detail（note_id + xsec_token）`；token 缺失时跳过 `web_v3`；图文/删除终态短路。TikHub 单源。详见 [docs/xiaohongshu-fallback-design.md](docs/xiaohongshu-fallback-design.md)。
-> - **快手**：`web/fetch_one_video_v2（photo_id）→ web/fetch_one_video（share_text=url）`；解析器自适应 `data.photo` 与 `data[0]` 两种 schema。原为单源单端点、无 Cobalt 兜底，是唯一真单点故障，故优先消除。
-> - **TikTok**：`app/v3/fetch_one_video → _v2 → _v3`（同 `data.aweme_detail` schema）。有 Cobalt 兜底，故链内不判终态（误判会跳过 Cobalt），链走完落 Cobalt。
-> - **Instagram**：`v2/fetch_post_info（code_or_url）→ v1/fetch_post_by_url（post_url）`；非视频/轮播不判终态（子节点可能含视频），落 Cobalt。ID 提取失败时由路由层放行原始 url 兜底。
-> - **YouTube**：`web/get_video_info（预解析直链）→ web/get_video_info_v2（streamingData 合流）`；解析器自适应两套 schema。有 Cobalt 兜底。
-> - **微信视频号**：TikHub 单源单端点（`wechat_channels/v2/fetch_video_detail`），无 Cobalt 兜底，故链内不判终态。瞬态 `retryable` 在单端点上重试，最多 3 次尝试、退避 0.3s；`attempts` 带脱敏原因（`data_missing` / `object_type_mismatch` / `error_body`）。平台标识是 `wechat_channels`（不是 `wechat`）。
-> - **X (Twitter)**：TikHub 单端点（`twitter/web/fetch_tweet_detail`）按 status ID 获取元数据，失败后降级 Cobalt；只返回本帖最高码率 MP4，忽略 HLS 与引用帖视频。平台标识是 `twitter`（同时支持 `x.com` 与 `twitter.com`）。
+> - **抖音**：TikHub `web/fetch_one_video → web/fetch_one_video_v2 → app/v3/fetch_one_video_v3`；私密/部分可见终态短路（终态会停掉整条数据源链，包括 Just One API）；短链展开或 ID 提取失败回退 `hybrid/video_data`。TikHub 失败后再走 Just One API。
+> - **小红书**：TikHub `app_v2/get_video_note_detail（仅 note_id）→ web_v3/fetch_note_detail（note_id + xsec_token）`；token 缺失时跳过 `web_v3`；图文/删除终态短路（同样停掉整条数据源链）。TikHub 失败后再走 Just One API。
+> - **快手**：TikHub `web/fetch_one_video_v2（photo_id）→ web/fetch_one_video（share_text=url）`；解析器自适应 `data.photo` 与 `data[0]` 两种 schema。TikHub 失败后再走 Just One API。
+> - **TikTok**：TikHub `app/v3/fetch_one_video → _v2 → _v3`（同 `data.aweme_detail` schema）。有 Cobalt 兜底，故链内不判终态（误判会跳过 Cobalt），链走完落 Cobalt，再落 Just One API。
+> - **Instagram**：TikHub `v2/fetch_post_info（code_or_url）→ v1/fetch_post_by_url（post_url）`；非视频/轮播不判终态（子节点可能含视频），落 Cobalt，再落 Just One API。ID 提取失败时由路由层放行原始 url 兜底。
+> - **YouTube**：TikHub `web/get_video_info（预解析直链）→ web/get_video_info_v2（streamingData 合流）`；解析器自适应两套 schema。有 Cobalt 兜底，再落 Just One API。
+> - **微信视频号**：TikHub 单端点（`wechat_channels/v2/fetch_video_detail`），链内只出「可重试」不判终态；瞬态 `retryable` 在单端点上重试，最多 3 次尝试、退避 0.3s；`attempts` 带脱敏原因（`data_missing` / `object_type_mismatch` / `error_body`）。TikHub 失败后走 Just One API（上游给的是**明文** mp4，见「视频号的下载方式」）。平台标识是 `wechat_channels`（不是 `wechat`）。
+> - **X (Twitter)**：TikHub 单端点（`twitter/web/fetch_tweet_detail`）按 status ID 获取元数据，失败后降级 Cobalt，再降级 Just One API；只返回本帖最高码率 MP4，忽略 HLS 与引用帖视频。平台标识是 `twitter`（同时支持 `x.com` 与 `twitter.com`）。
 > - **X Space**：yt-dlp 进程内提取（guest token 路径，无 cookie），仅回放（`was_live`/`post_live`）；`video_url` 指向本服务的下载端点（两阶段：后台获取成单文件后交付）。平台标识是 `twitter_space`（与推文 `twitter` 互斥）。详见「X Space 回放下载」节。
 
 ---
@@ -81,10 +81,11 @@ curl -C - -H "X-API-Key: $KEY" -o space.m4a "$URL"
 
 其他平台的 `video_url` 是第三方 CDN 直链，客户端自己去拉。视频号不是这样。
 
-1. **源站 mp4 是加密的。** `POST /api/resolve` 返回的 `video_url` 指向**本服务**的流式端点 `/api/stream/wechat_channels/{sph_code}`，而不是第三方 CDN。服务端边下边解密再转发，客户端拿到的是可直接播放的标准 mp4，**不需要客户端做任何解密**。
+1. **源站 mp4 加密与否取决于命中的上游。** `POST /api/resolve` 返回的 `video_url` 指向**本服务**的流式端点 `/api/stream/wechat_channels/{sph_code}`，而不是第三方 CDN。TikHub 命中时源站 mp4 的头部是加密的，服务端边下边解密（XOR）再转发；Just One API 命中时上游给的**本来就是明文** mp4，服务端零解密直接转发。两种情况下客户端拿到的都是可直接播放的标准 mp4，**不需要客户端做任何解密**。
 2. **下载流量经过本服务。** 并发下载数受环境变量 `MAX_CONCURRENT_STREAMS` 限制（默认 4），超限返回 `429 Too many concurrent streams`。CDN 按 `STREAM_WINDOW_BYTES`（默认 4 MiB）分窗整块读完再向客户端转发，客户端停顿或限速不会卡住上游连接。部署在反向代理后面时，需要确认代理对长连接、大响应体的超时与缓冲设置（流式转发，响应体可达完整视频大小）。
 3. **播放量拿不到。** `view_count` 恒为 `null`（TikHub 的 `read_count` 恒为 0，不是真实播放量），不要把它理解成「偶尔缺失」。其余统计数据（点赞 / 收藏 / 转发 / 评论）齐全。
 4. **`video_url` 必须带 `X-API-Key` 才能访问。** 其他平台的 `video_url` 是第三方 CDN 直链，拿到即可直接下载或喂给播放器，无需任何认证。视频号的 `video_url` 指向本服务，因此请求时必须带 `X-API-Key`，否则返回 401。不要把这个 URL 直接丢给播放器或下载器——它们默认不会加这个请求头，播放/下载会失败。若服务端未配置 `API_KEY`（开发模式）则不校验，本地未设密钥时可以不带。
+5. **想绕开本服务带宽用 `/direct` 端点，先看清命中的上游。** TikHub 命中时 `/direct` 回 TikHub 的 CDN 直链 + 解密后的文件头，客户端拿直链自己拼文件；Just One API 命中时回传的 `cdn_url` 是**本服务**的 `/api/stream/wechat_channels/{sph_code}`（不是对方 CDN 直链），文件头已是明文，客户端对本服务发 `Range` 续传，不要对第三方 host 发 `Range`。详见下文 [GET /api/stream/wechat_channels/{sph_code}/direct](#get-apistreamwechat_channelssph_codedirect)。
 
 流式端点的路径、鉴权、Range 与状态码见下文 [GET /api/stream/wechat_channels/{sph_code}](#get-apistreamwechat_channelssph_code)。
 
@@ -116,6 +117,9 @@ cp .env.example .env
 | `STREAM_WINDOW_BYTES` | 视频号流式代理向 CDN 请求的有界窗口大小（字节）。每个窗口整块读完才向客户端吐数据 | `4194304` | 一般不用改；要压内存或适应更慢的客户端时才设 |
 | `STREAM_CHUNK_SIZE` | 流式转发的分块大小（字节） | `65536` | 一般不用改；要调整转发缓冲时才设 |
 | `COBALT_API_BASE` | Cobalt 自建服务地址，作为部分平台的兜底数据源 | 空字符串 `""`（未配置则 Cobalt 不可用） | 需要 Cobalt 兜底时必须设为实际服务地址；视频号无 Cobalt 兜底，不设不影响视频号 |
+| `JUSTONEAPI_TOKEN` | Just One API 的密钥。TikHub（及 Cobalt 平台上的 Cobalt）失败后的下一级数据源，按次计费 | 空字符串 `""`（留空则该数据源整体不出现：链上不尝试，也不发任何请求） | 想在 TikHub 失败后自动切到 Just One API 时必须设；生产用专用 token，不要复用探测期的临时 token |
+| `JUSTONEAPI_API_BASE` | Just One API 的 API 基址 | `https://api.justoneapi.com` | 一般不用改；只用自建/代理时才设 |
+| `JUSTONEAPI_TIMEOUT_SECONDS` | Just One API 单次请求的超时（秒）。每个平台一次成功只打一枪，不叠打 | `25` | 一般不用改；上游较慢需要放宽超时时才设 |
 | `HTTP_TIMEOUT_SECONDS` | 服务访问上游 HTTP 的超时（秒） | `30` | 一般不用改；上游较慢需要放宽超时时才设 |
 | `TRANSLATION_ENABLED` | 是否翻译视频描述（影响响应里的 `translated_description`） | `True` | 不需要翻译时设为 `false`；为 True 且请求 `translate=true` 时还需配置 `OPENAI_API_KEY` |
 | `OPENAI_API_KEY` | 翻译用的 OpenAI 兼容接口密钥 | 空字符串 `""` | 需要翻译描述时必须设；留空则即使 `TRANSLATION_ENABLED=True` 也不会翻译 |
@@ -288,7 +292,7 @@ audio 模式不代表 MP3 或其他容器格式，服务不做转码；请使用
 | `data.collect_count` | int \| null | 收藏数 |
 | `data.create_time` | string \| null | 创建时间（ISO 8601） |
 | `data.publish_time` | string \| null | 发布时间 |
-| `data.provider` | string \| null | 实际使用的数据源：`tikhub` 或 `cobalt` |
+| `data.provider` | string \| null | 实际使用的数据源：`tikhub`、`cobalt`、`justoneapi`（X Space 恒为 `ytdlp`） |
 | `error` | string \| null | 错误信息（`success=false` 时） |
 
 `data.variants` 数组元素的字段（仅 X（Twitter）video 模式透出）：
@@ -345,17 +349,20 @@ curl http://localhost:8000/api/platforms \
   "platforms": {
     "pinterest": ["cobalt"],
     "facebook": ["cobalt"],
-    "tiktok": ["tikhub", "cobalt"],
-    "instagram": ["tikhub", "cobalt"],
-    "xiaohongshu": ["tikhub"],
-    "youtube": ["tikhub", "cobalt"],
-    "douyin": ["tikhub"],
-    "kuaishou": ["tikhub"],
-    "wechat_channels": ["tikhub"],
-    "twitter": ["tikhub", "cobalt"]
+    "tiktok": ["tikhub", "cobalt", "justoneapi"],
+    "instagram": ["tikhub", "cobalt", "justoneapi"],
+    "xiaohongshu": ["tikhub", "justoneapi"],
+    "youtube": ["tikhub", "cobalt", "justoneapi"],
+    "douyin": ["tikhub", "justoneapi"],
+    "kuaishou": ["tikhub", "justoneapi"],
+    "wechat_channels": ["tikhub", "justoneapi"],
+    "twitter": ["tikhub", "cobalt", "justoneapi"],
+    "twitter_space": ["ytdlp"]
   }
 }
 ```
+
+> 上例是 `JUSTONEAPI_TOKEN` 非空时的链。token 留空时所有 `justoneapi` 项消失（其余项不变），此时抖音/快手/小红书/视频号只剩 `tikhub`。
 
 ---
 
@@ -404,7 +411,12 @@ curl http://localhost:8000/api/stream/wechat_channels/AOzokRxWHz \
 
 ### GET /api/stream/wechat_channels/{sph_code}/direct
 
-返回视频号的「直连信息」：解密后的文件头 + CDN 直链 + 可靠总长度。视频号源 mp4 只有前 131072 字节加密、之后全是明文，且 CDN 直链不绑定请求方 IP，因此客户端可以拿直链自己拉身子、与文件头拼接，绕开「下游到本服务」这一跳的带宽瓶颈。服务端只向 CDN 发一次有界请求（`Range: bytes=0-131071`），瞬时完成，不占流式并发槽。
+返回视频号的「直连信息」：文件头 + 直链地址 + 可靠总长度。**返回形状取决于这次命中的是哪个上游**：
+
+- **TikHub 命中**：视频号源 mp4 只有前 131072 字节加密、之后全是明文，且 CDN 直链不绑定请求方 IP，因此客户端可以拿直链自己拉身子、与文件头拼接，绕开「下游到本服务」这一跳的带宽瓶颈。`cdn_url` 是 TikHub 的 CDN 直链。
+- **Just One API 命中**：上游给的**本来就是明文** mp4（无需解密），但对方直链是第三方 host、时效与可达性未证，因此**不回传对方直链**——`cdn_url` 是本服务的 `/api/stream/wechat_channels/{sph_code}`（相对路径，客户端需拼上服务基址并带 `X-API-Key`），文件头也已是明文。
+
+服务端只向上游发一次有界请求（`Range: bytes=0-131071`），瞬时完成，不占流式并发槽。
 
 #### 请求
 
@@ -435,18 +447,19 @@ HTTP 200，`Content-Type: application/json`：
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `sph_code` | string | 回显请求中的短码 |
-| `cdn_url` | string | CDN 直链（带时效 token）。**不得写入日志或持久化缓存**；过期后重新调用本端点换新 |
-| `content_length` | int | 文件总字节数，取自 CDN `Content-Range` 的完整长度 |
-| `encrypted_head_bytes` | int | 加密区长度。正常为 131072；文件短于 131072 字节时等于文件长度，此时 `head_b64` 解码后就是整个文件 |
-| `head_b64` | string | 解密后的前 `encrypted_head_bytes` 字节，标准 base64 |
+| `cdn_url` | string | **TikHub 命中**：CDN 直链（带时效 token），客户端可直连拉取；该直链**不得写入日志或持久化缓存**，过期后重新调用本端点换新。**Just One API 命中**：本服务的 `/api/stream/wechat_channels/{sph_code}`（相对路径，不是对方直链） |
+| `content_length` | int | 文件总字节数，取自上游 `Content-Range` 的完整长度 |
+| `encrypted_head_bytes` | int | 文件头字节数。正常为 131072；文件短于 131072 字节时等于文件长度，此时 `head_b64` 解码后就是整个文件。TikHub 命中时这一段原本是加密区（服务端已解密回传）；Just One API 命中时文件本来就是明文，该值即头部长度、续传起点不变 |
+| `head_b64` | string | 明文的前 `encrypted_head_bytes` 字节，标准 base64（两种上游都是明文：TikHub 命中时由服务端解密后回传） |
 | `content_type` | string | 恒为 `video/mp4` |
 
 #### 客户端拼接协议
 
-1. 调用本端点，解 base64 得到文件头（明文）。
-2. 若 `encrypted_head_bytes >= content_length`，文件头已是整个文件，到此结束、**不要再发 Range**；否则对 `cdn_url` 发 `Range: bytes=131072-`（起点即 `encrypted_head_bytes`）拉取剩余明文身子，追加到文件头之后。
-3. 连接被掐或收到 401/403/404/410（token 过期）：重新调用本端点换新 `cdn_url`，从当前已下载偏移继续 `Range` 续传。
-4. 收尾校验：总字节数必须等于 `content_length`，不等则按上一条续传或重拉。
+1. 调用本端点，解 base64 得到文件头（明文；两种上游都是明文）。
+2. 若 `encrypted_head_bytes >= content_length`，文件头已是整个文件，到此结束、**不要再发 Range**；否则对 `cdn_url` 发 `Range: bytes=131072-`（起点即 `encrypted_head_bytes`）拉取剩余身子，追加到文件头之后。
+3. **Just One API 命中时**，`cdn_url` 指向的是本服务：`Range` 请发给本服务（相对路径先拼上服务基址，并带 `X-API-Key`），**不要**对第三方 host 发 `Range`。
+4. 连接被掐或收到 401/403/404/410（TikHub 直链 token 过期）：重新调用本端点换新 `cdn_url`，从当前已下载偏移继续 `Range` 续传。
+5. 收尾校验：总字节数必须等于 `content_length`，不等则按上一条续传或重拉。
 
 #### 失败响应 / HTTP 状态码
 
@@ -455,7 +468,7 @@ HTTP 200，`Content-Type: application/json`：
 | 200 | 成功 |
 | 400 | `sph_code` 不合法 |
 | 401 | API Key 无效或缺失 |
-| 502 | TikHub 失败、CDN 异常（含无法取得文件完整长度）；文件头请求遇到直链过期会自行换链重试一次，仍失败才回 502。非过期类 CDN 异常（200 忽略 Range、Content-Range 越窗、正文截断）沿用流式端点的同窗重试，最多 3 次同一有界请求后回 502 |
+| 502 | TikHub 与 Just One API 均失败，或上游异常（含无法取得文件完整长度）；文件头请求遇到直链过期会自行换链重试一次，仍失败才回 502。非过期类上游异常（200 忽略 Range、Content-Range 越窗、正文截断）沿用流式端点的同窗重试，最多 3 次同一有界请求后回 502 |
 
 ---
 
