@@ -4,7 +4,7 @@
 取数由 TikHubProvider 的多级降级链负责（app_v2 → web_v3），本服务只提供
 schema 自适应解析器：一个 `_parse_response` 通吃三种响应结构。
 
-响应结构落点（详见 docs/xiaohongshu-fallback-design.md §2/§8）::
+响应结构落点（三种结构都在下面，解析器逐个尝试）::
 
     app_v2:  data.data[0].video_info_v2.media.stream.h264[].master_url   (snake)
     web_v3:  data.data.items[0].noteCard.video.media.stream.h264[].masterUrl  (camel)

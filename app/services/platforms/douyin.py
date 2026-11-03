@@ -51,7 +51,7 @@ class DouyinService(BasePlatformService):
         """
         从 TikHub 响应中定位「作品详情」对象（schema 自适应）。
 
-        实测三种响应结构（见 docs/douyin-fallback-design.md §12）：
+        实测三种响应结构：
         - web v1/v2 与 app v3：详情在 ``data.aweme_detail``
         - hybrid/video_data：详情字段直接铺在 ``data`` 上（无 aweme_detail 包裹）
 

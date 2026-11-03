@@ -29,7 +29,7 @@
 **Context:** 待抖音三级链在生产跑稳、provider 内「取→分类→解析→重试」的接口形状固化后再泛化，避免为单平台需求过早做通用抽象。
 **Effort:** M (human ~0.5 day / CC ~20 min)
 **Depends on:** 抖音多级降级机制上线并稳定后。
-**Status:** 已被 `docs/handoff-generic-fallback-engine.md`（通用降级引擎）取代，TikTok 一并纳入全平台多级降级。
+**Status:** 已被通用降级引擎（见 `docs/architecture.md`）取代，TikTok 一并纳入全平台多级降级。
 
 ## P3: 通用降级引擎命中后的双重解析
 
@@ -61,6 +61,6 @@
 **Why:** 当前每平台 2-3 级链已覆盖主路径，但这些端点能进一步加深降级层数，单端点连环下线时更鲁棒。
 **Pros:** 降级链更深，单点故障容忍度更高。
 **Cons:** 各需对应 service `_parse_response` 自适应新 schema + fixtures + 测试；收益递减（现有链已够用）。
-**Context:** 端点路径/参数已在 `docs/generic-fallback-engine.md` §7 记录；实测样本在 `/tmp/hapi-blobs/probe/`（临时，需重新探测）。入链前必须用真实链接实测 schema，别凭名字猜。
+**Context:** 端点路径/参数见 `app/services/providers/tikhub.py` 各链常量旁的注释（已在链内的端点见 `docs/architecture.md`）；实测样本在 `/tmp/hapi-blobs/probe/`（临时，需重新探测）。入链前必须用真实链接实测 schema，别凭名字猜。
 **Effort:** M (human ~1 day / CC ~40 min，全部) — 可按平台拆分按需做。
 **Depends on:** 无。
