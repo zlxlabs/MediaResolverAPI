@@ -10,7 +10,7 @@
 
 ### 音频解析例外
 
-`POST /api/resolve` 可传 `download_mode: "audio"`；该模式不表示服务会转码为 MP3，媒体格式以 `data.media_type` 为准。抖音、快手、小红书和视频号没有音频路径，会返回 HTTP 400（错误以 `audio_not_available` 开头）；其它平台的音频供应商路由以 `/docs` 描述为准。`audio` 与 `quality` 同时使用会返回 HTTP 422。
+`POST /api/resolve` 可传 `download_mode: "audio"`；该模式不表示服务会转码为 MP3，媒体格式以 `data.media_type` 为准。抖音、快手、小红书和视频号没有音频路径，会返回 HTTP 400（错误以 `audio_not_available` 开头）。本文只列出这项无音频路径的例外；通用请求与响应字段见 `/docs`。`audio` 与 `quality` 同时使用会返回 HTTP 422。
 
 ## 视频号下载
 
