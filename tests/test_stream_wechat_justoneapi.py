@@ -10,6 +10,8 @@
   test_stream_wechat_channels.py，media 无 decrypt 键时默认走 XOR）；
 - E2E：POST /api/resolve（TikHub 全败、JOA basic-info 命中）→ video_url 仍指
   本服务流端点 → GET 该地址（带 key、Range 0-15）得到 ftyp 且未走 XOR。
+  同一 sph 的 resolve+stream 只打 basic-info + download 两枪（objectId 从
+  VideoCache 复用，不重复付 basic-info）。
   只打桩最外层 HTTP（TikHub _call_endpoint / JOA _get / CDN），流式层真实走
   wechat_channels_media 降级模块。
 """
@@ -25,6 +27,7 @@ import app.api.stream as stream_mod
 from app.core.config import settings
 from app.core.database import get_db
 from app.main import app
+from app.models.video_cache import VideoCache
 from app.services.providers.base import ProviderError
 from app.services.providers.justoneapi import JustOneApiProvider
 from app.services.providers.tikhub import TikHubProvider
@@ -150,6 +153,41 @@ async def test_media_tikhub_fail_falls_back_to_joa(monkeypatch, joa_http, joa_do
     ]
     assert joa_http[0]["params"]["shareUrl"] == SHARE_URL
     assert joa_http[1]["params"]["objectId"] == "14998022876670594427"
+
+
+async def test_media_joa_reuses_cached_object_id(monkeypatch, joa_http, joa_down, db):
+    """resolve 已落库的 objectId 必须被流层复用：只补 download 一枪。
+
+    同一 sph 先 resolve（basic-info）再取流（download）= ¥0.60；重复打 basic-info
+    就是 ¥0.90。
+    """
+
+    async def tikhub_down(self, sph_code):
+        raise ProviderError("stub: tikhub media down")
+
+    monkeypatch.setattr(TikHubProvider, "fetch_wechat_channels_media", tikhub_down)
+    db.add(
+        VideoCache(
+            platform="wechat_channels",
+            video_id="14998022876670594427",
+            download_mode="video",
+            quality="",
+            video_data={
+                "video_id": "14998022876670594427",
+                "video_url": f"/api/stream/wechat_channels/{SPH_CODE}",
+            },
+            provider="justoneapi",
+        )
+    )
+    db.commit()
+
+    media = await fetch_wechat_channels_media(SPH_CODE)
+    assert media["decrypt"] is False
+    assert media["full_url"] == JOA_DOWNLOAD_URL
+    assert [c["path"] for c in joa_http] == [
+        "/api/weixin-channels/get-video-download-url/v1",
+    ]
+    assert joa_http[0]["params"]["objectId"] == "14998022876670594427"
 
 
 async def test_media_empty_token_never_calls_joa(monkeypatch, joa_http):
@@ -306,9 +344,8 @@ def test_resolve_then_stream_plaintext_e2e(
         resolve_mod._video_resolver = None
         settings.JUSTONEAPI_TOKEN = original
 
-    # resolve 1 枪 basic-info；stream 媒体 basic-info + download 两枪。
+    # resolve 1 枪 basic-info；流层复用已落库的 objectId，只补 1 枪 download。
     assert [c["path"] for c in joa_http] == [
-        "/api/weixin-channels/get-video-basic-info/v1",
         "/api/weixin-channels/get-video-basic-info/v1",
         "/api/weixin-channels/get-video-download-url/v1",
     ]

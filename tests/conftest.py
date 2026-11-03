@@ -10,6 +10,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.core import database
 from app.core.database import Base, get_db
 from app.core.config import settings
 
@@ -28,9 +29,16 @@ _engine = create_engine(
 
 
 @pytest.fixture(autouse=True)
-def setup_db():
+def setup_db(monkeypatch):
     """Create tables before each test, drop after."""
     Base.metadata.create_all(bind=_engine)
+    # 服务层自开的 SessionLocal 必须落在测试库上：生产里 resolve 写缓存与 stream
+    # 读缓存是同一个库，测试里 get_db 被 override 了，不对齐就读不到缓存行。
+    monkeypatch.setattr(
+        database,
+        "SessionLocal",
+        sessionmaker(autocommit=False, autoflush=False, bind=_engine),
+    )
     yield
     Base.metadata.drop_all(bind=_engine)
 
