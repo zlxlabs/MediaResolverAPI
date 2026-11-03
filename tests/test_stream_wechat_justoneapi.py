@@ -16,6 +16,7 @@
   wechat_channels_media 降级模块。
 """
 
+import base64
 import json
 from pathlib import Path
 
@@ -301,6 +302,29 @@ def test_stream_joa_plaintext_suffix_range(
     assert resp.headers["content-range"] == f"bytes {PLAIN_TOTAL - 16}-{PLAIN_TOTAL - 1}/{PLAIN_TOTAL}"
     assert resp.content == PLAIN_HEAD[-16:]
     assert xor_recorder == []
+
+
+def test_direct_joa_plaintext_returns_service_url(
+    stream_client, joa_stream_harness, xor_recorder
+):
+    """/direct 对 Just One API 明文媒体：cdn_url 是本服务流地址，不回传对方直链。
+
+    客户端门口仍是本服务：head 仍是明文（零 XOR），但 cdn_url 不能是 JOA 的
+    download_url（对方 IP:port 直链）。
+    """
+    resp = stream_client.get(
+        f"/api/stream/wechat_channels/{SPH_CODE}/direct", headers=AUTH
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["cdn_url"] == f"/api/stream/wechat_channels/{SPH_CODE}"
+    assert "media.example.test" not in resp.text
+    assert "justoneapi" not in resp.text
+    assert "weixin-channels" not in resp.text
+    head = base64.b64decode(body["head_b64"])
+    assert head[:16] == PLAIN_HEAD[:16]
+    assert head[4:8] == b"ftyp"
+    assert xor_recorder == []  # 明文媒体零 XOR
 
 
 # ----------------------------- E2E：resolve → stream（E2E-Assertion） -----------------------------

@@ -48,7 +48,7 @@ TikHub 拿不到可播放直链时，改问 Just One API，客户端仍然从 `P
      - 小红书 v6：`video_info_v2.media.stream.h264[].master_url` 与现网 app_v2 同形，走 `XiaohongshuService`。
      - 快手：JOA 返回 snake_case `photos[].streamManifest` + `main_mv_urls`；现网解析器只认 camelCase `data.photo.manifest`。**只在 JustOneAPI 适配器里把 `photos[0].streamManifest` 改写成 `manifest`**，不顺手改 TikHub 快手 app 链。
      - YouTube：`videos.items[].url`（googlevideo）；Instagram：`video_url` / `video_versions`；Twitter：`media.video[].variants` mp4。各走对应 service 或最小适配。
-  7. 视频号客户端契约不变：`data.video_url` 仍是本服务 `/api/stream/wechat_channels/{sph_code}`，必须带 `X-API-Key`。Just One API 的 `download_url` 实测是已解密 mp4（`ftypisom`，`Content-Type: video/mp4`，Range 206），宿主为他们的 `IP:port/media/weixin-channels`，**不回传给客户端**。流式层在 justoneapi 命中时改为拉这条明文 URL，跳过 XOR。TikHub 命中时仍走 `full_url` + `decode_key`。
+  7. 视频号客户端契约不变：`data.video_url` 仍是本服务 `/api/stream/wechat_channels/{sph_code}`，必须带 `X-API-Key`。Just One API 的 `download_url` 实测是已解密 mp4（`ftypisom`，`Content-Type: video/mp4`，Range 206），宿主为他们的 `IP:port/media/weixin-channels`，**不回传给客户端**。流式层在 justoneapi 命中时改为拉这条明文 URL，跳过 XOR。TikHub 命中时仍走 `full_url` + `decode_key`。`/direct` 端点在 justoneapi 命中时 `cdn_url` 也回本服务流地址（不回传对方直链），文件头仍是明文。
   8. `data.provider` 增加 `justoneapi`。缓存命中继续跳过上游，避免同一条视频付两次。
   9. 终态：Just One API 对「有 Cobalt 的平台」不得抛 `TerminalError`（与现网「误判终态会跳过 Cobalt」同一条）。抖音 / 小红书若能稳定识别私密/图文，才允许终态短路；识别规则未探测前当 retryable，链走完再失败。
 

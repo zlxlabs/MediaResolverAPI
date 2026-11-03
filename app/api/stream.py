@@ -28,11 +28,7 @@ from ..services.providers.ytdlp import (
     redact_playlist_url,
 )
 from ..services.wechat_channels_media import fetch_wechat_channels_media as _fetch_media
-from ..services.wechat_channels_crypto import (
-    KEYSTREAM_SIZE,
-    generate_keystream,
-    xor_chunk,
-)
+from ..services.wechat_channels_crypto import KEYSTREAM_SIZE, generate_keystream, xor_chunk
 
 router = APIRouter(dependencies=[Depends(verify_api_key)])
 
@@ -1185,7 +1181,8 @@ async def stream_wechat_channels_direct(sph_code: str) -> WechatChannelsDirectIn
     """向 CDN 发有界请求 ``bytes=0-131071`` 读文件头（非过期异常沿用同窗最多 3 次重试），解密后与直链一起回给客户端。
 
     不占流式并发槽；文件头请求遇到 URL 过期状态时重新取一次 media 再重读，
-    ``cdn_url`` 回传最终成功那一对的 ``full_url``。
+    ``cdn_url`` 回传最终成功那一对的 ``full_url``；Just One API 明文媒体不回传
+    对方直链，改回本服务流地址。
     """
     if _SPH_CODE_PATTERN.fullmatch(sph_code) is None:
         raise _json_http_error(400, "Invalid WeChat Channels share code")
@@ -1243,9 +1240,11 @@ async def stream_wechat_channels_direct(sph_code: str) -> WechatChannelsDirectIn
         raise _json_http_error(502, "CDN response missing complete length")
     media = state["media"]
     head = xor_chunk(raw, media["decode_key"], 0) if media.get("decrypt", True) else raw
+    # Just One API 明文媒体不回传对方直链：客户端门口仍是本服务流地址。
+    cdn_url = media["full_url"] if media.get("decrypt", True) else f"/api/stream/wechat_channels/{sph_code}"
     return WechatChannelsDirectInfo(
         sph_code=sph_code,
-        cdn_url=media["full_url"],
+        cdn_url=cdn_url,
         content_length=total,
         encrypted_head_bytes=len(head),
         head_b64=base64.b64encode(head).decode("ascii"),
