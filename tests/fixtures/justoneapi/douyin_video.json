@@ -1,0 +1,19 @@
+{
+  "code": 0,
+  "data": {
+    "aweme_detail": {
+      "aweme_id": "7477059950577978636",
+      "desc": "测试视频：TikHub 失败后走 Just One API",
+      "item_title": "测试视频：TikHub 失败后走 Just One API",
+      "author": {"nickname": "示例作者", "unique_id": "example_author"},
+      "video": {
+        "play_addr": {"url_list": ["https://cdn.example.test/douyin/video.mp4"], "width": 720, "height": 1280},
+        "bit_rate": [
+          {"play_addr": {"url_list": ["https://cdn.example.test/douyin/video.mp4"], "width": 720, "height": 1280}, "bit_rate": 2000000, "gear_name": "adapt_720"}
+        ]
+      },
+      "statistics": {"play_count": 100, "digg_count": 10, "comment_count": 5, "share_count": 2, "collect_count": 1},
+      "create_time": 1690000000
+    }
+  }
+}

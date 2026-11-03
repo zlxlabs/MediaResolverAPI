@@ -1,0 +1,21 @@
+{
+  "code": 0,
+  "data": {
+    "note_id": "65f2d1a3000000002201cb3b",
+    "type": "video",
+    "title": "小红书测试",
+    "desc": "小红书测试视频（v6 video_info_v2 信封）",
+    "user": {"nickname": "小红书示例作者", "userid": "5ff0e6410000000001008400"},
+    "interact_info": {"liked_count": "123", "collected_count": "45", "comment_count": "6", "share_count": "7"},
+    "time": 1690000000000,
+    "video_info_v2": {
+      "media": {
+        "stream": {
+          "h264": [
+            {"master_url": "https://sns-video.example.test/xhs/note.mp4", "width": 720, "height": 1280, "stream_desc": "main", "bit_rate": 1500000}
+          ]
+        }
+      }
+    }
+  }
+}

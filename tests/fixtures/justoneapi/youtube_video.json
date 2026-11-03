@@ -1,0 +1,16 @@
+{
+  "code": 0,
+  "data": {
+    "id": "dQw4w9WgXcQ",
+    "title": "YouTube test video",
+    "description": "googlevideo items envelope",
+    "channel": {"name": "yt author", "id": "UC123"},
+    "viewCount": "1000",
+    "likeCount": "100",
+    "videos": {
+      "items": [
+        {"url": "https://cdn.example.test/youtube/videoplayback_720.mp4", "width": 1280, "height": 720, "quality": "hd720", "hasAudio": true}
+      ]
+    }
+  }
+}

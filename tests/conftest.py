@@ -10,6 +10,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.core import database
 from app.core.database import Base, get_db
 from app.core.config import settings
 
@@ -28,9 +29,16 @@ _engine = create_engine(
 
 
 @pytest.fixture(autouse=True)
-def setup_db():
+def setup_db(monkeypatch):
     """Create tables before each test, drop after."""
     Base.metadata.create_all(bind=_engine)
+    # 服务层自开的 SessionLocal 必须落在测试库上：生产里 resolve 写缓存与 stream
+    # 读缓存是同一个库，测试里 get_db 被 override 了，不对齐就读不到缓存行。
+    monkeypatch.setattr(
+        database,
+        "SessionLocal",
+        sessionmaker(autocommit=False, autoflush=False, bind=_engine),
+    )
     yield
     Base.metadata.drop_all(bind=_engine)
 
@@ -42,6 +50,30 @@ def test_tikhub_api_key():
     settings.TIKHUB_API_KEY = "test-tikhub-api-key"
     yield
     settings.TIKHUB_API_KEY = original_key
+
+
+@pytest.fixture(autouse=True)
+def test_justoneapi_token_empty():
+    """worktree 会软链主仓 .env：必须把 JOA token 置空，防止链上意外打真上游计费。
+
+    JOA 相关测试自行在用例内设置非空 token 并负责还原。
+    """
+    original = settings.JUSTONEAPI_TOKEN
+    settings.JUSTONEAPI_TOKEN = ""
+    yield
+    settings.JUSTONEAPI_TOKEN = original
+
+
+JOA_TEST_TOKEN = "test-joa-token-abcdef"
+
+
+@pytest.fixture()
+def justoneapi_token():
+    """用例内启用非空 JOA token 并保证还原。"""
+    original = settings.JUSTONEAPI_TOKEN
+    settings.JUSTONEAPI_TOKEN = JOA_TEST_TOKEN
+    yield JOA_TEST_TOKEN
+    settings.JUSTONEAPI_TOKEN = original
 
 
 @pytest.fixture(autouse=True)

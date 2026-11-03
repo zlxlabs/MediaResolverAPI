@@ -16,6 +16,7 @@ from .base import (
 )
 from .tikhub import TikHubProvider
 from .cobalt import CobaltProvider
+from .justoneapi import JustOneApiProvider
 
 __all__ = [
     "BaseProvider",
@@ -26,4 +27,5 @@ __all__ = [
     "XhsTerminalError",
     "TikHubProvider",
     "CobaltProvider",
+    "JustOneApiProvider",
 ]

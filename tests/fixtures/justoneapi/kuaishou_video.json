@@ -1,0 +1,21 @@
+{
+  "code": 0,
+  "data": {
+    "photos": [
+      {
+        "photo_id": "3xfdpkqyzabcdef",
+        "caption": "快手测试视频（streamManifest snake_case 信封）",
+        "user_name": "快手示例作者",
+        "timestamp": 1690000000000,
+        "streamManifest": {
+          "adaptationSet": [
+            {"representation": [
+              {"url": "https://cdn.example.test/kuaishou/video.mp4", "width": 720, "height": 1280, "qualityType": "pristine", "bitrate": 2500000}
+            ]}
+          ]
+        },
+        "main_mv_urls": [{"url": "https://cdn.example.test/kuaishou/mv.mp4"}]
+      }
+    ]
+  }
+}

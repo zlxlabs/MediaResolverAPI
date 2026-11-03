@@ -1,0 +1,12 @@
+{
+  "code": 0,
+  "data": {
+    "id": "3174445930451205671",
+    "code": "C0abcdefghIj",
+    "video_url": "https://cdn.example.test/instagram/video.mp4",
+    "video_versions": [{"url": "https://cdn.example.test/instagram/video.mp4", "width": 720}],
+    "username": "ig_author",
+    "user_id": "1234567",
+    "taken_at": 1690000000
+  }
+}

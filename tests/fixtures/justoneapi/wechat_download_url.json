@@ -1,0 +1,9 @@
+{
+  "code": 0,
+  "data": {
+    "objectId": "14998022876670594427",
+    "download_url": "https://media.example.test/weixin-channels/plaintext.mp4",
+    "content_type": "video/mp4",
+    "file_size": 456301568
+  }
+}

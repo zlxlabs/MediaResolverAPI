@@ -1,0 +1,19 @@
+{
+  "code": 0,
+  "data": {
+    "aweme_id": "7267439653153003782",
+    "desc": "TikTok test post (official PascalCase video fields)",
+    "author": {"nickname": "tt author", "unique_id": "ttauthor"},
+    "statistics": {"play_count": 1000, "digg_count": 100, "comment_count": 10, "share_count": 3, "collect_count": 4},
+    "create_time": 1690000000,
+    "video": {
+      "PlayAddrStruct": {"UrlList": ["https://cdn.example.test/tiktok/video.mp4"]},
+      "bitrateInfo": [
+        {"PlayAddr": {"UrlList": ["https://cdn.example.test/tiktok/h264_720.mp4"], "Width": 720, "Height": 1280}, "BandWidth": 1200000, "GearName": "adapt_720"},
+        {"PlayAddr": {"UrlList": ["https://cdn.example.test/tiktok/h264_1080.mp4"], "Width": 1080, "Height": 1920}, "BandWidth": 2400000, "GearName": "adapt_1080"}
+      ],
+      "width": 1080,
+      "height": 1920
+    }
+  }
+}

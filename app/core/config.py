@@ -73,6 +73,13 @@ class Settings(BaseSettings):
     COBALT_ENABLED: bool = True
     COBALT_TIMEOUT_SECONDS: int = 60
 
+    # Just One API（按次计费备源，TikHub/Cobalt 失败后才触发）。
+    # token 留空 = 整源不存在：默认链与 PROVIDER_PRIORITY 覆盖链上都不出现，不发请求。
+    JUSTONEAPI_API_BASE: str = "https://api.justoneapi.com"
+    JUSTONEAPI_TOKEN: str = ""
+    # 单次请求超时（秒）。JOA 每平台一次成功只打一枪，超时独立预算，不套用 HTTPClient 重试。
+    JUSTONEAPI_TIMEOUT_SECONDS: int = 25
+
     # OpenAI (translation)
     OPENAI_API_KEY: str = ""
     OPENAI_API_BASE: str = "https://api.openai.com/v1"
@@ -118,7 +125,8 @@ class Settings(BaseSettings):
 
     # Provider priority per platform (optional override)
     # Format: "provider1,provider2" e.g. "cobalt" or "tikhub,cobalt"
-    # Supported providers: tikhub, cobalt
+    # Supported providers: tikhub, cobalt, justoneapi
+    # justoneapi 仅在 JUSTONEAPI_TOKEN 非空时生效，否则该源被忽略。
     PROVIDER_PRIORITY_TIKTOK: str = ""
     PROVIDER_PRIORITY_INSTAGRAM: str = ""
     PROVIDER_PRIORITY_XIAOHONGSHU: str = ""

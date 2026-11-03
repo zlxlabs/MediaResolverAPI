@@ -1,0 +1,26 @@
+{
+  "code": 0,
+  "data": {
+    "id": "1700000000000000000",
+    "text": "Twitter test post",
+    "created_at": "Wed Nov 01 00:00:00 +0000 2023",
+    "author": {"name": "tw author", "screen_name": "twauthor"},
+    "views": "500",
+    "likes": "50",
+    "replies": "5",
+    "retweets": "3",
+    "bookmarks": "1",
+    "media": {
+      "video": [
+        {
+          "variants": [
+            {"type": "video", "url": "https://cdn.example.test/twitter/720x1280.mp4", "content_type": "video/mp4", "bitrate": 2000000},
+            {"type": "video", "url": "https://cdn.example.test/twitter/360x640.mp4", "content_type": "video/mp4", "bitrate": 800000}
+          ],
+          "duration_millis": 30000,
+          "original_info": {"width": 720, "height": 1280}
+        }
+      ]
+    }
+  }
+}

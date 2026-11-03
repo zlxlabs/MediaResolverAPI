@@ -23,16 +23,12 @@ from ..core.config import settings
 from .deps import verify_api_key
 from ..services import space_cache
 from ..services.providers.base import ProviderError, VideoNotFoundError
-from ..services.providers.tikhub import TikHubProvider
 from ..services.providers.ytdlp import (
     YtdlpProvider,
     redact_playlist_url,
 )
-from ..services.wechat_channels_crypto import (
-    KEYSTREAM_SIZE,
-    generate_keystream,
-    xor_chunk,
-)
+from ..services.wechat_channels_media import fetch_wechat_channels_media as _fetch_media
+from ..services.wechat_channels_crypto import KEYSTREAM_SIZE, generate_keystream, xor_chunk
 
 router = APIRouter(dependencies=[Depends(verify_api_key)])
 
@@ -422,11 +418,6 @@ async def _read_window_retry(
             continue
 
 
-async def _fetch_media(sph_code: str) -> dict:
-    provider = TikHubProvider()
-    return await provider.fetch_wechat_channels_media(sph_code)
-
-
 @asynccontextmanager
 async def _stream_slot_cm(label: str) -> AsyncIterator[None]:
     """共享并发槽：同一 stream_limiter（MAX_CONCURRENT_STREAMS 信号量）服务两个流式端点。"""
@@ -480,7 +471,8 @@ async def _iter_windows(
     """Yield decrypted bytes from fully-read windows. ``first_raw`` is already in memory."""
     window = settings.STREAM_WINDOW_BYTES
     chunk_size = settings.STREAM_CHUNK_SIZE
-    key = media["decode_key"]
+    key = media.get("decode_key")
+    decrypt = bool(media.get("decrypt", True))
     offset = start
     current = first_raw
     prefetch: Optional[asyncio.Task] = None
@@ -497,7 +489,7 @@ async def _iter_windows(
                 )
             else:
                 prefetch = None
-            decrypted = xor_chunk(current, key, offset)
+            decrypted = xor_chunk(current, key, offset) if decrypt else current
             for i in range(0, len(decrypted), chunk_size):
                 yield decrypted[i : i + chunk_size]
             if prefetch is None:
@@ -546,10 +538,11 @@ async def stream_wechat_channels(sph_code: str, request: Request):
     except ProviderError as exc:
         raise _json_http_error(502, str(exc)) from exc
 
-    try:
-        generate_keystream(media["decode_key"])
-    except (TypeError, ValueError) as exc:
-        raise _json_http_error(502, "Invalid decode_key") from exc
+    if media.get("decrypt", True):
+        try:
+            generate_keystream(media["decode_key"])
+        except (TypeError, ValueError) as exc:
+            raise _json_http_error(502, "Invalid decode_key") from exc
 
     range_h = request.headers.get("range")
     requested_start, requested_end, is_partial = parse_byte_range(range_h)
@@ -1188,7 +1181,8 @@ async def stream_wechat_channels_direct(sph_code: str) -> WechatChannelsDirectIn
     """向 CDN 发有界请求 ``bytes=0-131071`` 读文件头（非过期异常沿用同窗最多 3 次重试），解密后与直链一起回给客户端。
 
     不占流式并发槽；文件头请求遇到 URL 过期状态时重新取一次 media 再重读，
-    ``cdn_url`` 回传最终成功那一对的 ``full_url``。
+    ``cdn_url`` 回传最终成功那一对的 ``full_url``；Just One API 明文媒体不回传
+    对方直链，改回本服务流地址。
     """
     if _SPH_CODE_PATTERN.fullmatch(sph_code) is None:
         raise _json_http_error(400, "Invalid WeChat Channels share code")
@@ -1196,10 +1190,11 @@ async def stream_wechat_channels_direct(sph_code: str) -> WechatChannelsDirectIn
         media = await _fetch_media(sph_code)
     except ProviderError as exc:
         raise _json_http_error(502, str(exc)) from exc
-    try:
-        generate_keystream(media["decode_key"])
-    except (TypeError, ValueError) as exc:
-        raise _json_http_error(502, "Invalid decode_key") from exc
+    if media.get("decrypt", True):
+        try:
+            generate_keystream(media["decode_key"])
+        except (TypeError, ValueError) as exc:
+            raise _json_http_error(502, "Invalid decode_key") from exc
 
     state = {"budget": _REQUEST_RETRY_BUDGET, "refreshed": False, "media": media}
 
@@ -1228,7 +1223,8 @@ async def stream_wechat_channels_direct(sph_code: str) -> WechatChannelsDirectIn
             except ProviderError as fetch_exc:
                 raise _json_http_error(502, str(fetch_exc)) from fetch_exc
             try:
-                generate_keystream(state["media"]["decode_key"])
+                if state["media"].get("decrypt", True):
+                    generate_keystream(state["media"]["decode_key"])
             except (TypeError, ValueError) as exc:
                 raise _json_http_error(502, "Invalid decode_key") from exc
             try:
@@ -1243,10 +1239,12 @@ async def stream_wechat_channels_direct(sph_code: str) -> WechatChannelsDirectIn
     if total is None:
         raise _json_http_error(502, "CDN response missing complete length")
     media = state["media"]
-    head = xor_chunk(raw, media["decode_key"], 0)
+    head = xor_chunk(raw, media["decode_key"], 0) if media.get("decrypt", True) else raw
+    # Just One API 明文媒体不回传对方直链：客户端门口仍是本服务流地址。
+    cdn_url = media["full_url"] if media.get("decrypt", True) else f"/api/stream/wechat_channels/{sph_code}"
     return WechatChannelsDirectInfo(
         sph_code=sph_code,
-        cdn_url=media["full_url"],
+        cdn_url=cdn_url,
         content_length=total,
         encrypted_head_bytes=len(head),
         head_b64=base64.b64encode(head).decode("ascii"),

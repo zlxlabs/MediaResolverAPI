@@ -16,8 +16,10 @@ from .providers import (
     TerminalError,
 )
 from .providers.base import AudioNotAvailableError
+from .providers.justoneapi import JustOneApiProvider
 from .providers.ytdlp import YtdlpProvider
 from .adapters import TikHubAdapter, CobaltAdapter
+from .adapters.justoneapi_adapter import JustOneApiAdapter
 from .platforms.base import VideoInfo
 from .platforms.twitter_space import TwitterSpaceService
 from ..core.config import settings
@@ -53,6 +55,7 @@ class VideoResolver:
         self.tikhub_provider = TikHubProvider()
         self.cobalt_provider = CobaltProvider()
         self.ytdlp_provider = YtdlpProvider()
+        self.justoneapi_provider = JustOneApiProvider()
 
         # 初始化适配器
         self.tikhub_adapter = TikHubAdapter(
@@ -60,6 +63,7 @@ class VideoResolver:
             api_base=settings.TIKHUB_API_BASE
         )
         self.cobalt_adapter = CobaltAdapter()
+        self.justoneapi_adapter = JustOneApiAdapter()
         # ytdlp 只服务 twitter_space，平台映射单条，不值得为它建独立 Adapter 类。
         self.ytdlp_service = TwitterSpaceService(api_key="", api_base="")
 
@@ -86,6 +90,14 @@ class VideoResolver:
             "cobalt": self.cobalt_provider,
             "ytdlp": self.ytdlp_provider,
         }
+        # Just One API 备源：token 未配置时整源不存在——默认链与 PROVIDER_PRIORITY
+        # 覆盖链上都不出现，也不发任何请求（provider 的 fetch 在无 token 时同样拒绝）。
+        if settings.JUSTONEAPI_TOKEN:
+            provider_map["justoneapi"] = self.justoneapi_provider
+        joa = provider_map.get("justoneapi")
+
+        def with_joa(*providers: BaseProvider) -> List[BaseProvider]:
+            return list(providers) + ([joa] if joa else [])
 
         # 默认配置
         default_chains = {
@@ -93,21 +105,21 @@ class VideoResolver:
             "pinterest": [self.cobalt_provider],
             "facebook": [self.cobalt_provider],
 
-            # 其他平台优先使用 TikHub，失败后降级到 Cobalt
-            "tiktok": [self.tikhub_provider, self.cobalt_provider],
-            "instagram": [self.tikhub_provider, self.cobalt_provider],
-            # 小红书：Cobalt 实测不支持(link.invalid)，移除无效兜底，走 tikhub 单 provider
+            # 其他平台优先使用 TikHub，失败后降级到 Cobalt，再降级到 Just One API
+            "tiktok": with_joa(self.tikhub_provider, self.cobalt_provider),
+            "instagram": with_joa(self.tikhub_provider, self.cobalt_provider),
+            # 小红书：Cobalt 实测不支持(link.invalid)，移除无效兑底，走 tikhub → justoneapi
             # (tikhub 内部已有 app_v2 → web_v3 多级降级)
-            "xiaohongshu": [self.tikhub_provider],
-            "youtube": [self.tikhub_provider, self.cobalt_provider],
-            "twitter": [self.tikhub_provider, self.cobalt_provider],
+            "xiaohongshu": with_joa(self.tikhub_provider),
+            "youtube": with_joa(self.tikhub_provider, self.cobalt_provider),
+            "twitter": with_joa(self.tikhub_provider, self.cobalt_provider),
             # X Space 回放：yt-dlp 单源（guest token 路径，无 cookie），无兑底。
             "twitter_space": [self.ytdlp_provider],
 
-            # 抖音和快手可能不被 Cobalt 支持，只使用 TikHub
-            "douyin": [self.tikhub_provider],
-            "kuaishou": [self.tikhub_provider],
-            "wechat_channels": [self.tikhub_provider],
+            # 抖音和快手可能不被 Cobalt 支持，走 tikhub → justoneapi
+            "douyin": with_joa(self.tikhub_provider),
+            "kuaishou": with_joa(self.tikhub_provider),
+            "wechat_channels": with_joa(self.tikhub_provider),
         }
 
         # 从配置文件读取自定义优先级并覆盖默认配置
@@ -375,6 +387,15 @@ class VideoResolver:
                     video_id,
                     original_url,
                     download_mode=download_mode,
+                )
+            elif provider_name == "justoneapi":
+                return self.justoneapi_adapter.adapt(
+                    raw_data,
+                    platform,
+                    video_id,
+                    original_url=original_url,
+                    download_mode=download_mode,
+                    quality=quality,
                 )
             elif provider_name == "ytdlp":
                 video_info = self.ytdlp_service._parse_response(
