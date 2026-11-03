@@ -7,4 +7,7 @@
 - `docs/architecture.md` 只更新开篇对接文档指针，架构正文不动。
 - 验收：`make test` 通过（696 passed）；README 60 行，坏示例与错误措辞 grep 零命中，`justoneapi` 表格标识命中，diff whitespace 检查通过。
 - 新增测试判据：无（仅文档变更）。
-- 提交与远端/PR 状态：待执行。
+- 实现提交：`1c3c58e81d637929736caddbccc227cbaf30e9b7`；已推送并创建 draft PR #62（assignee：当前用户）。
+- CI run `41597029000`：`classify_pr_paths`、`quality`、`ledger`、`gate (draft)` 为 SUCCESS；`primary` 为 SKIPPED（draft PR 跳过主审）；run 汇总为 SKIPPED。draft CI 不是完整 gate 通过。
+- 主干基线查询在派发时失败，继承红未能判定；本卡 `make test` 全通过，无新红。
+- 进度文件状态更新提交：待执行。
