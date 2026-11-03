@@ -92,27 +92,33 @@ def test_priority_override_still_wins(justoneapi_token, monkeypatch):
 
 # ----------------------------- 信封对齐（约束 9） -----------------------------
 
-ADAPTER_PLATFORM_INPUTS = {
-    "douyin": ("douyin_video", "7477059950577978636", "https://cdn.example.test/douyin/video.mp4"),
-    "kuaishou": ("kuaishou_video", "3xfdpkqyzabcdef", "https://cdn.example.test/kuaishou/video.mp4"),
-    "xiaohongshu": ("xiaohongshu_note", "65f2d1a3000000002201cb3b", "https://sns-video.example.test/xhs/note.mp4"),
-    "tiktok": ("tiktok_post", "7267439653153003782", "https://cdn.example.test/tiktok/video.mp4"),
-    "youtube": ("youtube_video", "dQw4w9WgXcQ", "https://cdn.example.test/youtube/videoplayback_720.mp4"),
-    "instagram": ("instagram_post", "C0abcdefghIj", "https://cdn.example.test/instagram/video.mp4"),
-    "twitter": ("twitter_post", "1700000000000000000", "https://cdn.example.test/twitter/720x1280.mp4"),
+# (fixture, video_id, 入站 URL, JOA 路径, 可播放直链)；视频号 video_url 为 None（本服务流端点）。
+PLATFORM_CASES = {
+    "douyin": ("douyin_video", "7477059950577978636", "https://www.douyin.com/video/7477059950577978636", "/api/douyin/get-video-detail/v2", "https://cdn.example.test/douyin/video.mp4"),
+    "kuaishou": ("kuaishou_video", "3xfdpkqyzabcdef", "https://www.kuaishou.com/short-video/3xfdpkqyzabcdef", "/api/kuaishou/get-video-detail/v2", "https://cdn.example.test/kuaishou/video.mp4"),
+    "xiaohongshu": ("xiaohongshu_note", "65f2d1a3000000002201cb3b", "https://www.xiaohongshu.com/explore/65f2d1a3000000002201cb3b", "/api/xiaohongshu/get-note-detail/v6", "https://sns-video.example.test/xhs/note.mp4"),
+    "tiktok": ("tiktok_post", "7267439653153003782", "https://www.tiktok.com/@someone/video/7267439653153003782", "/api/tiktok/get-post-detail/v1", "https://cdn.example.test/tiktok/video.mp4"),
+    "youtube": ("youtube_video", "dQw4w9WgXcQ", "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "/api/youtube/get-video-detail/v1", "https://cdn.example.test/youtube/videoplayback_720.mp4"),
+    "instagram": ("instagram_post", "C0abcdefghIj", "https://www.instagram.com/reel/C0abcdefghIj/", "/api/instagram/get-post-detail/v1", "https://cdn.example.test/instagram/video.mp4"),
+    "twitter": ("twitter_post", "1700000000000000000", "https://x.com/twauthor/status/1700000000000000000", "/api/twitter/get-post-detail/v1", "https://cdn.example.test/twitter/720x1280.mp4"),
+    "wechat_channels": ("wechat_basic_info", "", "https://weixin.qq.com/sph/AOzokRxWHz", "/api/weixin-channels/get-video-basic-info/v1", None),
 }
 
 
-@pytest.mark.parametrize("platform", sorted(ADAPTER_PLATFORM_INPUTS))
+@pytest.mark.parametrize("platform", sorted(PLATFORM_CASES))
 def test_adapter_aligns_and_picks_playable_url(platform):
-    fixture, video_id, expected_url = ADAPTER_PLATFORM_INPUTS[platform]
+    fixture, video_id, resolve_url, _joa_path, expected_url = PLATFORM_CASES[platform]
+    # original_url 喂入站 URL：视频号对齐依赖其中的 sph 短码。
     info = JustOneApiAdapter().adapt(
-        load(fixture), platform, video_id, original_url="https://upstream.test/x"
+        load(fixture), platform, video_id, original_url=resolve_url
     )
     assert info is not None
     assert info.provider == "justoneapi"
     assert info.platform == platform
-    assert info.video_url == expected_url
+    if platform == "wechat_channels":
+        assert info.video_url == "/api/stream/wechat_channels/AOzokRxWHz"
+    else:
+        assert info.video_url == expected_url
     assert info.video_id
 
 
@@ -176,50 +182,6 @@ def test_adapter_kuaishou_fails_without_stream_manifest():
 
 # ----------------------------- E2E：POST /api/resolve（约束 4/5） -----------------------------
 
-E2E_CASES = {
-    "douyin": (
-        "https://www.douyin.com/video/7477059950577978636",
-        "/api/douyin/get-video-detail/v2",
-        "https://cdn.example.test/douyin/video.mp4",
-    ),
-    "kuaishou": (
-        "https://www.kuaishou.com/short-video/3xfdpkqyzabcdef",
-        "/api/kuaishou/get-video-detail/v2",
-        "https://cdn.example.test/kuaishou/video.mp4",
-    ),
-    "xiaohongshu": (
-        "https://www.xiaohongshu.com/explore/65f2d1a3000000002201cb3b",
-        "/api/xiaohongshu/get-note-detail/v6",
-        "https://sns-video.example.test/xhs/note.mp4",
-    ),
-    "tiktok": (
-        "https://www.tiktok.com/@someone/video/7267439653153003782",
-        "/api/tiktok/get-post-detail/v1",
-        "https://cdn.example.test/tiktok/video.mp4",
-    ),
-    "youtube": (
-        "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-        "/api/youtube/get-video-detail/v1",
-        "https://cdn.example.test/youtube/videoplayback_720.mp4",
-    ),
-    "instagram": (
-        "https://www.instagram.com/reel/C0abcdefghIj/",
-        "/api/instagram/get-post-detail/v1",
-        "https://cdn.example.test/instagram/video.mp4",
-    ),
-    "twitter": (
-        "https://x.com/twauthor/status/1700000000000000000",
-        "/api/twitter/get-post-detail/v1",
-        "https://cdn.example.test/twitter/720x1280.mp4",
-    ),
-    "wechat_channels": (
-        "https://weixin.qq.com/sph/AOzokRxWHz",
-        "/api/weixin-channels/get-video-basic-info/v1",
-        None,  # 视频号 video_url 是本服务流端点，单独断言
-    ),
-}
-
-
 @pytest.fixture()
 def joa_e2e(monkeypatch, justoneapi_token):
     """TikHub/Cobalt 全败、JOA 回 fixture；重置 resolve 单例让新链生效。"""
@@ -245,9 +207,9 @@ def joa_e2e(monkeypatch, justoneapi_token):
     resolve_mod._video_resolver = None
 
 
-@pytest.mark.parametrize("platform", sorted(E2E_CASES))
+@pytest.mark.parametrize("platform", sorted(PLATFORM_CASES))
 def test_resolve_falls_back_to_justoneapi(authed_client, joa_e2e, platform):
-    url, expected_path, expected_video_url = E2E_CASES[platform]
+    fixture, _vid, url, expected_path, expected_video_url = PLATFORM_CASES[platform]
     resp = authed_client.post(
         "/api/resolve",
         json={"url": url, "translate": False, "force_refresh": True},
