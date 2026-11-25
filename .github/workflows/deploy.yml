@@ -39,6 +39,7 @@ jobs:
       healthcheck_retries: 12
       healthcheck_interval: 5
       ci_templates_ref: v2
+      environment: production   # 只允许 master；同名 secret 以 Environment 值优先（#64）
       notify_on_success: true
     secrets:                                         # 逐个显式传，最小权限(禁止 secrets: inherit)
       ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
